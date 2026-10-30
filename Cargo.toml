@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/honcho-core", "crates/honcho-app"]
+members = ["crates/honcho-core", "crates/honcho-db", "crates/honcho-app"]
 
 [workspace.package]
 version = "0.1.0"
