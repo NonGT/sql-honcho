@@ -197,7 +197,9 @@ impl Editor {
 
     pub fn line_text(&self, line: usize) -> String {
         let start = self.line_start(line);
-        self.text.slice(start..start + self.line_len(line)).to_string()
+        self.text
+            .slice(start..start + self.line_len(line))
+            .to_string()
     }
 
     pub fn line_of(&self, offset: usize) -> usize {
@@ -235,7 +237,11 @@ impl Editor {
     pub fn display_col(&self, line: usize, col: usize) -> usize {
         let start = self.line_start(line);
         let mut dcol = 0;
-        for c in self.text.slice(start..start + col.min(self.line_len(line))).chars() {
+        for c in self
+            .text
+            .slice(start..start + col.min(self.line_len(line)))
+            .chars()
+        {
             dcol = self.advance_col(dcol, c);
         }
         dcol
@@ -249,7 +255,11 @@ impl Editor {
         for (i, c) in self.text.slice(start..start + len).chars().enumerate() {
             let next = self.advance_col(cur, c);
             if next > dcol {
-                return if dcol - cur > (next - cur) / 2 { i + 1 } else { i };
+                return if dcol - cur > (next - cur) / 2 {
+                    i + 1
+                } else {
+                    i
+                };
             }
             cur = next;
         }
@@ -362,7 +372,10 @@ impl Editor {
             }
             merged.push((s, is_newest));
         }
-        self.newest = merged.iter().position(|(_, n)| *n).unwrap_or(merged.len() - 1);
+        self.newest = merged
+            .iter()
+            .position(|(_, n)| *n)
+            .unwrap_or(merged.len() - 1);
         self.selections = merged.into_iter().map(|(s, _)| s).collect();
     }
 
@@ -396,7 +409,10 @@ impl Editor {
         self.last_edit = Some(kind);
 
         let first_line = self.line_of(edits[order[0]].0.start);
-        self.dirty_from_line = Some(self.dirty_from_line.map_or(first_line, |l| l.min(first_line)));
+        self.dirty_from_line = Some(
+            self.dirty_from_line
+                .map_or(first_line, |l| l.min(first_line)),
+        );
 
         for &i in order.iter().rev() {
             let (range, text) = &edits[i];
@@ -525,7 +541,10 @@ impl Editor {
 
         if all_empty
             && is_closing(c)
-            && self.selections.iter().all(|s| self.char_at(s.head) == Some(c))
+            && self
+                .selections
+                .iter()
+                .all(|s| self.char_at(s.head) == Some(c))
         {
             self.move_each(|_, s| Selection::cursor(s.head + 1));
             self.last_edit = Some(EditKind::Insert);
@@ -539,7 +558,11 @@ impl Editor {
                     .iter()
                     .map(|s| (s.range(), format!("{c}{}{close}", self.slice(s.range()))))
                     .collect::<Vec<_>>();
-                let lens: Vec<usize> = self.selections.iter().map(|s| s.end() - s.start()).collect();
+                let lens: Vec<usize> = self
+                    .selections
+                    .iter()
+                    .map(|s| s.end() - s.start())
+                    .collect();
                 let starts = self.apply(edits, EditKind::Other);
                 for (i, s) in self.selections.iter_mut().enumerate() {
                     *s = Selection::new(starts[i] + 1, starts[i] + 1 + lens[i]);
@@ -550,9 +573,9 @@ impl Editor {
             let quote = c == close;
             let can_pair = all_empty
                 && self.selections.iter().all(|s| {
-                    let next_ok = self
-                        .char_at(s.head)
-                        .is_none_or(|n| n.is_whitespace() || matches!(n, ')' | ']' | '}' | ',' | ';'));
+                    let next_ok = self.char_at(s.head).is_none_or(|n| {
+                        n.is_whitespace() || matches!(n, ')' | ']' | '}' | ',' | ';')
+                    });
                     let prev_ok = !quote
                         || s.head == 0
                         || !self.char_at(s.head - 1).is_some_and(is_word_char);
@@ -750,7 +773,12 @@ impl Editor {
         });
     }
 
-    fn motion_target(&self, from: usize, goal: Option<usize>, motion: Motion) -> (usize, Option<usize>) {
+    fn motion_target(
+        &self,
+        from: usize,
+        goal: Option<usize>,
+        motion: Motion,
+    ) -> (usize, Option<usize>) {
         match motion {
             Motion::Left => (self.prev_grapheme(from), None),
             Motion::Right => (self.next_grapheme(from), None),
@@ -787,7 +815,10 @@ impl Editor {
         if target >= self.line_count() {
             return (self.len_chars(), Some(goal));
         }
-        (self.line_start(target) + self.col_for_display(target, goal), Some(goal))
+        (
+            self.line_start(target) + self.col_for_display(target, goal),
+            Some(goal),
+        )
     }
 
     fn next_grapheme(&self, at: usize) -> usize {
@@ -922,11 +953,17 @@ impl Editor {
         };
         let cls = class(c);
         let mut start = at;
-        while start > 0 && self.text.char(start - 1) != '\n' && class(self.text.char(start - 1)) == cls {
+        while start > 0
+            && self.text.char(start - 1) != '\n'
+            && class(self.text.char(start - 1)) == cls
+        {
             start -= 1;
         }
         let mut end = at;
-        while self.char_at(end).is_some_and(|c| c != '\n' && class(c) == cls) {
+        while self
+            .char_at(end)
+            .is_some_and(|c| c != '\n' && class(c) == cls)
+        {
             end += 1;
         }
         start..end
@@ -983,7 +1020,10 @@ impl Editor {
             let a = start + self.col_for_display(line, anchor.1);
             let h = start + self.col_for_display(line, head.1);
             // skip short lines when the box doesn't touch them, like VS Code
-            if a == h && anchor.1 != head.1 && self.display_col(line, self.line_len(line)) < anchor.1.min(head.1) {
+            if a == h
+                && anchor.1 != head.1
+                && self.display_col(line, self.line_len(line)) < anchor.1.min(head.1)
+            {
                 continue;
             }
             sels.push(Selection {
@@ -997,7 +1037,11 @@ impl Editor {
             let at = self.line_end(line);
             sels.push(Selection::cursor(at));
         }
-        let newest = if head.0 >= anchor.0 { sels.len() - 1 } else { 0 };
+        let newest = if head.0 >= anchor.0 {
+            sels.len() - 1
+        } else {
+            0
+        };
         self.set_selections(sels, newest);
     }
 
@@ -1011,8 +1055,16 @@ impl Editor {
                 continue;
             }
             for line in l0..=l1 {
-                let start = if line == l0 { s.start() } else { self.line_start(line) };
-                let end = if line == l1 { s.end() } else { self.line_end(line) };
+                let start = if line == l0 {
+                    s.start()
+                } else {
+                    self.line_start(line)
+                };
+                let end = if line == l1 {
+                    s.end()
+                } else {
+                    self.line_end(line)
+                };
                 if line == l1 && end == start && line != l0 {
                     continue;
                 }
@@ -1046,7 +1098,11 @@ impl Editor {
             return;
         }
         let after = self.newest_selection().end();
-        let taken = |r: &Range<usize>| self.selections.iter().any(|s| s.start() == r.start && s.end() == r.end);
+        let taken = |r: &Range<usize>| {
+            self.selections
+                .iter()
+                .any(|s| s.start() == r.start && s.end() == r.end)
+        };
         let next = matches
             .iter()
             .filter(|r| r.start >= after)
@@ -1073,7 +1129,10 @@ impl Editor {
             return;
         }
         let newest = matches.iter().position(|r| r.start == current).unwrap_or(0);
-        let sels = matches.into_iter().map(|r| Selection::new(r.start, r.end)).collect();
+        let sels = matches
+            .into_iter()
+            .map(|r| Selection::new(r.start, r.end))
+            .collect();
         self.set_selections(sels, newest);
     }
 
@@ -1090,7 +1149,10 @@ impl Editor {
             let b = from + pos;
             let e = b + needle.len();
             let ok = !whole_word
-                || (hay[..b].chars().next_back().is_none_or(|c| !is_word_char(c))
+                || (hay[..b]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !is_word_char(c))
                     && hay[e..].chars().next().is_none_or(|c| !is_word_char(c)));
             if ok {
                 let start = self.text.byte_to_char(b);
@@ -1158,7 +1220,12 @@ impl Editor {
         } else {
             let indent = non_blank
                 .iter()
-                .map(|&l| self.line_text(l).chars().take_while(|c| c.is_whitespace()).count())
+                .map(|&l| {
+                    self.line_text(l)
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .count()
+                })
                 .min()
                 .unwrap_or(0);
             non_blank
@@ -1219,7 +1286,10 @@ impl Editor {
                 let n = if text.starts_with('\t') {
                     1
                 } else {
-                    text.chars().take(self.tab_size).take_while(|c| *c == ' ').count()
+                    text.chars()
+                        .take(self.tab_size)
+                        .take_while(|c| *c == ' ')
+                        .count()
                 };
                 (n > 0).then(|| {
                     let at = self.line_start(l);
@@ -1236,7 +1306,11 @@ impl Editor {
         let goals: Vec<usize> = blocks
             .iter()
             .map(|&(a, _)| {
-                let s = self.selections.iter().find(|s| self.line_of(s.head) >= a).unwrap();
+                let s = self
+                    .selections
+                    .iter()
+                    .find(|s| self.line_of(s.head) >= a)
+                    .unwrap();
                 let (l, c) = self.line_col(s.head);
                 self.display_col(l, c)
             })
@@ -1287,7 +1361,10 @@ impl Editor {
             .iter()
             .map(|s| {
                 let line = self.line_of(s.start());
-                let bi = blocks.iter().position(|&(a, b)| line >= a && line <= b).unwrap_or(0);
+                let bi = blocks
+                    .iter()
+                    .position(|&(a, b)| line >= a && line <= b)
+                    .unwrap_or(0);
                 let shift = lens[..bi].iter().sum::<usize>() + if down { lens[bi] } else { 0 };
                 Selection::new(s.anchor + shift, s.head + shift)
             })
@@ -1310,11 +1387,17 @@ impl Editor {
             let body = self.slice(self.line_start(a)..self.line_end(b));
             if down {
                 let next = self.line_text(b + 1);
-                edits.push((self.line_start(a)..self.line_end(b + 1), format!("{next}\n{body}")));
+                edits.push((
+                    self.line_start(a)..self.line_end(b + 1),
+                    format!("{next}\n{body}"),
+                ));
                 shifts.push((a, b, next.chars().count() as isize + 1));
             } else {
                 let prev = self.line_text(a - 1);
-                edits.push((self.line_start(a - 1)..self.line_end(b), format!("{body}\n{prev}")));
+                edits.push((
+                    self.line_start(a - 1)..self.line_end(b),
+                    format!("{body}\n{prev}"),
+                ));
                 shifts.push((a, b, -(prev.chars().count() as isize + 1)));
             }
         }
@@ -1329,7 +1412,10 @@ impl Editor {
                     .iter()
                     .find(|(a, b, _)| line >= *a && line <= *b)
                     .map_or(0, |x| x.2);
-                Selection::new((s.anchor as isize + d) as usize, (s.head as isize + d) as usize)
+                Selection::new(
+                    (s.anchor as isize + d) as usize,
+                    (s.head as isize + d) as usize,
+                )
             })
             .collect();
         self.set_selections(sels, self.newest);
@@ -1374,7 +1460,11 @@ impl Editor {
     /// because every selection was empty.
     pub fn copy_text(&self) -> (String, bool) {
         if self.selections.iter().all(|s| s.is_empty()) {
-            let mut lines: Vec<usize> = self.selections.iter().map(|s| self.line_of(s.head)).collect();
+            let mut lines: Vec<usize> = self
+                .selections
+                .iter()
+                .map(|s| self.line_of(s.head))
+                .collect();
             lines.dedup();
             let text = lines
                 .iter()
@@ -1382,7 +1472,11 @@ impl Editor {
                 .collect::<String>();
             (text, true)
         } else {
-            let parts: Vec<String> = self.selections.iter().map(|s| self.slice(s.range())).collect();
+            let parts: Vec<String> = self
+                .selections
+                .iter()
+                .map(|s| self.slice(s.range()))
+                .collect();
             (parts.join("\n"), false)
         }
     }
@@ -1392,7 +1486,11 @@ impl Editor {
         if copied.1 {
             self.delete_lines();
         } else {
-            let edits = self.selections.iter().map(|s| (s.range(), String::new())).collect();
+            let edits = self
+                .selections
+                .iter()
+                .map(|s| (s.range(), String::new()))
+                .collect();
             self.apply(edits, EditKind::Other);
         }
         copied
@@ -1400,7 +1498,11 @@ impl Editor {
 
     pub fn paste(&mut self, text: &str, whole_lines: bool) {
         let n = self.selections.len();
-        let parts: Vec<&str> = text.strip_suffix('\n').unwrap_or(text).split('\n').collect();
+        let parts: Vec<&str> = text
+            .strip_suffix('\n')
+            .unwrap_or(text)
+            .split('\n')
+            .collect();
         if n > 1 && parts.len() == n {
             let edits = self
                 .selections
@@ -1431,7 +1533,11 @@ impl Editor {
             self.set_selections(sels, self.newest);
             return;
         }
-        let edits = self.selections.iter().map(|s| (s.range(), text.to_string())).collect();
+        let edits = self
+            .selections
+            .iter()
+            .map(|s| (s.range(), text.to_string()))
+            .collect();
         self.apply(edits, EditKind::Other);
     }
 }

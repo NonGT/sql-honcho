@@ -119,7 +119,9 @@ impl FindBar {
     }
 
     pub fn show(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         let seed = {
             let ed = &target.read(cx).editor;
             let sel = ed.newest_selection();
@@ -134,15 +136,25 @@ impl FindBar {
             }
         };
         if let Some(seed) = seed {
-            let seed = if self.regex { regex_escape(&seed) } else { seed };
-            self.query_input.update(cx, |input, cx| input.set_text(&seed, cx));
+            let seed = if self.regex {
+                regex_escape(&seed)
+            } else {
+                seed
+            };
+            self.query_input
+                .update(cx, |input, cx| input.set_text(&seed, cx));
         } else {
-            self.query_input.update(cx, |input, cx| input.set_text(&input.text(), cx));
+            self.query_input
+                .update(cx, |input, cx| input.set_text(&input.text(), cx));
         }
         self.open = true;
         self.show_replace = replace;
         let has_query = !self.query_input.read(cx).text().is_empty();
-        let focus = if replace && has_query { &self.replace_input } else { &self.query_input };
+        let focus = if replace && has_query {
+            &self.replace_input
+        } else {
+            &self.query_input
+        };
         window.focus(&focus.focus_handle(cx));
         self.searched = None;
         self.research(true, cx);
@@ -175,7 +187,9 @@ impl FindBar {
         if !self.open {
             return;
         }
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         let query = self.query(cx);
         let version = target.read(cx).editor.version();
         let key = (query.clone(), version);
@@ -206,7 +220,8 @@ impl FindBar {
                     .or(t.search_matches.first())
                     .cloned()
                 {
-                    t.editor.set_selections(vec![Selection::new(r.start, r.end)], 0);
+                    t.editor
+                        .set_selections(vec![Selection::new(r.start, r.end)], 0);
                     t.request_autoscroll(cx);
                 }
             }
@@ -229,13 +244,17 @@ impl FindBar {
             return;
         }
         self.research(false, cx);
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         if self.matches.is_empty() {
             return;
         }
         let sel = target.read(cx).editor.newest_selection();
         let r = if forward {
-            let i = self.matches.partition_point(|r| r.start < sel.end().max(sel.start() + 1));
+            let i = self
+                .matches
+                .partition_point(|r| r.start < sel.end().max(sel.start() + 1));
             self.matches.get(i).unwrap_or(&self.matches[0]).clone()
         } else {
             let i = self.matches.partition_point(|r| r.start < sel.start());
@@ -246,18 +265,25 @@ impl FindBar {
             }
         };
         target.update(cx, |t, cx| {
-            t.editor.set_selections(vec![Selection::new(r.start, r.end)], 0);
+            t.editor
+                .set_selections(vec![Selection::new(r.start, r.end)], 0);
             t.request_autoscroll(cx);
         });
         cx.notify();
     }
 
     fn select_all_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         if self.matches.is_empty() {
             return;
         }
-        let sels = self.matches.iter().map(|r| Selection::new(r.start, r.end)).collect();
+        let sels = self
+            .matches
+            .iter()
+            .map(|r| Selection::new(r.start, r.end))
+            .collect();
         target.update(cx, |t, cx| {
             t.editor.set_selections(sels, 0);
             t.request_autoscroll(cx);
@@ -266,9 +292,13 @@ impl FindBar {
     }
 
     fn replace_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         let query = self.query(cx);
-        let Ok(Some(re)) = query.compile() else { return };
+        let Ok(Some(re)) = query.compile() else {
+            return;
+        };
         let Some(i) = self.current_index(cx) else {
             self.next(true, window, cx);
             return;
@@ -276,7 +306,8 @@ impl FindBar {
         let range = self.matches[i].clone();
         let replacement = self.replace_input.read(cx).text();
         target.update(cx, |t, cx| {
-            let with = search::replacement_for(t.editor.rope(), &re, query.regex, &range, &replacement);
+            let with =
+                search::replacement_for(t.editor.rope(), &re, query.regex, &range, &replacement);
             let len = with.chars().count();
             t.editor.replace_ranges(vec![(range.clone(), with)]);
             t.editor.set_cursor(range.start + len);
@@ -286,9 +317,13 @@ impl FindBar {
     }
 
     fn replace_all(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         let query = self.query(cx);
-        let Ok(Some(re)) = query.compile() else { return };
+        let Ok(Some(re)) = query.compile() else {
+            return;
+        };
         let replacement = self.replace_input.read(cx).text();
         target.update(cx, |t, cx| {
             let edits = search::replace_all(t.editor.rope(), &re, query.regex, &replacement);
@@ -344,8 +379,16 @@ fn icon_button(label: &'static str, active: bool) -> gpui::Div {
         .items_center()
         .justify_center()
         .rounded_sm()
-        .text_color(if active { Theme::text() } else { Theme::muted() })
-        .when(active, |d| d.bg(Theme::accent_dim()).border_1().border_color(Theme::accent()))
+        .text_color(if active {
+            Theme::text()
+        } else {
+            Theme::muted()
+        })
+        .when(active, |d| {
+            d.bg(Theme::accent_dim())
+                .border_1()
+                .border_color(Theme::accent())
+        })
         .hover(|d| d.bg(Theme::border()).text_color(Theme::text()))
         .child(label)
 }
@@ -381,7 +424,13 @@ impl Render for FindBar {
                     Theme::border()
                 })
                 .overflow_hidden()
-                .child(div().flex_1().h(px(18.)).overflow_hidden().child(input.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(18.))
+                        .overflow_hidden()
+                        .child(input.clone()),
+                )
         };
 
         let find_row = div()
@@ -406,10 +455,16 @@ impl Render for FindBar {
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.toggle(|s| &mut s.case_sensitive, cx)),
                     ))
-                    .child(icon_button("ab", self.whole_word).underline().on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.toggle(|s| &mut s.whole_word, cx)),
-                    ))
+                    .child(
+                        icon_button("ab", self.whole_word)
+                            .underline()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.toggle(|s| &mut s.whole_word, cx)
+                                }),
+                            ),
+                    )
                     .child(icon_button(".*", self.regex).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.toggle(|s| &mut s.regex, cx)),
@@ -480,12 +535,24 @@ impl Render for FindBar {
             .text_size(px(12.))
             .on_action(cx.listener(|this, _: &FindNext, window, cx| this.next(true, window, cx)))
             .on_action(cx.listener(|this, _: &FindPrev, window, cx| this.next(false, window, cx)))
-            .on_action(cx.listener(|this, _: &SelectAllMatches, window, cx| this.select_all_matches(window, cx)))
-            .on_action(cx.listener(|this, _: &ReplaceNext, window, cx| this.replace_next(window, cx)))
+            .on_action(cx.listener(|this, _: &SelectAllMatches, window, cx| {
+                this.select_all_matches(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ReplaceNext, window, cx| this.replace_next(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ReplaceAll, _, cx| this.replace_all(cx)))
-            .on_action(cx.listener(|this, _: &ToggleCase, _, cx| this.toggle(|s| &mut s.case_sensitive, cx)))
-            .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| this.toggle(|s| &mut s.whole_word, cx)))
-            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| this.toggle(|s| &mut s.regex, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleCase, _, cx| {
+                    this.toggle(|s| &mut s.case_sensitive, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| {
+                this.toggle(|s| &mut s.whole_word, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleRegex, _, cx| this.toggle(|s| &mut s.regex, cx)),
+            )
             .on_action(cx.listener(|this, _: &FocusReplace, window, cx| {
                 this.show_replace = true;
                 window.focus(&this.replace_input.focus_handle(cx));
@@ -496,7 +563,9 @@ impl Render for FindBar {
                 cx.notify();
             }))
             // Escape in an input that has nothing to collapse bubbles up as Cancel
-            .on_action(cx.listener(|this, _: &editor_view::Cancel, window, cx| this.close(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &editor_view::Cancel, window, cx| this.close(window, cx)),
+            )
             .child(find_row)
             .when(self.show_replace, |d| d.child(replace_row))
     }

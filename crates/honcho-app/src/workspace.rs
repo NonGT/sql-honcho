@@ -13,16 +13,7 @@ use crate::FontSize;
 actions!(
     workspace,
     [
-        NewFile,
-        OpenFile,
-        Save,
-        SaveAs,
-        CloseTab,
-        NextTab,
-        PrevTab,
-        ZoomIn,
-        ZoomOut,
-        ZoomReset,
+        NewFile, OpenFile, Save, SaveAs, CloseTab, NextTab, PrevTab, ZoomIn, ZoomOut, ZoomReset,
         Quit,
     ]
 );
@@ -75,7 +66,13 @@ impl Workspace {
         &self.tabs[self.active]
     }
 
-    fn new_tab(&mut self, text: String, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn new_tab(
+        &mut self,
+        text: String,
+        path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let untitled = if path.is_none() {
             self.next_untitled += 1;
             self.next_untitled - 1
@@ -83,7 +80,8 @@ impl Workspace {
             0
         };
         let editor = cx.new(|cx| EditorView::new(&text, path, untitled, cx));
-        self.subscriptions.push(cx.observe(&editor, |_, _, cx| cx.notify()));
+        self.subscriptions
+            .push(cx.observe(&editor, |_, _, cx| cx.notify()));
         self.tabs.push(editor);
         self.activate(self.tabs.len() - 1, window, cx);
     }
@@ -91,7 +89,8 @@ impl Workspace {
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix.min(self.tabs.len() - 1);
         let editor = self.active_editor().clone();
-        self.find.update(cx, |f, cx| f.set_target(editor.clone(), cx));
+        self.find
+            .update(cx, |f, cx| f.set_target(editor.clone(), cx));
         window.focus(&editor.focus_handle(cx));
         cx.notify();
     }
@@ -112,14 +111,21 @@ impl Workspace {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(err) => {
                     let msg = format!("Couldn't open {}", path.display());
-                    drop(window.prompt(PromptLevel::Critical, &msg, Some(&err.to_string()), &["OK"], cx));
+                    drop(window.prompt(
+                        PromptLevel::Critical,
+                        &msg,
+                        Some(&err.to_string()),
+                        &["OK"],
+                        cx,
+                    ));
                     continue;
                 }
             };
             if self.active_editor().read(cx).is_pristine() {
                 let ix = self.active;
                 self.tabs[ix] = cx.new(|cx| EditorView::new(&text, Some(path), 0, cx));
-                self.subscriptions.push(cx.observe(&self.tabs[ix], |_, _, cx| cx.notify()));
+                self.subscriptions
+                    .push(cx.observe(&self.tabs[ix], |_, _, cx| cx.notify()));
                 self.activate(ix, window, cx);
             } else {
                 self.new_tab(text, Some(path), window, cx);
@@ -140,7 +146,8 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                this.update_in(cx, |this, window, cx| this.open_paths(paths, window, cx)).ok();
+                this.update_in(cx, |this, window, cx| this.open_paths(paths, window, cx))
+                    .ok();
             }
         })
         .detach();
@@ -155,7 +162,13 @@ impl Workspace {
     }
 
     /// Resolves to true once the file is written.
-    fn save_tab(&mut self, ix: usize, save_as: bool, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+    fn save_tab(
+        &mut self,
+        ix: usize,
+        save_as: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
         let editor = self.tabs[ix].clone();
         let (existing, title) = {
             let e = editor.read(cx);
@@ -170,7 +183,11 @@ impl Workspace {
                 .map(Path::to_path_buf)
                 .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
                 .unwrap_or_else(|| PathBuf::from("/"));
-            let name = if title.ends_with(".sql") { title.clone() } else { format!("{title}.sql") };
+            let name = if title.ends_with(".sql") {
+                title.clone()
+            } else {
+                format!("{title}.sql")
+            };
             cx.prompt_for_new_path(&dir, Some(&name))
         });
         cx.spawn_in(window, async move |_, cx| {
@@ -193,7 +210,13 @@ impl Workspace {
                 Err(err) => {
                     let msg = format!("Couldn't save {}", path.display());
                     if let Ok(rx) = cx.update(|window, cx| {
-                        window.prompt(PromptLevel::Critical, &msg, Some(&err.to_string()), &["OK"], cx)
+                        window.prompt(
+                            PromptLevel::Critical,
+                            &msg,
+                            Some(&err.to_string()),
+                            &["OK"],
+                            cx,
+                        )
                     }) {
                         rx.await.ok();
                     }
@@ -319,9 +342,17 @@ impl Workspace {
                     .pr_2()
                     .h_full()
                     .border_t_2()
-                    .border_color(if active { Theme::accent() } else { Theme::panel() })
+                    .border_color(if active {
+                        Theme::accent()
+                    } else {
+                        Theme::panel()
+                    })
                     .when(active, |d| d.bg(Theme::tab_active()))
-                    .text_color(if active { Theme::text() } else { Theme::muted() })
+                    .text_color(if active {
+                        Theme::text()
+                    } else {
+                        Theme::muted()
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| this.activate(ix, window, cx)),
@@ -401,7 +432,10 @@ impl Render for Workspace {
             let e = self.active_editor().read(cx);
             (e.title(), e.is_dirty())
         };
-        window.set_window_title(&format!("{title}{} — sql-honcho", if dirty { " ●" } else { "" }));
+        window.set_window_title(&format!(
+            "{title}{} — sql-honcho",
+            if dirty { " ●" } else { "" }
+        ));
 
         div()
             .key_context("Workspace")
@@ -447,7 +481,13 @@ impl Render for Workspace {
                     .relative()
                     .child(self.active_editor().clone())
                     .when(self.find.read(cx).open, |d| {
-                        d.child(div().absolute().top(px(6.)).right(px(22.)).child(self.find.clone()))
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(6.))
+                                .right(px(22.))
+                                .child(self.find.clone()),
+                        )
                     }),
             )
             .child(self.render_status(cx))
