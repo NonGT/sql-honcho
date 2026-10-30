@@ -278,6 +278,17 @@ async fn auth_failure_and_closed_session() {
     assert!(s.ping().await.is_err());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execute_right_after_close_still_finishes() {
+    let rt = DbRuntime::new().unwrap();
+    for _ in 0..300 {
+        let s = session(&rt).await;
+        s.close().await;
+        let events = collect(s.execute("rows 1")).await;
+        assert!(matches!(finished(&events), Err(DbError::ConnectionLost(_))));
+    }
+}
+
 #[tokio::test]
 async fn rows_keep_their_order_across_batches() {
     let rt = DbRuntime::new().unwrap();

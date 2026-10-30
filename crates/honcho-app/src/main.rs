@@ -6,8 +6,8 @@ mod workspace;
 use std::path::PathBuf;
 
 use gpui::{
-    px, size, App, AppContext, Application, Bounds, Global, Menu, MenuItem, Pixels, TitlebarOptions,
-    WindowBounds, WindowOptions,
+    px, size, App, AppContext, Application, Bounds, Global, Menu, MenuItem, Pixels,
+    TitlebarOptions, WindowBounds, WindowOptions,
 };
 
 use editor_view as ed;

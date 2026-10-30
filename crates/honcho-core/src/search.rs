@@ -33,7 +33,12 @@ impl SearchQuery {
             .build()
             .map(Some)
             .map_err(|e| match e {
-                regex::Error::Syntax(s) => s.lines().last().unwrap_or("invalid regex").trim().to_string(),
+                regex::Error::Syntax(s) => s
+                    .lines()
+                    .last()
+                    .unwrap_or("invalid regex")
+                    .trim()
+                    .to_string(),
                 other => other.to_string(),
             })
     }
@@ -54,7 +59,13 @@ fn unescape(replacement: &str) -> String {
 }
 
 /// Replacement for the match at `range`; in regex mode `$1`, `\n` and `\t` are expanded.
-pub fn replacement_for(rope: &Rope, re: &Regex, is_regex: bool, range: &Range<usize>, replacement: &str) -> String {
+pub fn replacement_for(
+    rope: &Rope,
+    re: &Regex,
+    is_regex: bool,
+    range: &Range<usize>,
+    replacement: &str,
+) -> String {
     if !is_regex {
         return replacement.to_string();
     }
@@ -72,9 +83,18 @@ pub fn replacement_for(rope: &Rope, re: &Regex, is_regex: bool, range: &Range<us
 }
 
 /// Edits that replace every match.
-pub fn replace_all(rope: &Rope, re: &Regex, is_regex: bool, replacement: &str) -> Vec<(Range<usize>, String)> {
+pub fn replace_all(
+    rope: &Rope,
+    re: &Regex,
+    is_regex: bool,
+    replacement: &str,
+) -> Vec<(Range<usize>, String)> {
     let text = rope.to_string();
-    let replacement = if is_regex { unescape(replacement) } else { replacement.to_string() };
+    let replacement = if is_regex {
+        unescape(replacement)
+    } else {
+        replacement.to_string()
+    };
     re.captures_iter(&text)
         .filter_map(|caps| {
             let m = caps.get(0)?;
@@ -88,7 +108,10 @@ pub fn replace_all(rope: &Rope, re: &Regex, is_regex: bool, replacement: &str) -
             } else {
                 replacement.clone()
             };
-            Some((rope.byte_to_char(m.start())..rope.byte_to_char(m.end()), with))
+            Some((
+                rope.byte_to_char(m.start())..rope.byte_to_char(m.end()),
+                with,
+            ))
         })
         .collect()
 }
@@ -154,7 +177,12 @@ mod tests {
 
     #[test]
     fn bad_regex_reports_error() {
-        let err = SearchQuery { regex: true, ..q("(") }.compile().unwrap_err();
+        let err = SearchQuery {
+            regex: true,
+            ..q("(")
+        }
+        .compile()
+        .unwrap_err();
         assert!(!err.is_empty());
     }
 }

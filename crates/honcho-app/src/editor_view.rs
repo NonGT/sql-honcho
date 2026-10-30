@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gpui::{
-    actions, fill, point, px, relative, size, App, Bounds, ClipboardItem, ContentMask, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollWheelEvent, ShapedLine, SharedString, Style, Styled, TextRun, UTF16Selection,
-    Window, div, prelude::*,
+    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
+    ContentMask, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString, Style,
+    Styled, TextRun, UTF16Selection, Window,
 };
 use honcho_core::sql::{self, Highlighter};
 use honcho_core::{Editor, LineEnding, Motion, Selection};
@@ -186,7 +186,11 @@ impl LineLayout {
             return 0;
         }
         let (a, z) = (self.x_for_col(i - 1), self.x_for_col(i));
-        if x - a < z - x { i - 1 } else { i }
+        if x - a < z - x {
+            i - 1
+        } else {
+            i
+        }
     }
 }
 
@@ -234,7 +238,12 @@ pub struct EditorView {
 }
 
 impl EditorView {
-    pub fn new(text: &str, path: Option<PathBuf>, untitled_index: usize, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        text: &str,
+        path: Option<PathBuf>,
+        untitled_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (text, line_ending) = honcho_core::normalize_line_endings(text);
         let editor = Editor::new(&text);
         Self {
@@ -273,7 +282,11 @@ impl EditorView {
 
     /// Replace the contents and select all of it.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let text = if self.single_line { text.replace('\n', " ") } else { text.to_string() };
+        let text = if self.single_line {
+            text.replace('\n', " ")
+        } else {
+            text.to_string()
+        };
         if self.editor.text() != text {
             self.editor.replace_all(&text);
         }
@@ -324,7 +337,9 @@ impl EditorView {
     }
 
     fn page_rows(&self) -> usize {
-        self.layout.as_ref().map_or(30, |l| l.visible_rows().saturating_sub(1).max(1))
+        self.layout
+            .as_ref()
+            .map_or(30, |l| l.visible_rows().saturating_sub(1).max(1))
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -365,10 +380,18 @@ impl EditorView {
     fn page(&mut self, up: bool, extend: bool, cx: &mut Context<Self>) {
         let rows = self.page_rows();
         let lh = self.layout.as_ref().map_or(px(20.), |l| l.line_height);
-        let motion = if up { Motion::PageUp(rows) } else { Motion::PageDown(rows) };
+        let motion = if up {
+            Motion::PageUp(rows)
+        } else {
+            Motion::PageDown(rows)
+        };
         self.edit(cx, |e| e.move_cursors(motion, extend));
         let delta = lh * rows as f32;
-        self.scroll.y = if up { self.scroll.y - delta } else { self.scroll.y + delta };
+        self.scroll.y = if up {
+            self.scroll.y - delta
+        } else {
+            self.scroll.y + delta
+        };
         self.clamp_scroll();
     }
 
@@ -409,9 +432,13 @@ impl EditorView {
         let Some(layout) = &self.layout else {
             return (0, 0);
         };
-        let row = ((pos.y - layout.origin.y) / layout.line_height).floor().max(0.) as usize;
+        let row = ((pos.y - layout.origin.y) / layout.line_height)
+            .floor()
+            .max(0.) as usize;
         let line = row.min(self.editor.line_count() - 1);
-        let col = ((pos.x - layout.origin.x) / layout.em_width).round().max(0.) as usize;
+        let col = ((pos.x - layout.origin.x) / layout.em_width)
+            .round()
+            .max(0.) as usize;
         (line, col)
     }
 
@@ -431,7 +458,12 @@ impl EditorView {
         self.editor.set_selections(vec![sel], 0);
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&self.focus_handle);
         let Some(layout) = &self.layout else {
             return;
@@ -458,7 +490,8 @@ impl EditorView {
             self.drag = Drag::Chars(anchor);
         } else if event.click_count == 2 {
             let r = self.editor.token_range_at(offset);
-            self.editor.set_selections(vec![Selection::new(r.start, r.end)], 0);
+            self.editor
+                .set_selections(vec![Selection::new(r.start, r.end)], 0);
             self.drag = Drag::Words(r);
         } else if event.click_count >= 3 {
             let line = self.editor.line_of(offset);
@@ -519,7 +552,9 @@ impl EditorView {
     // utf-16 helpers for the platform input handler
 
     fn to_utf16(&self, offset: usize) -> usize {
-        self.editor.rope().char_to_utf16_cu(offset.min(self.editor.len_chars()))
+        self.editor
+            .rope()
+            .char_to_utf16_cu(offset.min(self.editor.len_chars()))
     }
 
     fn char_from_utf16(&self, offset: usize) -> usize {
@@ -718,10 +753,13 @@ impl EntityInputHandler for EditorView {
         if let Some(sel) = new_selected_range_utf16 {
             let to_chars = |u: usize| {
                 let mut units = 0;
-                new_text.chars().take_while(|c| {
-                    units += c.len_utf16();
-                    units <= u
-                }).count()
+                new_text
+                    .chars()
+                    .take_while(|c| {
+                        units += c.len_utf16();
+                        units <= u
+                    })
+                    .count()
             };
             self.editor.set_newest(Selection::new(
                 range.start + to_chars(sel.start),
@@ -744,7 +782,10 @@ impl EntityInputHandler for EditorView {
         let (line, col) = self.editor.line_col(start);
         let x = layout.line(line).map_or(px(0.), |l| l.x_for_col(col));
         Some(Bounds::new(
-            point(layout.origin.x + x, layout.origin.y + layout.line_height * line as f32),
+            point(
+                layout.origin.x + x,
+                layout.origin.y + layout.line_height * line as f32,
+            ),
             size(layout.em_width, layout.line_height),
         ))
     }
@@ -825,7 +866,9 @@ impl Element for EditorElement {
         let line_height = window.line_height();
         let text_system = window.text_system().clone();
         let font_id = text_system.resolve_font(&font);
-        let em_width = text_system.em_width(font_id, font_size).unwrap_or(font_size * 0.6);
+        let em_width = text_system
+            .em_width(font_id, font_size)
+            .unwrap_or(font_size * 0.6);
         let focused = self.view.read(cx).focus_handle.is_focused(window);
 
         self.view.update(cx, |view, _| {
@@ -836,7 +879,11 @@ impl Element for EditorElement {
             let line_count = ed.line_count();
             let single = view.single_line;
             let digits = line_count.to_string().len().max(3);
-            let gutter_width = if single { px(0.) } else { em_width * (digits as f32 + 3.) };
+            let gutter_width = if single {
+                px(0.)
+            } else {
+                em_width * (digits as f32 + 3.)
+            };
             let text_left = bounds.left() + gutter_width;
             let text_width = bounds.size.width - gutter_width;
             let height = bounds.size.height;
@@ -858,7 +905,10 @@ impl Element for EditorElement {
             let last = (first + (height / line_height).ceil() as usize + 1).min(line_count);
 
             let mut lines = Vec::with_capacity(last - first);
-            let placeholder = view.placeholder.clone().filter(|_| view.editor.len_chars() == 0);
+            let placeholder = view
+                .placeholder
+                .clone()
+                .filter(|_| view.editor.len_chars() == 0);
             if let Some(text) = placeholder {
                 let run = TextRun {
                     len: text.len(),
@@ -921,7 +971,10 @@ impl Element for EditorElement {
                     cursor_lines.push(line);
                     if s.is_empty() && !single {
                         quads.push((
-                            Bounds::new(point(bounds.left(), row_y(line)), size(bounds.size.width, line_height)),
+                            Bounds::new(
+                                point(bounds.left(), row_y(line)),
+                                size(bounds.size.width, line_height),
+                            ),
                             Theme::current_line(),
                         ));
                     }
@@ -929,7 +982,11 @@ impl Element for EditorElement {
             }
 
             let vis_start = ed.line_start(first);
-            let vis_end = if last >= line_count { ed.len_chars() } else { ed.line_start(last) };
+            let vis_end = if last >= line_count {
+                ed.len_chars()
+            } else {
+                ed.line_start(last)
+            };
 
             let from = view.search_matches.partition_point(|r| r.end < vis_start);
             for r in &view.search_matches[from..] {
@@ -940,7 +997,10 @@ impl Element for EditorElement {
                 let (l_end, c_end) = ed.line_col(r.end);
                 let Some(ll) = layout.line(l) else { continue };
                 let c1 = if l_end == l { c_end } else { ed.line_len(l) };
-                let (x0, x1) = (ll.x_for_col(c0), ll.x_for_col(c1).max(ll.x_for_col(c0) + em_width * 0.5));
+                let (x0, x1) = (
+                    ll.x_for_col(c0),
+                    ll.x_for_col(c1).max(ll.x_for_col(c0) + em_width * 0.5),
+                );
                 text_quads.push((
                     Bounds::from_corners(
                         point(origin.x + x0, row_y(l)),
@@ -951,7 +1011,11 @@ impl Element for EditorElement {
             }
 
             // other matches of a single short selection
-            if view.search_matches.is_empty() && sels.len() == 1 && !newest.is_empty() && newest.end() - newest.start() <= 200 {
+            if view.search_matches.is_empty()
+                && sels.len() == 1
+                && !newest.is_empty()
+                && newest.end() - newest.start() <= 200
+            {
                 let needle = ed.slice(newest.range());
                 if !needle.contains('\n') && !needle.trim().is_empty() {
                     let needle = needle.to_ascii_lowercase();

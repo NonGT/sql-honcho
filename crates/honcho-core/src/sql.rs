@@ -36,39 +36,275 @@ pub enum LineState {
 }
 
 const KEYWORDS: &[&str] = &[
-    "ADD", "AFTER", "AGGREGATE", "ALL", "ALTER", "ANALYZE", "AND", "ANY", "AS", "ASC",
-    "AUTO_INCREMENT", "BEFORE", "BEGIN", "BETWEEN", "BREAK", "BY", "CALL", "CASCADE", "CASE",
-    "CAST", "CATCH", "CHECK", "CLOSE", "CLUSTERED", "COLLATE", "COLUMN", "COMMENT", "COMMIT",
-    "CONCURRENTLY", "CONFLICT", "CONSTRAINT", "CONTINUE", "CREATE", "CROSS", "CTE", "CURSOR",
-    "DATABASE", "DEALLOCATE", "DECLARE", "DEFAULT", "DEFERRABLE", "DELETE", "DELIMITER", "DESC",
-    "DESCRIBE", "DETERMINISTIC", "DISTINCT", "DO", "DROP", "EACH", "ELSE", "ELSEIF", "ELSIF", "END",
-    "ENGINE", "ESCAPE", "EXCEPT", "EXCEPTION", "EXEC", "EXECUTE", "EXISTS", "EXPLAIN", "EXTENSION",
-    "FALSE", "FETCH", "FILTER", "FIRST", "FOLLOWING", "FOR", "FOREIGN", "FROM", "FULL", "FUNCTION",
-    "GO", "GOTO", "GRANT", "GROUP", "HAVING", "IDENTITY", "IF", "ILIKE", "IMMUTABLE", "IN", "INDEX",
-    "INNER", "INOUT", "INSERT", "INSTEAD", "INTERSECT", "INTO", "IS", "ISNULL", "JOIN", "KEY",
-    "LANGUAGE", "LAST", "LATERAL", "LEAVE", "LEFT", "LIKE", "LIMIT", "LOOP", "MATERIALIZED",
-    "MERGE", "MODIFY", "NATURAL", "NEXT", "NO", "NOCOUNT", "NONCLUSTERED", "NOT", "NOTNULL",
-    "NOWAIT", "NULL", "NULLS", "OF", "OFF", "OFFSET", "ON", "ONLY", "OPEN", "OR", "ORDER", "OUT",
-    "OUTER", "OUTPUT", "OVER", "OWNER", "PARTITION", "PERFORM", "PRECEDING", "PRIMARY", "PRINT",
-    "PROC", "PROCEDURE", "RAISE", "RAISERROR", "RANGE", "READS", "RECURSIVE", "REFERENCES",
-    "REFRESH", "RENAME", "REPEAT", "REPLACE", "RESTRICT", "RETURN", "RETURNING", "RETURNS",
-    "REVOKE", "RIGHT", "ROLE", "ROLLBACK", "ROW", "ROWS", "SAVEPOINT", "SCHEMA", "SECURITY",
-    "SELECT", "SEQUENCE", "SET", "SETOF", "SHOW", "SIGNAL", "SOME", "STABLE", "STRICT", "TABLE",
-    "TEMP", "TEMPORARY", "THEN", "THROW", "TO", "TOP", "TRAN", "TRANSACTION", "TRIGGER", "TRUE",
-    "TRUNCATE", "TRY", "UNBOUNDED", "UNION", "UNIQUE", "UNKNOWN", "UNTIL", "UPDATE", "USE", "USING",
-    "VACUUM", "VALUES", "VIEW", "VOLATILE", "WAITFOR", "WHEN", "WHERE", "WHILE", "WINDOW", "WITH",
-    "WITHIN", "WITHOUT",
+    "ADD",
+    "AFTER",
+    "AGGREGATE",
+    "ALL",
+    "ALTER",
+    "ANALYZE",
+    "AND",
+    "ANY",
+    "AS",
+    "ASC",
+    "AUTO_INCREMENT",
+    "BEFORE",
+    "BEGIN",
+    "BETWEEN",
+    "BREAK",
+    "BY",
+    "CALL",
+    "CASCADE",
+    "CASE",
+    "CAST",
+    "CATCH",
+    "CHECK",
+    "CLOSE",
+    "CLUSTERED",
+    "COLLATE",
+    "COLUMN",
+    "COMMENT",
+    "COMMIT",
+    "CONCURRENTLY",
+    "CONFLICT",
+    "CONSTRAINT",
+    "CONTINUE",
+    "CREATE",
+    "CROSS",
+    "CTE",
+    "CURSOR",
+    "DATABASE",
+    "DEALLOCATE",
+    "DECLARE",
+    "DEFAULT",
+    "DEFERRABLE",
+    "DELETE",
+    "DELIMITER",
+    "DESC",
+    "DESCRIBE",
+    "DETERMINISTIC",
+    "DISTINCT",
+    "DO",
+    "DROP",
+    "EACH",
+    "ELSE",
+    "ELSEIF",
+    "ELSIF",
+    "END",
+    "ENGINE",
+    "ESCAPE",
+    "EXCEPT",
+    "EXCEPTION",
+    "EXEC",
+    "EXECUTE",
+    "EXISTS",
+    "EXPLAIN",
+    "EXTENSION",
+    "FALSE",
+    "FETCH",
+    "FILTER",
+    "FIRST",
+    "FOLLOWING",
+    "FOR",
+    "FOREIGN",
+    "FROM",
+    "FULL",
+    "FUNCTION",
+    "GO",
+    "GOTO",
+    "GRANT",
+    "GROUP",
+    "HAVING",
+    "IDENTITY",
+    "IF",
+    "ILIKE",
+    "IMMUTABLE",
+    "IN",
+    "INDEX",
+    "INNER",
+    "INOUT",
+    "INSERT",
+    "INSTEAD",
+    "INTERSECT",
+    "INTO",
+    "IS",
+    "ISNULL",
+    "JOIN",
+    "KEY",
+    "LANGUAGE",
+    "LAST",
+    "LATERAL",
+    "LEAVE",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "LOOP",
+    "MATERIALIZED",
+    "MERGE",
+    "MODIFY",
+    "NATURAL",
+    "NEXT",
+    "NO",
+    "NOCOUNT",
+    "NONCLUSTERED",
+    "NOT",
+    "NOTNULL",
+    "NOWAIT",
+    "NULL",
+    "NULLS",
+    "OF",
+    "OFF",
+    "OFFSET",
+    "ON",
+    "ONLY",
+    "OPEN",
+    "OR",
+    "ORDER",
+    "OUT",
+    "OUTER",
+    "OUTPUT",
+    "OVER",
+    "OWNER",
+    "PARTITION",
+    "PERFORM",
+    "PRECEDING",
+    "PRIMARY",
+    "PRINT",
+    "PROC",
+    "PROCEDURE",
+    "RAISE",
+    "RAISERROR",
+    "RANGE",
+    "READS",
+    "RECURSIVE",
+    "REFERENCES",
+    "REFRESH",
+    "RENAME",
+    "REPEAT",
+    "REPLACE",
+    "RESTRICT",
+    "RETURN",
+    "RETURNING",
+    "RETURNS",
+    "REVOKE",
+    "RIGHT",
+    "ROLE",
+    "ROLLBACK",
+    "ROW",
+    "ROWS",
+    "SAVEPOINT",
+    "SCHEMA",
+    "SECURITY",
+    "SELECT",
+    "SEQUENCE",
+    "SET",
+    "SETOF",
+    "SHOW",
+    "SIGNAL",
+    "SOME",
+    "STABLE",
+    "STRICT",
+    "TABLE",
+    "TEMP",
+    "TEMPORARY",
+    "THEN",
+    "THROW",
+    "TO",
+    "TOP",
+    "TRAN",
+    "TRANSACTION",
+    "TRIGGER",
+    "TRUE",
+    "TRUNCATE",
+    "TRY",
+    "UNBOUNDED",
+    "UNION",
+    "UNIQUE",
+    "UNKNOWN",
+    "UNTIL",
+    "UPDATE",
+    "USE",
+    "USING",
+    "VACUUM",
+    "VALUES",
+    "VIEW",
+    "VOLATILE",
+    "WAITFOR",
+    "WHEN",
+    "WHERE",
+    "WHILE",
+    "WINDOW",
+    "WITH",
+    "WITHIN",
+    "WITHOUT",
 ];
 
 const TYPES: &[&str] = &[
-    "BIGINT", "BIGSERIAL", "BINARY", "BIT", "BLOB", "BOOL", "BOOLEAN", "BYTEA", "CHAR", "CHARACTER",
-    "CIDR", "DATE", "DATETIME", "DATETIME2", "DATETIMEOFFSET", "DEC", "DECIMAL", "DOUBLE", "ENUM",
-    "FLOAT", "IMAGE", "INET", "INT", "INT2", "INT4", "INT8", "INTEGER", "INTERVAL", "JSON", "JSONB",
-    "LONGBLOB", "LONGTEXT", "MEDIUMINT", "MEDIUMTEXT", "MONEY", "NCHAR", "NTEXT", "NUMERIC", "NVARCHAR",
-    "PRECISION", "REAL", "RECORD", "REGCLASS", "SERIAL", "SMALLDATETIME", "SMALLINT", "SMALLMONEY",
-    "SMALLSERIAL", "SQL_VARIANT", "TEXT", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMETZ", "TINYINT",
-    "TINYTEXT", "UNIQUEIDENTIFIER", "UNSIGNED", "UUID", "VARBINARY", "VARCHAR", "VARYING", "VOID",
-    "XML", "YEAR", "ZONE",
+    "BIGINT",
+    "BIGSERIAL",
+    "BINARY",
+    "BIT",
+    "BLOB",
+    "BOOL",
+    "BOOLEAN",
+    "BYTEA",
+    "CHAR",
+    "CHARACTER",
+    "CIDR",
+    "DATE",
+    "DATETIME",
+    "DATETIME2",
+    "DATETIMEOFFSET",
+    "DEC",
+    "DECIMAL",
+    "DOUBLE",
+    "ENUM",
+    "FLOAT",
+    "IMAGE",
+    "INET",
+    "INT",
+    "INT2",
+    "INT4",
+    "INT8",
+    "INTEGER",
+    "INTERVAL",
+    "JSON",
+    "JSONB",
+    "LONGBLOB",
+    "LONGTEXT",
+    "MEDIUMINT",
+    "MEDIUMTEXT",
+    "MONEY",
+    "NCHAR",
+    "NTEXT",
+    "NUMERIC",
+    "NVARCHAR",
+    "PRECISION",
+    "REAL",
+    "RECORD",
+    "REGCLASS",
+    "SERIAL",
+    "SMALLDATETIME",
+    "SMALLINT",
+    "SMALLMONEY",
+    "SMALLSERIAL",
+    "SQL_VARIANT",
+    "TEXT",
+    "TIME",
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "TIMETZ",
+    "TINYINT",
+    "TINYTEXT",
+    "UNIQUEIDENTIFIER",
+    "UNSIGNED",
+    "UUID",
+    "VARBINARY",
+    "VARCHAR",
+    "VARYING",
+    "VOID",
+    "XML",
+    "YEAR",
+    "ZONE",
 ];
 
 /// Keywords that are really functions when called with parentheses.
@@ -135,7 +371,10 @@ pub fn lex_line(line: &str, mut state: LineState, mut emit: impl FnMut(Token)) -
     let mut i = 0;
     let mut push = |start: usize, end: usize, kind: TokenKind| {
         if end > start {
-            emit(Token { range: start..end, kind });
+            emit(Token {
+                range: start..end,
+                kind,
+            });
         }
     };
 
@@ -299,7 +538,11 @@ pub fn lex_line(line: &str, mut state: LineState, mut emit: impl FnMut(Token)) -
         if c == '[' {
             if let Some(p) = rest.find(']') {
                 let inner = &rest[1..p];
-                if !inner.is_empty() && inner.chars().all(|ch| ident_char(ch) || ch == ' ' || ch == '-' || ch == '.') {
+                if !inner.is_empty()
+                    && inner
+                        .chars()
+                        .all(|ch| ident_char(ch) || ch == ' ' || ch == '-' || ch == '.')
+                {
                     push(i, i + p + 1, TokenKind::QuotedIdent);
                     i += p + 1;
                     continue;
@@ -315,7 +558,11 @@ pub fn lex_line(line: &str, mut state: LineState, mut emit: impl FnMut(Token)) -
             let called = line[i..].trim_start().starts_with('(');
             let after_dot = line[..start].ends_with('.');
             let kind = if after_dot {
-                if called { TokenKind::Function } else { TokenKind::Identifier }
+                if called {
+                    TokenKind::Function
+                } else {
+                    TokenKind::Identifier
+                }
             } else if is_type(word) {
                 TokenKind::Type
             } else if is_keyword(word) {
@@ -378,7 +625,9 @@ impl Highlighter {
             self.states.push(end);
         }
         let mut tokens = Vec::new();
-        lex_line(&line_string(rope, line), self.states[line].clone(), |t| tokens.push(t));
+        lex_line(&line_string(rope, line), self.states[line].clone(), |t| {
+            tokens.push(t)
+        });
         tokens
     }
 }
@@ -441,7 +690,9 @@ mod tests {
 
     fn kinds(line: &str) -> Vec<(String, TokenKind)> {
         let mut out = Vec::new();
-        lex_line(line, LineState::Normal, |t| out.push((line[t.range].to_string(), t.kind)));
+        lex_line(line, LineState::Normal, |t| {
+            out.push((line[t.range].to_string(), t.kind))
+        });
         out
     }
 
@@ -513,8 +764,14 @@ mod tests {
     fn statement_splitting() {
         let rope = Rope::from_str("SELECT 1;\n\nSELECT ';' ; -- x;\nUPDATE t SET a = 1");
         let st = statements(&rope);
-        let texts: Vec<String> = st.iter().map(|r| rope.slice(r.clone()).to_string()).collect();
-        assert_eq!(texts, vec!["SELECT 1", "SELECT ';'", "-- x;\nUPDATE t SET a = 1"]);
+        let texts: Vec<String> = st
+            .iter()
+            .map(|r| rope.slice(r.clone()).to_string())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["SELECT 1", "SELECT ';'", "-- x;\nUPDATE t SET a = 1"]
+        );
         let at = statement_at(&rope, rope.len_chars() - 1).unwrap();
         assert_eq!(rope.slice(at).to_string(), "-- x;\nUPDATE t SET a = 1");
     }
