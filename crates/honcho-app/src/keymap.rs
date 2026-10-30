@@ -30,7 +30,7 @@ impl Platform {
     }
 
     /// The main shortcut modifier.
-    fn primary(self) -> &'static str {
+    pub(crate) fn primary(self) -> &'static str {
         match self {
             Platform::Mac => "cmd",
             _ => "ctrl",
@@ -276,6 +276,7 @@ fn find(p: Platform) -> Vec<Binding> {
             ("tab", FocusReplace, FIND_QUERY),
             ("enter", ReplaceNext, REPLACE_QUERY),
             ("P-enter", ReplaceAll, REPLACE_QUERY),
+            ("tab", FocusFind, REPLACE_QUERY),
             ("shift-tab", FocusFind, REPLACE_QUERY),
         ]
     );

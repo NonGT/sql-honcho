@@ -1,6 +1,8 @@
 mod editor_view;
 mod find;
 mod keymap;
+#[cfg(test)]
+mod tests;
 mod theme;
 mod workspace;
 

@@ -654,11 +654,24 @@ impl EntityInputHandler for EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // a single-line input takes text as-is: no bracket pairing, and keys
+        // like tab that fell through unhandled don't become characters
+        let filtered;
+        let text = if self.single_line {
+            filtered = text.replace(['\t', '\n', '\r'], "");
+            if filtered.is_empty() {
+                return;
+            }
+            filtered.as_str()
+        } else {
+            text
+        };
         let explicit = range_utf16
             .map(|r| self.range_from_utf16(&r))
             .or(self.marked_range.take());
         match explicit {
             Some(range) => self.editor.replace_range(range, text),
+            None if self.single_line => self.editor.insert(text),
             None => self.editor.type_text(text),
         }
         self.marked_range = None;

@@ -53,6 +53,16 @@ impl Workspace {
         this
     }
 
+    #[cfg(test)]
+    pub(crate) fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find_bar(&self) -> &Entity<FindBar> {
+        &self.find
+    }
+
     fn dirty_count(&self, cx: &App) -> usize {
         self.tabs.iter().filter(|t| t.read(cx).is_dirty()).count()
     }
@@ -89,7 +99,7 @@ impl Workspace {
     }
 
     /// Window close button. Returns whether the window may close now.
-    fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.discard_confirmed || self.dirty_count(cx) == 0 {
             return true;
         }
@@ -97,7 +107,7 @@ impl Workspace {
         false
     }
 
-    fn active_editor(&self) -> &Entity<EditorView> {
+    pub(crate) fn active_editor(&self) -> &Entity<EditorView> {
         &self.tabs[self.active]
     }
 

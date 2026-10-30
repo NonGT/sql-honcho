@@ -205,6 +205,21 @@ impl FindBar {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_text(&self, cx: &App) -> String {
+        self.query_input.read(cx).text()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
+
     fn current_index(&self, cx: &App) -> Option<usize> {
         let sel = self.target.as_ref()?.read(cx).editor.newest_selection();
         self.matches

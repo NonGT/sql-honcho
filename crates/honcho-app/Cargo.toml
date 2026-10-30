@@ -18,3 +18,7 @@ gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "r
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 gpui = "0.2.2"
+
+[dev-dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["test-support"] }
+tempfile = "3"
