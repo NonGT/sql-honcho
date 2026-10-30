@@ -298,9 +298,27 @@ async fn run_session(
                 job(conn).await;
             }
             Command::Close(done) => {
-                let _ = conn.close().await;
+                shut_down(conn, rx).await;
                 let _ = done.send(());
                 return;
+            }
+        }
+    }
+    let _ = conn.close().await;
+}
+
+// Stop taking work first, then answer whatever was already queued, so a
+// query sent around the same time as close still gets its Finished event.
+async fn shut_down(mut conn: Box<dyn Connection>, mut rx: mpsc::UnboundedReceiver<Command>) {
+    rx.close();
+    while let Ok(command) = rx.try_recv() {
+        match command {
+            Command::Execute { events, .. } => {
+                ResultSink::new(events).finish(Err(closed())).await;
+            }
+            Command::Call(job) => job(None).await,
+            Command::Close(done) => {
+                let _ = done.send(());
             }
         }
     }
@@ -320,9 +338,14 @@ impl QueryHandle {
         if self.finished {
             return None;
         }
-        let event = self.events.recv().await;
-        self.finished = matches!(event, Some(QueryEvent::Finished(_)) | None);
-        event
+        // the session promises a Finished; make that hold even if it vanished
+        let event = self
+            .events
+            .recv()
+            .await
+            .unwrap_or(QueryEvent::Finished(Err(closed())));
+        self.finished = matches!(event, QueryEvent::Finished(_));
+        Some(event)
     }
 
     pub fn cancel(&self) {
