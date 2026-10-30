@@ -546,8 +546,11 @@ impl Editor {
                 .iter()
                 .all(|s| self.char_at(s.head) == Some(c))
         {
+            // stepping over a closer continues the current typing group, but
+            // must not start one: that would skip the undo snapshot
+            let group = self.last_edit;
             self.move_each(|_, s| Selection::cursor(s.head + 1));
-            self.last_edit = Some(EditKind::Insert);
+            self.last_edit = group;
             return;
         }
 

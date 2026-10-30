@@ -276,3 +276,24 @@ fn escape_collapses_to_newest() {
     assert_eq!(e.selections().len(), 1);
     assert!(!e.collapse_selections());
 }
+
+#[test]
+fn typing_after_stepping_over_a_closer_can_be_undone() {
+    // found by the property tests
+    let mut e = ed("\n|`");
+    e.type_text("`");
+    e.type_text("a");
+    assert_eq!(e.text(), "\n`a");
+    assert!(e.undo());
+    assert_eq!(e.text(), "\n`");
+
+    // a pair typed in one go still undoes as one step
+    let mut e = ed("x|");
+    e.type_text(" ");
+    e.type_text("(");
+    e.type_text(")");
+    e.type_text("y");
+    assert_eq!(e.text(), "x ()y");
+    assert!(e.undo());
+    assert_eq!(e.text(), "x");
+}
