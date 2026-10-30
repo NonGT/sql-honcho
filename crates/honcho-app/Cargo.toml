@@ -1,0 +1,13 @@
+[package]
+name = "sql-honcho"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sql-honcho"
+path = "src/main.rs"
+
+[dependencies]
+honcho-core = { path = "../honcho-core" }
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
