@@ -1,4 +1,5 @@
 mod editor_view;
+mod find;
 mod theme;
 mod workspace;
 
@@ -44,6 +45,11 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Copy", ed::Copy),
                 MenuItem::action("Paste", ed::Paste),
                 MenuItem::separator(),
+                MenuItem::action("Find", find::Find),
+                MenuItem::action("Replace", find::FindReplace),
+                MenuItem::action("Find Next", find::FindNext),
+                MenuItem::action("Find Previous", find::FindPrev),
+                MenuItem::separator(),
                 MenuItem::action("Toggle Line Comment", ed::ToggleComment),
                 MenuItem::action("Indent", ed::Indent),
                 MenuItem::action("Outdent", ed::Outdent),
@@ -88,6 +94,7 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         cx.set_global(FontSize(px(theme::FONT_SIZE)));
         ed::bind_keys(cx);
+        find::bind_keys(cx);
         workspace::bind_keys(cx);
         cx.set_menus(menus());
         cx.on_window_closed(|cx| {

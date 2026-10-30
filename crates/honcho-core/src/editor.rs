@@ -477,6 +477,13 @@ impl Editor {
         self.normalize();
     }
 
+    /// Replace several ranges as one undo step. Ranges must not overlap.
+    pub fn replace_ranges(&mut self, edits: Vec<(Range<usize>, String)>) {
+        if !edits.is_empty() {
+            self.apply(edits, EditKind::Other);
+        }
+    }
+
     /// Replace the whole buffer, keeping undo history.
     pub fn replace_all(&mut self, text: &str) {
         let len = self.len_chars();

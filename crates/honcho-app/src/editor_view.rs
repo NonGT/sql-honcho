@@ -225,6 +225,12 @@ pub struct EditorView {
     drag: Drag,
     marked_range: Option<Range<usize>>,
     layout: Option<Layout>,
+    single_line: bool,
+    /// Extra key context, e.g. "FindQuery", so owners can bind keys to this input.
+    context: &'static str,
+    placeholder: Option<SharedString>,
+    /// Find matches to highlight, sorted, in char offsets.
+    pub search_matches: Vec<Range<usize>>,
 }
 
 impl EditorView {
@@ -244,7 +250,41 @@ impl EditorView {
             drag: Drag::None,
             marked_range: None,
             layout: None,
+            single_line: false,
+            context: "",
+            placeholder: None,
+            search_matches: Vec::new(),
         }
+    }
+
+    /// A one-line input that reuses the editor, for the find bar and dialogs.
+    pub fn single_line(context: &'static str, placeholder: &str, cx: &mut Context<Self>) -> Self {
+        Self {
+            single_line: true,
+            context,
+            placeholder: Some(placeholder.to_string().into()),
+            ..Self::new("", None, 0, cx)
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.editor.text()
+    }
+
+    /// Replace the contents and select all of it.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = if self.single_line { text.replace('\n', " ") } else { text.to_string() };
+        if self.editor.text() != text {
+            self.editor.replace_all(&text);
+        }
+        self.editor.select_all();
+        self.autoscroll = true;
+        cx.notify();
+    }
+
+    pub fn request_autoscroll(&mut self, cx: &mut Context<Self>) {
+        self.autoscroll = true;
+        cx.notify();
     }
 
     pub fn title(&self) -> String {
@@ -305,12 +345,17 @@ impl EditorView {
             return;
         };
         let (text, _) = honcho_core::normalize_line_endings(&text);
+        if self.single_line {
+            let text = text.trim_end_matches('\n').replace('\n', " ");
+            self.edit(cx, |e| e.insert(&text));
+            return;
+        }
         let lines = LINE_CLIPBOARD.lock().unwrap().as_deref() == Some(text.as_str());
         self.edit(cx, |e| e.paste(&text, lines));
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.collapse_selections() {
+        if !self.single_line && self.editor.collapse_selections() {
             cx.notify();
         } else {
             cx.propagate();
@@ -503,12 +548,17 @@ macro_rules! on_editor {
 impl Render for EditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font_size = cx.global::<FontSize>().0;
+        let context = if self.context.is_empty() {
+            CONTEXT.to_string()
+        } else {
+            format!("{CONTEXT} {}", self.context)
+        };
         let el = div()
             .id("editor")
-            .key_context(CONTEXT)
+            .key_context(context.as_str())
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(Theme::bg())
+            .when(!self.single_line, |d| d.bg(Theme::bg()))
             .cursor(CursorStyle::IBeam)
             .font_family(FONT_FAMILY)
             .text_size(font_size)
@@ -518,10 +568,6 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.page(true, false, cx)))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page(false, false, cx)))
-            .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| this.page(true, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| this.page(false, true, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -554,20 +600,32 @@ impl Render for EditorView {
             DeleteWordLeft => |e| e.delete_word_left(),
             DeleteWordRight => |e| e.delete_word_right(),
             DeleteToLineStart => |e| e.delete_to_line_start(),
+            Undo => |e| { e.undo(); },
+            Redo => |e| { e.redo(); },
+            SelectAll => |e| e.select_all(),
+            SelectNextOccurrence => |e| e.select_next_occurrence(),
+            SelectAllOccurrences => |e| e.select_all_occurrences(),
+        });
+        if self.single_line {
+            return el.child(EditorElement { view: cx.entity() });
+        }
+
+        // multi-line only; in a single-line input these keys fall through to the owner
+        let el = el
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.page(true, false, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page(false, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| this.page(true, true, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| this.page(false, true, cx)));
+        let el = on_editor!(el, cx, {
             Newline => |e| e.newline(),
             Tab => |e| e.tab(),
             Indent => |e| e.indent(),
             Outdent => |e| e.outdent(),
             InsertLineBelow => |e| e.insert_line(true),
             InsertLineAbove => |e| e.insert_line(false),
-            Undo => |e| { e.undo(); },
-            Redo => |e| { e.redo(); },
-            SelectAll => |e| e.select_all(),
             SelectLine => |e| e.select_line(),
             AddCursorAbove => |e| e.add_cursor_vertical(false),
             AddCursorBelow => |e| e.add_cursor_vertical(true),
-            SelectNextOccurrence => |e| e.select_next_occurrence(),
-            SelectAllOccurrences => |e| e.select_all_occurrences(),
             SplitSelectionIntoLines => |e| e.split_selection_into_lines(),
             ToggleComment => |e| e.toggle_comment(),
             MoveLinesUp => |e| e.move_lines(false),
@@ -776,8 +834,9 @@ impl Element for EditorElement {
             }
             let ed = &view.editor;
             let line_count = ed.line_count();
+            let single = view.single_line;
             let digits = line_count.to_string().len().max(3);
-            let gutter_width = em_width * (digits as f32 + 3.);
+            let gutter_width = if single { px(0.) } else { em_width * (digits as f32 + 3.) };
             let text_left = bounds.left() + gutter_width;
             let text_width = bounds.size.width - gutter_width;
             let height = bounds.size.height;
@@ -799,10 +858,25 @@ impl Element for EditorElement {
             let last = (first + (height / line_height).ceil() as usize + 1).min(line_count);
 
             let mut lines = Vec::with_capacity(last - first);
-            for l in first..last {
-                lines.push(shape_line(
-                    view, l, &font, font_size, line_height, &text_system,
-                ));
+            let placeholder = view.placeholder.clone().filter(|_| view.editor.len_chars() == 0);
+            if let Some(text) = placeholder {
+                let run = TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: Theme::muted(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                lines.push(LineLayout {
+                    line: 0,
+                    shaped: text_system.shape_line(text, font_size, &[run], None),
+                    col_bytes: vec![0],
+                });
+            } else {
+                for l in first..last {
+                    lines.push(shape_line(view, l, &font, font_size, &text_system));
+                }
             }
 
             if view.autoscroll {
@@ -818,7 +892,7 @@ impl Element for EditorElement {
                 view.autoscroll = false;
             }
 
-            let pad_left = em_width;
+            let pad_left = if single { px(0.) } else { em_width };
             let origin = point(
                 text_left + pad_left - view.scroll.x,
                 bounds.top() - view.scroll.y,
@@ -845,7 +919,7 @@ impl Element for EditorElement {
                 let line = ed.line_of(s.head);
                 if line >= first && line < last && cursor_lines.last() != Some(&line) {
                     cursor_lines.push(line);
-                    if s.is_empty() {
+                    if s.is_empty() && !single {
                         quads.push((
                             Bounds::new(point(bounds.left(), row_y(line)), size(bounds.size.width, line_height)),
                             Theme::current_line(),
@@ -857,8 +931,27 @@ impl Element for EditorElement {
             let vis_start = ed.line_start(first);
             let vis_end = if last >= line_count { ed.len_chars() } else { ed.line_start(last) };
 
+            let from = view.search_matches.partition_point(|r| r.end < vis_start);
+            for r in &view.search_matches[from..] {
+                if r.start > vis_end {
+                    break;
+                }
+                let (l, c0) = ed.line_col(r.start);
+                let (l_end, c_end) = ed.line_col(r.end);
+                let Some(ll) = layout.line(l) else { continue };
+                let c1 = if l_end == l { c_end } else { ed.line_len(l) };
+                let (x0, x1) = (ll.x_for_col(c0), ll.x_for_col(c1).max(ll.x_for_col(c0) + em_width * 0.5));
+                text_quads.push((
+                    Bounds::from_corners(
+                        point(origin.x + x0, row_y(l)),
+                        point(origin.x + x1, row_y(l) + line_height),
+                    ),
+                    Theme::find_match(),
+                ));
+            }
+
             // other matches of a single short selection
-            if sels.len() == 1 && !newest.is_empty() && newest.end() - newest.start() <= 200 {
+            if view.search_matches.is_empty() && sels.len() == 1 && !newest.is_empty() && newest.end() - newest.start() <= 200 {
                 let needle = ed.slice(newest.range());
                 if !needle.contains('\n') && !needle.trim().is_empty() {
                     let needle = needle.to_ascii_lowercase();
@@ -944,7 +1037,7 @@ impl Element for EditorElement {
 
             // gutter numbers, right aligned
             let mut gutter = Vec::new();
-            for ll in &layout.lines {
+            for ll in layout.lines.iter().filter(|_| !single) {
                 let label: SharedString = (ll.line + 1).to_string().into();
                 let color = if cursor_lines.contains(&ll.line) {
                     Theme::gutter_active()
@@ -965,7 +1058,7 @@ impl Element for EditorElement {
             }
 
             let total = line_height * line_count as f32 + height - line_height;
-            let scrollbar = (total > height).then(|| {
+            let scrollbar = (total > height && !single).then(|| {
                 let thumb = (height * (height / total)).max(px(24.));
                 let y = (height - thumb) * (view.scroll.y / (total - height)).min(1.);
                 Bounds::new(
@@ -1027,10 +1120,12 @@ impl Element for EditorElement {
             }
         });
 
-        window.paint_quad(fill(
-            Bounds::new(bounds.origin, size(layout.gutter_width, bounds.size.height)),
-            Theme::bg(),
-        ));
+        if layout.gutter_width > px(0.) {
+            window.paint_quad(fill(
+                Bounds::new(bounds.origin, size(layout.gutter_width, bounds.size.height)),
+                Theme::bg(),
+            ));
+        }
         for (o, shaped) in &p.gutter {
             shaped.paint(*o, layout.line_height, window, cx).ok();
         }
@@ -1045,11 +1140,14 @@ fn shape_line(
     line: usize,
     font: &gpui::Font,
     font_size: Pixels,
-    _line_height: Pixels,
     text_system: &std::sync::Arc<gpui::WindowTextSystem>,
 ) -> LineLayout {
     let rope = view.editor.rope();
-    let tokens = view.highlighter.line_tokens(rope, line);
+    let tokens = if view.single_line {
+        Vec::new()
+    } else {
+        view.highlighter.line_tokens(rope, line)
+    };
     let text = sql::line_string(rope, line);
     let tab = view.editor.tab_size;
 

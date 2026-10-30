@@ -8,3 +8,4 @@ license.workspace = true
 ropey = "1.6"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
+regex = "1.11"

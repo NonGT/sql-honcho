@@ -46,6 +46,18 @@ impl Theme {
     pub fn selection_match() -> Hsla {
         ca(0x5a5d6366)
     }
+    pub fn find_match() -> Hsla {
+        ca(0x9e6a03aa)
+    }
+    pub fn input_bg() -> Hsla {
+        c(0x2b2d30)
+    }
+    pub fn error() -> Hsla {
+        c(0xf48771)
+    }
+    pub fn accent_dim() -> Hsla {
+        ca(0x3d8bfd33)
+    }
     pub fn cursor() -> Hsla {
         c(0xaeafad)
     }

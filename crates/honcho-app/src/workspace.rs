@@ -6,6 +6,7 @@ use gpui::{
 };
 
 use crate::editor_view::EditorView;
+use crate::find::{self, FindBar};
 use crate::theme::{Theme, FONT_FAMILY, FONT_SIZE};
 use crate::FontSize;
 
@@ -50,17 +51,20 @@ pub struct Workspace {
     tabs: Vec<Entity<EditorView>>,
     active: usize,
     next_untitled: usize,
+    find: Entity<FindBar>,
     subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
     pub fn new(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let find = cx.new(FindBar::new);
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active: 0,
             next_untitled: 1,
-            subscriptions: Vec::new(),
+            subscriptions: vec![cx.observe(&find, |_, _, cx| cx.notify())],
+            find,
         };
         this.new_tab(String::new(), None, window, cx);
         this.open_paths(paths, window, cx);
@@ -86,7 +90,9 @@ impl Workspace {
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix.min(self.tabs.len() - 1);
-        window.focus(&self.active_editor().focus_handle(cx));
+        let editor = self.active_editor().clone();
+        self.find.update(cx, |f, cx| f.set_target(editor.clone(), cx));
+        window.focus(&editor.focus_handle(cx));
         cx.notify();
     }
 
@@ -415,6 +421,18 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &find::Find, window, cx| {
+                this.find.update(cx, |f, cx| f.show(false, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &find::FindReplace, window, cx| {
+                this.find.update(cx, |f, cx| f.show(true, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &find::FindNext, window, cx| {
+                this.find.update(cx, |f, cx| f.next(true, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &find::FindPrev, window, cx| {
+                this.find.update(cx, |f, cx| f.next(false, window, cx))
+            }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
@@ -422,7 +440,16 @@ impl Render for Workspace {
                 this.open_paths(paths.paths().to_vec(), window, cx)
             }))
             .child(self.render_tabs(cx))
-            .child(div().flex_1().min_h_0().child(self.active_editor().clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(self.active_editor().clone())
+                    .when(self.find.read(cx).open, |d| {
+                        d.child(div().absolute().top(px(6.)).right(px(22.)).child(self.find.clone()))
+                    }),
+            )
             .child(self.render_status(cx))
     }
 }

@@ -1,4 +1,5 @@
 pub mod editor;
+pub mod search;
 pub mod sql;
 
 pub use editor::{Editor, Motion, Selection};
