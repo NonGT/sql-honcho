@@ -46,3 +46,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
+
+  integration:
+    name: integration (databases in Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start test databases
+        run: docker/up.sh
+      - name: Check seeds
+        run: docker/check-seeds.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Conformance suite
+        run: cargo test -p honcho-db --locked
+        env:
+          HONCHO_IT: "1"
+      - name: Database logs
+        if: failure()
+        run: docker compose -f docker/compose.yml logs --tail 200

@@ -1,0 +1,64 @@
+# Test databases for the driver conformance suite. Credentials are for
+# local testing only. Start with docker/up.sh, which also seeds SQL Server.
+name: honcho-test
+
+x-password: &password Honcho_test1
+
+services:
+  mysql:
+    image: mysql:8.4
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: *password
+      MYSQL_DATABASE: app
+      MYSQL_USER: honcho
+      MYSQL_PASSWORD: *password
+    ports: ["33306:3306"]
+    volumes: ["./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    healthcheck:
+      # TCP so the temporary init server (sockets only) doesn't count
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uhoncho", "-pHoncho_test1"]
+      interval: 2s
+      retries: 60
+
+  mariadb:
+    image: mariadb:11.4
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_ROOT_PASSWORD: *password
+      MARIADB_DATABASE: app
+      MARIADB_USER: honcho
+      MARIADB_PASSWORD: *password
+    ports: ["33307:3306"]
+    volumes: ["./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      retries: 60
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: honcho
+      POSTGRES_PASSWORD: *password
+      POSTGRES_DB: app
+    ports: ["35432:5432"]
+    volumes: ["./seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "honcho", "-d", "app"]
+      interval: 2s
+      retries: 60
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    # amd64 only; runs under emulation on Apple Silicon
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: *password
+    ports: ["31433:1433"]
+    volumes: ["./seed:/seed:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Honcho_test1 -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 3s
+      retries: 80

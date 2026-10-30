@@ -2,6 +2,7 @@
 //!
 //! - `rows N`: a result set of N rows (`id`, `name`)
 //! - `trickle N MS`: N rows, one every MS milliseconds
+//! - `types`: one row with a value of each kind (see [`types_row`])
 //! - `update N`: a statement that affected N rows
 //! - `warn TEXT`: a warning message
 //! - `sleep MS`: wait, stopping early when cancelled
@@ -77,6 +78,21 @@ impl Canceller for FakeCanceller {
 
 const DATABASES: &[&str] = &["app", "analytics"];
 
+type TypeCase = (&'static str, &'static str, fn() -> Value);
+
+const TYPES_ROW: &[TypeCase] = &[
+    ("n", "bigint", || Value::Int(42)),
+    ("d", "decimal(12,2)", || Value::Decimal("12.50".into())),
+    ("t", "varchar(64)", || Value::Text("สวัสดี 😀".into())),
+    ("z", "varchar(1)", || Value::Null),
+    ("day", "date", || Value::Date("2024-01-31".into())),
+];
+
+/// The row the `types` command returns.
+pub fn types_row() -> Vec<Value> {
+    TYPES_ROW.iter().map(|(_, _, v)| v()).collect()
+}
+
 fn objects_in(database: &str) -> Vec<ObjectRef> {
     let mk = |kind, name: &str| ObjectRef::new(kind, name).in_database(database);
     vec![
@@ -129,6 +145,15 @@ impl Connection for FakeConnection {
                         tokio::time::sleep(Duration::from_millis(ms)).await;
                         sink.row(vec![Value::Int(i as i64)]).await?;
                     }
+                    sink.done(None).await?;
+                }
+                "types" => {
+                    let cols = TYPES_ROW
+                        .iter()
+                        .map(|(n, t, _)| Column::new(*n, *t))
+                        .collect();
+                    sink.columns(cols).await?;
+                    sink.row(types_row()).await?;
                     sink.done(None).await?;
                 }
                 "update" => sink.done(Some(n()?)).await?,
