@@ -10,4 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 honcho-core = { path = "../honcho-core" }
+
+# runtime_shaders avoids needing Xcode's Metal toolchain; Linux and Windows
+# use gpui's defaults (wayland + x11, DirectX)
+[target.'cfg(target_os = "macos")'.dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+gpui = "0.2.2"
