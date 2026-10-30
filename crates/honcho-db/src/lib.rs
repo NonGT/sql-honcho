@@ -5,6 +5,7 @@
 //! on a background tokio runtime and hand results back over channels that can
 //! be awaited from any executor.
 
+pub mod conformance;
 mod driver;
 mod error;
 #[cfg(any(test, feature = "fake"))]
