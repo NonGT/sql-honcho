@@ -1,8 +1,54 @@
-use gpui::{rgb, rgba, Hsla};
+use gpui::{px, rgb, rgba, App, Global, Hsla, Pixels, SharedString};
 use honcho_core::sql::TokenKind;
 
-pub const FONT_FAMILY: &str = "Menlo";
+use crate::keymap::Platform;
+
 pub const FONT_SIZE: f32 = 13.0;
+
+/// The monospace font used everywhere, resolved once at startup.
+pub struct EditorFont {
+    pub family: SharedString,
+    pub size: Pixels,
+}
+
+impl Global for EditorFont {}
+
+fn mono_candidates(p: Platform) -> &'static [&'static str] {
+    match p {
+        Platform::Mac => &["Menlo", "SF Mono", "Monaco"],
+        Platform::Windows => &["Cascadia Mono", "Consolas", "Courier New"],
+        Platform::Linux => &[
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "Noto Sans Mono",
+            "Ubuntu Mono",
+            "monospace",
+        ],
+    }
+}
+
+/// First preferred font that is installed, else the last candidate (a
+/// generic name the platform resolves itself).
+pub fn pick_mono_font(installed: &[String], p: Platform) -> &'static str {
+    let candidates = mono_candidates(p);
+    candidates
+        .iter()
+        .find(|c| installed.iter().any(|f| f.eq_ignore_ascii_case(c)))
+        .unwrap_or(candidates.last().unwrap())
+}
+
+pub fn init_font(cx: &mut App) {
+    let installed = cx.text_system().all_font_names();
+    let family = pick_mono_font(&installed, Platform::current());
+    cx.set_global(EditorFont {
+        family: family.into(),
+        size: px(FONT_SIZE),
+    });
+}
+
+pub fn font_family(cx: &App) -> SharedString {
+    cx.global::<EditorFont>().family.clone()
+}
 pub const LINE_HEIGHT_RATIO: f32 = 1.55;
 
 pub fn c(hex: u32) -> Hsla {
@@ -82,5 +128,18 @@ impl Theme {
             TokenKind::Punctuation => c(0xa0a3a8),
             TokenKind::Variable => c(0xc586c0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_the_first_installed_font() {
+        let installed = vec!["Arial".to_string(), "consolas".to_string()];
+        assert_eq!(pick_mono_font(&installed, Platform::Windows), "Consolas");
+        assert_eq!(pick_mono_font(&[], Platform::Linux), "monospace");
+        assert_eq!(pick_mono_font(&["Menlo".into()], Platform::Mac), "Menlo");
     }
 }

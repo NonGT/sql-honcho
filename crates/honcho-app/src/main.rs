@@ -1,21 +1,18 @@
 mod editor_view;
 mod find;
+mod keymap;
 mod theme;
 mod workspace;
 
 use std::path::PathBuf;
 
 use gpui::{
-    px, size, App, AppContext, Application, Bounds, Global, Menu, MenuItem, Pixels,
-    TitlebarOptions, WindowBounds, WindowOptions,
+    px, size, App, AppContext, Application, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    WindowOptions,
 };
 
 use editor_view as ed;
 use workspace::Workspace;
-
-pub struct FontSize(pub Pixels);
-
-impl Global for FontSize {}
 
 fn menus() -> Vec<Menu> {
     vec![
@@ -92,10 +89,8 @@ fn main() {
     let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
 
     Application::new().run(move |cx: &mut App| {
-        cx.set_global(FontSize(px(theme::FONT_SIZE)));
-        ed::bind_keys(cx);
-        find::bind_keys(cx);
-        workspace::bind_keys(cx);
+        theme::init_font(cx);
+        keymap::install(cx);
         cx.set_menus(menus());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
