@@ -6,15 +6,14 @@ use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
     ContentMask, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString, Style,
     Styled, TextRun, UTF16Selection, Window,
 };
 use honcho_core::sql::{self, Highlighter};
 use honcho_core::{Editor, LineEnding, Motion, Selection};
 
-use crate::theme::{Theme, FONT_FAMILY, LINE_HEIGHT_RATIO};
-use crate::FontSize;
+use crate::theme::{EditorFont, Theme, LINE_HEIGHT_RATIO};
 
 actions!(
     editor,
@@ -77,75 +76,6 @@ actions!(
 );
 
 const CONTEXT: &str = "Editor";
-
-pub fn bind_keys(cx: &mut App) {
-    let c = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("left", MoveLeft, c),
-        KeyBinding::new("right", MoveRight, c),
-        KeyBinding::new("up", MoveUp, c),
-        KeyBinding::new("down", MoveDown, c),
-        KeyBinding::new("shift-left", SelectLeft, c),
-        KeyBinding::new("shift-right", SelectRight, c),
-        KeyBinding::new("shift-up", SelectUp, c),
-        KeyBinding::new("shift-down", SelectDown, c),
-        KeyBinding::new("alt-left", MoveWordLeft, c),
-        KeyBinding::new("alt-right", MoveWordRight, c),
-        KeyBinding::new("alt-shift-left", SelectWordLeft, c),
-        KeyBinding::new("alt-shift-right", SelectWordRight, c),
-        KeyBinding::new("cmd-left", MoveLineStart, c),
-        KeyBinding::new("home", MoveLineStart, c),
-        KeyBinding::new("ctrl-a", MoveLineStart, c),
-        KeyBinding::new("cmd-right", MoveLineEnd, c),
-        KeyBinding::new("end", MoveLineEnd, c),
-        KeyBinding::new("ctrl-e", MoveLineEnd, c),
-        KeyBinding::new("cmd-shift-left", SelectLineStart, c),
-        KeyBinding::new("shift-home", SelectLineStart, c),
-        KeyBinding::new("cmd-shift-right", SelectLineEnd, c),
-        KeyBinding::new("shift-end", SelectLineEnd, c),
-        KeyBinding::new("cmd-up", MoveDocStart, c),
-        KeyBinding::new("cmd-down", MoveDocEnd, c),
-        KeyBinding::new("cmd-shift-up", SelectDocStart, c),
-        KeyBinding::new("cmd-shift-down", SelectDocEnd, c),
-        KeyBinding::new("pageup", PageUp, c),
-        KeyBinding::new("pagedown", PageDown, c),
-        KeyBinding::new("shift-pageup", SelectPageUp, c),
-        KeyBinding::new("shift-pagedown", SelectPageDown, c),
-        KeyBinding::new("backspace", Backspace, c),
-        KeyBinding::new("shift-backspace", Backspace, c),
-        KeyBinding::new("delete", Delete, c),
-        KeyBinding::new("alt-backspace", DeleteWordLeft, c),
-        KeyBinding::new("alt-delete", DeleteWordRight, c),
-        KeyBinding::new("cmd-backspace", DeleteToLineStart, c),
-        KeyBinding::new("enter", Newline, c),
-        KeyBinding::new("shift-enter", Newline, c),
-        KeyBinding::new("tab", Tab, c),
-        KeyBinding::new("shift-tab", Outdent, c),
-        KeyBinding::new("cmd-]", Indent, c),
-        KeyBinding::new("cmd-[", Outdent, c),
-        KeyBinding::new("cmd-enter", InsertLineBelow, c),
-        KeyBinding::new("cmd-shift-enter", InsertLineAbove, c),
-        KeyBinding::new("cmd-z", Undo, c),
-        KeyBinding::new("cmd-shift-z", Redo, c),
-        KeyBinding::new("cmd-a", SelectAll, c),
-        KeyBinding::new("cmd-l", SelectLine, c),
-        KeyBinding::new("cmd-c", Copy, c),
-        KeyBinding::new("cmd-x", Cut, c),
-        KeyBinding::new("cmd-v", Paste, c),
-        KeyBinding::new("alt-cmd-up", AddCursorAbove, c),
-        KeyBinding::new("alt-cmd-down", AddCursorBelow, c),
-        KeyBinding::new("cmd-d", SelectNextOccurrence, c),
-        KeyBinding::new("cmd-shift-l", SelectAllOccurrences, c),
-        KeyBinding::new("alt-shift-i", SplitSelectionIntoLines, c),
-        KeyBinding::new("escape", Cancel, c),
-        KeyBinding::new("cmd-/", ToggleComment, c),
-        KeyBinding::new("alt-up", MoveLinesUp, c),
-        KeyBinding::new("alt-down", MoveLinesDown, c),
-        KeyBinding::new("alt-shift-up", CopyLinesUp, c),
-        KeyBinding::new("alt-shift-down", CopyLinesDown, c),
-        KeyBinding::new("cmd-shift-k", DeleteLines, c),
-    ]);
-}
 
 /// Last text we put on the clipboard as whole lines, so pasting it inserts
 /// above the cursor line like VS Code.
@@ -582,7 +512,8 @@ macro_rules! on_editor {
 
 impl Render for EditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let font_size = cx.global::<FontSize>().0;
+        let font = cx.global::<EditorFont>();
+        let (font_family, font_size) = (font.family.clone(), font.size);
         let context = if self.context.is_empty() {
             CONTEXT.to_string()
         } else {
@@ -595,7 +526,7 @@ impl Render for EditorView {
             .size_full()
             .when(!self.single_line, |d| d.bg(Theme::bg()))
             .cursor(CursorStyle::IBeam)
-            .font_family(FONT_FAMILY)
+            .font_family(font_family)
             .text_size(font_size)
             .line_height(font_size * LINE_HEIGHT_RATIO)
             .text_color(Theme::text())

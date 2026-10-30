@@ -1,14 +1,14 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, Hsla, KeyBinding,
-    MouseButton, Subscription, Window,
+    actions, div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, Hsla, MouseButton,
+    Subscription, Window,
 };
 use honcho_core::search::{self, SearchQuery};
 use honcho_core::Selection;
 
 use crate::editor_view::{self, EditorView};
-use crate::theme::{Theme, FONT_FAMILY};
+use crate::theme::{self, Theme};
 
 actions!(
     find,
@@ -27,31 +27,6 @@ actions!(
         FocusReplace,
     ]
 );
-
-/// Must run after the editor bindings so Enter etc. win inside the inputs.
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-f", Find, None),
-        KeyBinding::new("ctrl-f", Find, None),
-        KeyBinding::new("cmd-alt-f", FindReplace, None),
-        KeyBinding::new("ctrl-h", FindReplace, None),
-        KeyBinding::new("cmd-g", FindNext, None),
-        KeyBinding::new("f3", FindNext, None),
-        KeyBinding::new("cmd-shift-g", FindPrev, None),
-        KeyBinding::new("shift-f3", FindPrev, None),
-        KeyBinding::new("alt-cmd-c", ToggleCase, Some("FindBar")),
-        KeyBinding::new("alt-cmd-w", ToggleWholeWord, Some("FindBar")),
-        KeyBinding::new("alt-cmd-r", ToggleRegex, Some("FindBar")),
-        KeyBinding::new("enter", FindNext, Some("FindQuery")),
-        KeyBinding::new("shift-enter", FindPrev, Some("FindQuery")),
-        KeyBinding::new("alt-enter", SelectAllMatches, Some("FindQuery")),
-        KeyBinding::new("tab", FocusReplace, Some("FindQuery")),
-        KeyBinding::new("enter", ReplaceNext, Some("ReplaceQuery")),
-        KeyBinding::new("cmd-enter", ReplaceAll, Some("ReplaceQuery")),
-        KeyBinding::new("cmd-alt-enter", ReplaceAll, Some("FindBar")),
-        KeyBinding::new("shift-tab", FocusFind, Some("ReplaceQuery")),
-    ]);
-}
 
 pub struct FindBar {
     focus_handle: FocusHandle,
@@ -531,7 +506,7 @@ impl Render for FindBar {
             .border_color(Theme::border())
             .rounded_md()
             .shadow_lg()
-            .font_family(FONT_FAMILY)
+            .font_family(theme::font_family(cx))
             .text_size(px(12.))
             .on_action(cx.listener(|this, _: &FindNext, window, cx| this.next(true, window, cx)))
             .on_action(cx.listener(|this, _: &FindPrev, window, cx| this.next(false, window, cx)))

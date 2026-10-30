@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    actions, div, prelude::*, px, App, Context, Entity, ExternalPaths, FocusHandle, Focusable,
-    KeyBinding, MouseButton, PromptLevel, SharedString, Subscription, Task, Window,
+    actions, canvas, div, point, prelude::*, px, App, Bounds, Context, CursorStyle, Decorations,
+    Entity, ExternalPaths, FocusHandle, Focusable, HitboxBehavior, MouseButton, Pixels, Point,
+    PromptLevel, ResizeEdge, SharedString, Size, Subscription, Task, Window,
 };
 
 use crate::editor_view::EditorView;
 use crate::find::{self, FindBar};
-use crate::theme::{Theme, FONT_FAMILY, FONT_SIZE};
-use crate::FontSize;
+use crate::theme::{self, EditorFont, Theme, FONT_SIZE};
 
 actions!(
     workspace,
@@ -18,25 +18,6 @@ actions!(
     ]
 );
 
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-n", NewFile, None),
-        KeyBinding::new("cmd-o", OpenFile, None),
-        KeyBinding::new("cmd-s", Save, None),
-        KeyBinding::new("cmd-shift-s", SaveAs, None),
-        KeyBinding::new("cmd-w", CloseTab, None),
-        KeyBinding::new("ctrl-tab", NextTab, None),
-        KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-        KeyBinding::new("cmd-shift-]", NextTab, None),
-        KeyBinding::new("cmd-shift-[", PrevTab, None),
-        KeyBinding::new("cmd-=", ZoomIn, None),
-        KeyBinding::new("cmd-+", ZoomIn, None),
-        KeyBinding::new("cmd--", ZoomOut, None),
-        KeyBinding::new("cmd-0", ZoomReset, None),
-        KeyBinding::new("cmd-q", Quit, None),
-    ]);
-}
-
 pub struct Workspace {
     focus_handle: FocusHandle,
     tabs: Vec<Entity<EditorView>>,
@@ -44,6 +25,8 @@ pub struct Workspace {
     next_untitled: usize,
     find: Entity<FindBar>,
     subscriptions: Vec<Subscription>,
+    /// The user already agreed to lose unsaved changes on close.
+    discard_confirmed: bool,
 }
 
 impl Workspace {
@@ -55,11 +38,63 @@ impl Workspace {
             active: 0,
             next_untitled: 1,
             subscriptions: vec![cx.observe(&find, |_, _, cx| cx.notify())],
+            discard_confirmed: false,
             find,
         };
         this.new_tab(String::new(), None, window, cx);
         this.open_paths(paths, window, cx);
+
+        let handle = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            handle
+                .update(cx, |this, cx| this.should_close(window, cx))
+                .unwrap_or(true)
+        });
         this
+    }
+
+    fn dirty_count(&self, cx: &App) -> usize {
+        self.tabs.iter().filter(|t| t.read(cx).is_dirty()).count()
+    }
+
+    /// Run `then` right away if nothing is unsaved, otherwise after the
+    /// user confirms losing the changes.
+    fn confirm_discard(
+        &mut self,
+        verb: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let dirty = self.dirty_count(cx);
+        if dirty == 0 || self.discard_confirmed {
+            then(self, window, cx);
+            return;
+        }
+        let msg = format!(
+            "{dirty} file{} not saved. {verb} anyway?",
+            if dirty == 1 { " is" } else { "s are" }
+        );
+        let answer = window.prompt(PromptLevel::Warning, &msg, None, &[verb, "Cancel"], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update_in(cx, |this, window, cx| {
+                    this.discard_confirmed = true;
+                    then(this, window, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Window close button. Returns whether the window may close now.
+    fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.discard_confirmed || self.dirty_count(cx) == 0 {
+            return true;
+        }
+        self.confirm_discard("Close", window, cx, |_, window, _| window.remove_window());
+        false
     }
 
     fn active_editor(&self) -> &Entity<EditorView> {
@@ -181,7 +216,7 @@ impl Workspace {
                 .as_deref()
                 .and_then(Path::parent)
                 .map(Path::to_path_buf)
-                .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+                .or_else(std::env::home_dir)
                 .unwrap_or_else(|| PathBuf::from("/"));
             let name = if title.ends_with(".sql") {
                 title.clone()
@@ -291,32 +326,82 @@ impl Workspace {
     }
 
     fn zoom(&mut self, size: Option<f32>, cx: &mut Context<Self>) {
-        let current = cx.global::<FontSize>().0;
+        let current = cx.global::<EditorFont>().size;
         let next = match size {
             Some(delta) => (current + px(delta)).max(px(8.)).min(px(40.)),
             None => px(FONT_SIZE),
         };
-        cx.set_global(FontSize(next));
+        cx.global_mut::<EditorFont>().size = next;
         cx.notify();
     }
 
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = self.tabs.iter().filter(|t| t.read(cx).is_dirty()).count();
-        if dirty == 0 {
-            cx.quit();
-            return;
-        }
-        let msg = format!(
-            "{dirty} file{} not saved. Quit anyway?",
-            if dirty == 1 { " is" } else { "s are" }
-        );
-        let answer = window.prompt(PromptLevel::Warning, &msg, None, &["Quit", "Cancel"], cx);
-        cx.spawn(async move |_, cx| {
-            if answer.await == Ok(0) {
-                cx.update(|cx| cx.quit()).ok();
-            }
-        })
-        .detach();
+        self.confirm_discard("Quit", window, cx, |_, _, cx| cx.quit());
+    }
+
+    /// Our own title bar, for when the window manager doesn't draw one
+    /// (client-side decorations on Wayland).
+    fn render_titlebar(&self, title: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let button = |label: &'static str| {
+            div()
+                .flex_none()
+                .w(px(36.))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(Theme::muted())
+                .hover(|d| d.bg(Theme::border()).text_color(Theme::text()))
+                .child(label)
+        };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(32.))
+            .pl_3()
+            .bg(Theme::panel())
+            .border_b_1()
+            .border_color(Theme::border())
+            .on_mouse_down(MouseButton::Left, |e, window, _| {
+                if e.click_count == 2 {
+                    window.zoom_window();
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .on_mouse_down(MouseButton::Right, |e, window, _| {
+                window.show_window_menu(e.position)
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(Theme::muted())
+                    .child(title),
+            )
+            .child(
+                button("—").on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    cx.stop_propagation();
+                    window.minimize_window();
+                }),
+            )
+            .child(
+                button("□").on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    cx.stop_propagation();
+                    window.zoom_window();
+                }),
+            )
+            .child(button("✕").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    if this.should_close(window, cx) {
+                        window.remove_window();
+                    }
+                }),
+            ))
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -432,12 +517,22 @@ impl Render for Workspace {
             let e = self.active_editor().read(cx);
             (e.title(), e.is_dirty())
         };
-        window.set_window_title(&format!(
-            "{title}{} — sql-honcho",
-            if dirty { " ●" } else { "" }
-        ));
+        let full_title = format!("{title}{} — sql-honcho", if dirty { " ●" } else { "" });
+        window.set_window_title(&full_title);
+        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
 
         div()
+            .relative()
+            .when(client_decorations, |d| {
+                d.child(resize_cursor_overlay())
+                    .on_mouse_down(MouseButton::Left, |e, window, _| {
+                        let size = window.window_bounds().get_bounds().size;
+                        if let Some(edge) = resize_edge(e.position, size) {
+                            window.start_window_resize(edge);
+                        }
+                    })
+                    .child(self.render_titlebar(full_title.clone(), cx))
+            })
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -445,7 +540,7 @@ impl Render for Workspace {
             .flex_col()
             .bg(Theme::bg())
             .text_color(Theme::text())
-            .font_family(FONT_FAMILY)
+            .font_family(theme::font_family(cx))
             .text_size(px(12.))
             .on_action(cx.listener(Self::new_file))
             .on_action(cx.listener(Self::open_file))
@@ -491,5 +586,77 @@ impl Render for Workspace {
                     }),
             )
             .child(self.render_status(cx))
+    }
+}
+
+const RESIZE_BORDER: Pixels = px(5.);
+
+fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEdge> {
+    let b = RESIZE_BORDER;
+    let (left, right) = (pos.x < b, pos.x > size.width - b);
+    let (top, bottom) = (pos.y < b, pos.y > size.height - b);
+    Some(match (top, bottom, left, right) {
+        (true, _, true, _) => ResizeEdge::TopLeft,
+        (true, _, _, true) => ResizeEdge::TopRight,
+        (_, true, true, _) => ResizeEdge::BottomLeft,
+        (_, true, _, true) => ResizeEdge::BottomRight,
+        (true, ..) => ResizeEdge::Top,
+        (_, true, ..) => ResizeEdge::Bottom,
+        (_, _, true, _) => ResizeEdge::Left,
+        (_, _, _, true) => ResizeEdge::Right,
+        _ => return None,
+    })
+}
+
+/// Shows resize cursors along the window edges.
+fn resize_cursor_overlay() -> impl IntoElement {
+    canvas(
+        |_, window, _| {
+            let size = window.window_bounds().get_bounds().size;
+            window.insert_hitbox(
+                Bounds::new(point(px(0.), px(0.)), size),
+                HitboxBehavior::Normal,
+            )
+        },
+        |_, hitbox, window, _| {
+            let size = window.window_bounds().get_bounds().size;
+            let Some(edge) = resize_edge(window.mouse_position(), size) else {
+                return;
+            };
+            let style = match edge {
+                ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
+                ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
+                ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+                ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+            };
+            window.set_cursor_style(style, &hitbox);
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::size;
+
+    use super::*;
+
+    #[test]
+    fn resize_edges() {
+        let s = size(px(800.), px(600.));
+        assert_eq!(
+            resize_edge(point(px(2.), px(2.)), s),
+            Some(ResizeEdge::TopLeft)
+        );
+        assert_eq!(
+            resize_edge(point(px(400.), px(598.)), s),
+            Some(ResizeEdge::Bottom)
+        );
+        assert_eq!(
+            resize_edge(point(px(799.), px(300.)), s),
+            Some(ResizeEdge::Right)
+        );
+        assert_eq!(resize_edge(point(px(400.), px(300.)), s), None);
     }
 }
