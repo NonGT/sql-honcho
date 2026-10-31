@@ -168,6 +168,10 @@ impl Workspace {
             };
             if self.active_editor().read(cx).is_pristine() {
                 let ix = self.active;
+                // hand the replaced tab's number back so ctrl-n starts at 1 again
+                if self.tabs[ix].read(cx).untitled_index + 1 == self.next_untitled {
+                    self.next_untitled -= 1;
+                }
                 self.tabs[ix] = cx.new(|cx| EditorView::new(&text, Some(path), 0, cx));
                 self.subscriptions
                     .push(cx.observe(&self.tabs[ix], |_, _, cx| cx.notify()));

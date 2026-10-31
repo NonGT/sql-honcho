@@ -76,6 +76,7 @@ struct Snapshot {
     text: Rope,
     selections: Vec<Selection>,
     newest: usize,
+    revision: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,8 @@ pub struct Editor {
     redo: Vec<Snapshot>,
     last_edit: Option<EditKind>,
     version: u64,
+    revision: u64,
+    next_revision: u64,
     dirty_from_line: Option<usize>,
     /// Cmd+D started from an empty cursor matches whole words only.
     whole_word_search: bool,
@@ -145,6 +148,8 @@ impl Editor {
             redo: Vec::new(),
             last_edit: None,
             version: 0,
+            revision: 0,
+            next_revision: 0,
             dirty_from_line: Some(0),
             whole_word_search: false,
             tab_size: 4,
@@ -161,6 +166,12 @@ impl Editor {
 
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Identifies the buffer contents: unlike `version`, undoing back to a
+    /// state gives its old revision again.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// First line whose highlighting may be stale since the last call.
@@ -400,6 +411,7 @@ impl Editor {
                 text: self.text.clone(),
                 selections: self.selections.clone(),
                 newest: self.newest,
+                revision: self.revision,
             });
             if self.undo.len() > UNDO_LIMIT {
                 self.undo.remove(0);
@@ -454,6 +466,8 @@ impl Editor {
             delta += edits[i].1.chars().count() as isize - edits[i].0.len() as isize;
         }
         self.version += 1;
+        self.next_revision += 1;
+        self.revision = self.next_revision;
         self.normalize();
         starts
     }
@@ -466,6 +480,7 @@ impl Editor {
             text: std::mem::replace(&mut self.text, snap.text),
             selections: std::mem::replace(&mut self.selections, snap.selections),
             newest: self.newest,
+            revision: std::mem::replace(&mut self.revision, snap.revision),
         });
         self.newest = snap.newest;
         self.after_history_jump();
@@ -480,6 +495,7 @@ impl Editor {
             text: std::mem::replace(&mut self.text, snap.text),
             selections: std::mem::replace(&mut self.selections, snap.selections),
             newest: self.newest,
+            revision: std::mem::replace(&mut self.revision, snap.revision),
         });
         self.newest = snap.newest;
         self.after_history_jump();
