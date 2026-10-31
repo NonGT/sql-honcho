@@ -5,7 +5,7 @@
 //! `secondary-`, which resolves against the host. That way the tests can
 //! check every platform's table from any machine.
 
-use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate};
+use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, PlatformKeyboardMapper};
 
 use crate::editor_view::*;
 use crate::find::*;
@@ -72,13 +72,33 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
 }
 
 pub fn install(cx: &mut App) {
-    let bindings = bindings(Platform::current())
-        .into_iter()
-        .map(|b| to_key_binding(&b).expect("default keymap is valid"));
+    bind(cx);
+    // punctuation bindings are resolved against the active layout on Windows
+    cx.on_keyboard_layout_change(|cx| {
+        cx.clear_key_bindings();
+        bind(cx);
+    })
+    .detach();
+}
+
+fn bind(cx: &mut App) {
+    // Windows reports punctuation keys as the character of the active layout
+    // (ctrl-/ arrives as ctrl-ฝ with the Thai keyboard), so map each binding
+    // to whatever that layout puts on the US key.
+    let p = Platform::current();
+    let mapper = cx.keyboard_mapper().clone();
+    let bindings = bindings(p).into_iter().map(|b| {
+        to_key_binding(&b, p == Platform::Windows, mapper.as_ref())
+            .expect("default keymap is valid")
+    });
     cx.bind_keys(bindings);
 }
 
-fn to_key_binding(b: &Binding) -> Result<KeyBinding, String> {
+fn to_key_binding(
+    b: &Binding,
+    use_key_equivalents: bool,
+    mapper: &dyn PlatformKeyboardMapper,
+) -> Result<KeyBinding, String> {
     let predicate = match b.context {
         Some(c) => Some(
             KeyBindingContextPredicate::parse(c)
@@ -91,9 +111,9 @@ fn to_key_binding(b: &Binding) -> Result<KeyBinding, String> {
         &b.keys,
         (b.action)(),
         predicate,
-        false,
+        use_key_equivalents,
         None,
-        &DummyKeyboardMapper,
+        mapper,
     )
     .map_err(|e| format!("{}: {e}", b.keys))
 }
@@ -327,7 +347,8 @@ mod tests {
     fn every_binding_parses() {
         for p in ALL {
             for b in bindings(p) {
-                to_key_binding(&b).unwrap_or_else(|e| panic!("{p:?}: {e}"));
+                to_key_binding(&b, false, &gpui::DummyKeyboardMapper)
+                    .unwrap_or_else(|e| panic!("{p:?}: {e}"));
                 assert!(!b.keys.contains("P-"), "{p:?}: unexpanded {}", b.keys);
             }
         }

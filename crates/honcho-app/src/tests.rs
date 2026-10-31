@@ -230,3 +230,58 @@ fn window_close_without_changes_does_not_ask(cx: &mut TestAppContext) {
     assert!(ws.update_in(cx, |ws, window, cx| ws.should_close(window, cx)));
     assert!(!cx.has_pending_prompt());
 }
+
+#[gpui::test]
+fn undoing_every_edit_clears_the_dirty_marker(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    let dirty = |ws: &Entity<Workspace>, cx: &mut VisualTestContext| {
+        ws.read_with(cx, |ws, cx| ws.active_editor().read(cx).is_dirty())
+    };
+    cx.simulate_input("abc");
+    press(cx, "enter");
+    assert!(dirty(&ws, cx));
+    press(cx, "P-z P-z");
+    assert_eq!(text(&ws, cx), "");
+    assert!(!dirty(&ws, cx));
+    press(cx, "P-shift-z");
+    assert!(dirty(&ws, cx));
+}
+
+#[gpui::test]
+fn find_with_no_results_hides_selection_highlights(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    cx.simulate_input("qux QUERY qux");
+    set_cursor(&ws, cx, 0);
+    let searching = |ws: &Entity<Workspace>, cx: &mut VisualTestContext| {
+        ws.read_with(cx, |ws, cx| ws.active_editor().read(cx).searching)
+    };
+    press(cx, "P-f");
+    let find = ws.read_with(cx, |ws, _| ws.find_bar().clone());
+    press(cx, "P-a");
+    cx.simulate_input("qu");
+    // the first match is now selected; the find highlights replace the
+    // usual highlighting of other occurrences of the selection
+    assert_eq!(find.read_with(cx, |f, _| f.match_count()), 3);
+    press(
+        cx,
+        match Platform::current() {
+            Platform::Mac => "alt-cmd-w",
+            _ => "alt-w",
+        },
+    );
+    assert_eq!(find.read_with(cx, |f, _| f.match_count()), 0);
+    assert!(searching(&ws, cx));
+    press(cx, "escape");
+    assert!(!searching(&ws, cx));
+}
+
+#[gpui::test]
+fn opening_a_file_gives_back_the_untitled_number(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.sql");
+    std::fs::write(&path, "select 1").unwrap();
+    let (ws, cx) = open(cx, vec![path]);
+    press(cx, "P-n");
+    let title = ws.read_with(cx, |ws, cx| ws.active_editor().read(cx).title());
+    assert_eq!(title, "Untitled-1");
+}

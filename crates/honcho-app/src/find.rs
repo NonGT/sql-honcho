@@ -147,8 +147,9 @@ impl FindBar {
     fn clear_highlights(&mut self, cx: &mut Context<Self>) {
         if let Some(target) = &self.target {
             target.update(cx, |t, cx| {
-                if !t.search_matches.is_empty() {
+                if t.searching {
                     t.search_matches.clear();
+                    t.searching = false;
                     cx.notify();
                 }
             });
@@ -187,6 +188,7 @@ impl FindBar {
         let origin = self.origin;
         target.update(cx, |t, cx| {
             t.search_matches = matches;
+            t.searching = !query.text.is_empty();
             if jump && query_changed {
                 if let Some(r) = t
                     .search_matches

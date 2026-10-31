@@ -153,7 +153,7 @@ pub struct EditorView {
     pub path: Option<PathBuf>,
     pub untitled_index: usize,
     pub line_ending: LineEnding,
-    saved_version: u64,
+    saved_revision: u64,
     scroll: Point<Pixels>,
     autoscroll: bool,
     drag: Drag,
@@ -165,6 +165,8 @@ pub struct EditorView {
     placeholder: Option<SharedString>,
     /// Find matches to highlight, sorted, in char offsets.
     pub search_matches: Vec<Range<usize>>,
+    /// The find bar has a query for this editor, even if nothing matched.
+    pub searching: bool,
 }
 
 impl EditorView {
@@ -178,7 +180,7 @@ impl EditorView {
         let editor = Editor::new(&text);
         Self {
             focus_handle: cx.focus_handle(),
-            saved_version: editor.version(),
+            saved_revision: editor.revision(),
             editor,
             highlighter: Highlighter::new(),
             path,
@@ -193,6 +195,7 @@ impl EditorView {
             context: "",
             placeholder: None,
             search_matches: Vec::new(),
+            searching: false,
         }
     }
 
@@ -241,7 +244,7 @@ impl EditorView {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.editor.version() != self.saved_version
+        self.editor.revision() != self.saved_revision
     }
 
     /// Untitled and never touched, so opening a file can reuse the tab.
@@ -255,7 +258,7 @@ impl EditorView {
 
     pub fn mark_saved(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.path = Some(path);
-        self.saved_version = self.editor.version();
+        self.saved_revision = self.editor.revision();
         cx.notify();
     }
 
@@ -955,7 +958,7 @@ impl Element for EditorElement {
             }
 
             // other matches of a single short selection
-            if view.search_matches.is_empty()
+            if !view.searching
                 && sels.len() == 1
                 && !newest.is_empty()
                 && newest.end() - newest.start() <= 200

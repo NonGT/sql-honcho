@@ -1,6 +1,6 @@
 # sql-honcho
 
-A native SQL editor and database client for macOS, written in Rust on top of
+A native SQL editor and database client written in Rust on top of
 [gpui](https://crates.io/crates/gpui).
 
 The goal is a fast editor that behaves like VS Code (multi-cursor, line
@@ -19,6 +19,12 @@ need the usual gpui packages, e.g. on Debian/Ubuntu:
     sudo apt install pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
       libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev \
       libfreetype-dev libvulkan-dev libssl-dev libzstd-dev
+
+On Windows you need the Visual Studio C++ build tools and a Windows SDK. On
+ARM64 Windows you also need clang on PATH (`winget install LLVM.LLVM`) for
+the `ring` dependency. If a release build fails running `fxc.exe`, point
+`GPUI_FXC_PATH` at the arm64 one, e.g.
+`C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\arm64\fxc.exe`.
 
 ## Editor keys
 

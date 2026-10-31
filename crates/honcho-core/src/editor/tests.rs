@@ -297,3 +297,23 @@ fn typing_after_stepping_over_a_closer_can_be_undone() {
     assert!(e.undo());
     assert_eq!(e.text(), "x");
 }
+
+#[test]
+fn undo_back_to_a_state_restores_its_revision() {
+    let mut e = ed("a|");
+    let saved = e.revision();
+    e.type_text("b");
+    e.newline();
+    e.type_text("c");
+    assert_ne!(e.revision(), saved);
+    while e.undo() {}
+    assert_eq!(e.revision(), saved);
+    e.redo();
+    let after_first = e.revision();
+    assert_ne!(after_first, saved);
+    // a new edit after undoing never reuses an old revision
+    e.undo();
+    e.type_text("x");
+    assert_ne!(e.revision(), after_first);
+    assert_ne!(e.revision(), saved);
+}
