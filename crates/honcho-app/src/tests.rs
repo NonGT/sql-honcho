@@ -5,12 +5,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{App, ClipboardItem, Entity, TestAppContext, VisualTestContext};
-use honcho_config::{ConnectionStore, MemorySecrets};
+use honcho_config::{ColorTag, ConnectionStore, MemorySecrets};
 use honcho_db::{DbRuntime, DriverKind};
 
 use crate::connection_dialog::ConnectionDialog;
 use crate::connections::Connections;
 use crate::keymap::{self, Platform};
+use crate::query::QueryTab;
 use crate::theme;
 use crate::workspace::Workspace;
 
@@ -398,29 +399,134 @@ fn bad_input_is_reported_and_not_saved(cx: &mut TestAppContext) {
     assert!(dialog(&ws, cx).is_none(), "escape closes the dialog");
 }
 
-#[gpui::test]
-fn connect_attaches_the_session_to_the_tab(cx: &mut TestAppContext) {
-    let (ws, cx) = open(cx, vec![]);
-    press(cx, "P-shift-c");
-    let d = dialog(&ws, cx).unwrap();
-    d.update(cx, |d, _| d.set_driver(DriverKind::Fake));
-    fill(cx, ["fake db", "", "", "dev", "", "app"]);
-    press(cx, "enter");
-
-    // the session opens on the database runtime's own threads
+/// Steps the app until `done` holds. Sessions run on the database
+/// runtime's own threads, which the test executor doesn't drive.
+fn wait_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
     cx.executor().allow_parking();
-    for _ in 0..200 {
+    for _ in 0..300 {
         cx.run_until_parked();
-        if dialog(&ws, cx).is_none() {
-            break;
+        if done(cx) {
+            return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(dialog(&ws, cx).is_none(), "dialog closes after connecting");
-    let name = ws.read_with(cx, |ws, _| {
-        ws.active_connection().map(|c| c.saved.name.clone())
+    panic!("timed out");
+}
+
+fn connect_fake(ws: &Entity<Workspace>, cx: &mut VisualTestContext, color: Option<ColorTag>) {
+    press(cx, "P-shift-c");
+    let d = dialog(ws, cx).unwrap();
+    d.update(cx, |d, _| {
+        d.set_driver(DriverKind::Fake);
+        d.set_color(color);
+    });
+    fill(cx, ["fake db", "", "", "dev", "", "app"]);
+    press(cx, "enter");
+    wait_until(cx, |cx| dialog(ws, cx).is_none());
+}
+
+fn query_tab(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<QueryTab> {
+    ws.read_with(cx, |ws, _| ws.active_query_tab().clone())
+}
+
+/// Runs with `keys` and waits for the query to finish.
+fn run(ws: &Entity<Workspace>, cx: &mut VisualTestContext, keys: &str) -> Vec<String> {
+    press(cx, keys);
+    let q = query_tab(ws, cx);
+    wait_until(cx, |cx| !q.read_with(cx, |q, _| q.is_running()));
+    q.read_with(cx, |q, _| q.output_text())
+}
+
+fn result_rows(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<usize> {
+    let q = query_tab(ws, cx);
+    q.read_with(cx, |q, _| {
+        q.output
+            .iter()
+            .flat_map(|o| o.sets.iter().map(|s| s.rows.len()))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn connect_attaches_the_session_to_the_tab(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let name = ws.read_with(cx, |ws, cx| {
+        ws.active_connection(cx).map(|c| c.saved.name.clone())
     });
     assert_eq!(name.as_deref(), Some("fake db"));
+}
+
+#[gpui::test]
+fn run_all_then_the_statement_at_the_cursor(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 3;\nupdate 2;");
+
+    // the statement under the cursor is marked before anything runs
+    let target = ws.read_with(cx, |ws, cx| ws.active_editor().read(cx).run_target.clone());
+    assert_eq!(target, Some(10..18));
+
+    let messages = run(&ws, cx, "P-shift-enter");
+    assert_eq!(result_rows(&ws, cx), [3]);
+    assert!(
+        messages.iter().any(|m| m == "2 rows affected"),
+        "{messages:?}"
+    );
+
+    set_cursor(&ws, cx, 2);
+    let messages = run(&ws, cx, "P-enter");
+    assert_eq!(result_rows(&ws, cx), [3]);
+    assert!(
+        !messages.iter().any(|m| m.contains("affected")),
+        "{messages:?}"
+    );
+}
+
+#[gpui::test]
+fn running_without_a_connection_opens_the_dialog(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    cx.simulate_input("select 1");
+    press(cx, "P-enter");
+    assert!(dialog(&ws, cx).is_some());
+}
+
+#[gpui::test]
+fn red_connections_confirm_writes_without_where(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, Some(ColorTag::Red));
+    cx.simulate_input("update 5");
+    press(cx, "P-enter");
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    assert_eq!(
+        query_tab(&ws, cx).read_with(cx, |q, _| q.output_text()),
+        Vec::<String>::new()
+    );
+
+    press(cx, "P-enter");
+    cx.simulate_prompt_answer("Run");
+    let q = query_tab(&ws, cx);
+    wait_until(cx, |cx| {
+        q.read_with(cx, |q, _| {
+            q.output_text().iter().any(|m| m == "5 rows affected")
+        })
+    });
+}
+
+#[gpui::test]
+fn cancel_stops_a_running_query(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("sleep 30000");
+    press(cx, "P-enter");
+    let q = query_tab(&ws, cx);
+    wait_until(cx, |cx| q.read_with(cx, |q, _| q.is_running()));
+    let messages = run(&ws, cx, "P-.");
+    assert!(
+        messages.iter().any(|m| m == "query cancelled"),
+        "{messages:?}"
+    );
 }
 
 #[gpui::test]

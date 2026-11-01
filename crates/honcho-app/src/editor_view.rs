@@ -169,6 +169,9 @@ pub struct EditorView {
     pub search_matches: Vec<Range<usize>>,
     /// The find bar has a query for this editor, even if nothing matched.
     pub searching: bool,
+    /// Char range that running now would execute, marked so it's never a
+    /// guess.
+    pub run_target: Option<Range<usize>>,
 }
 
 impl EditorView {
@@ -199,6 +202,7 @@ impl EditorView {
             masked: false,
             search_matches: Vec::new(),
             searching: false,
+            run_target: None,
         }
     }
 
@@ -774,6 +778,7 @@ struct Prepaint {
     text_quads: Vec<(Bounds<Pixels>, Hsla)>,
     cursors: Vec<Bounds<Pixels>>,
     gutter: Vec<(Point<Pixels>, ShapedLine)>,
+    run_bar: Option<Bounds<Pixels>>,
     scrollbar: Option<Bounds<Pixels>>,
 }
 
@@ -923,6 +928,27 @@ impl Element for EditorElement {
             let ed = &view.editor;
             let sels = ed.selections();
             let row_y = |line: usize| origin.y + line_height * line as f32;
+
+            let mut run_bar = None;
+            if let Some(r) = &view.run_target {
+                let (l0, l1) = (ed.line_of(r.start), ed.line_of(r.end));
+                let (from, to) = (l0.max(first), l1.min(last.saturating_sub(1)));
+                if from <= to {
+                    let top = row_y(from);
+                    let bottom = row_y(to) + line_height;
+                    quads.push((
+                        Bounds::from_corners(
+                            point(bounds.left(), top),
+                            point(bounds.right(), bottom),
+                        ),
+                        Theme::run_target(),
+                    ));
+                    run_bar = Some(Bounds::from_corners(
+                        point(bounds.left() + px(2.), top),
+                        point(bounds.left() + px(4.), bottom),
+                    ));
+                }
+            }
 
             // current line highlight
             let mut cursor_lines = Vec::new();
@@ -1099,6 +1125,7 @@ impl Element for EditorElement {
                 text_quads,
                 cursors,
                 gutter,
+                run_bar,
                 scrollbar,
             }
         })
@@ -1150,6 +1177,9 @@ impl Element for EditorElement {
                 Bounds::new(bounds.origin, size(layout.gutter_width, bounds.size.height)),
                 Theme::bg(),
             ));
+        }
+        if let Some(b) = p.run_bar {
+            window.paint_quad(fill(b, Theme::accent()));
         }
         for (o, shaped) in &p.gutter {
             shaped.paint(*o, layout.line_height, window, cx).ok();

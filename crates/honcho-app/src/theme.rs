@@ -110,6 +110,9 @@ impl Theme {
     pub fn accent() -> Hsla {
         c(0x3d8bfd)
     }
+    pub fn run_target() -> Hsla {
+        ca(0x3d8bfd0c)
+    }
     pub fn tab_active() -> Hsla {
         c(0x1e1f22)
     }

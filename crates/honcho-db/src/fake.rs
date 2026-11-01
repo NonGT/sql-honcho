@@ -177,7 +177,11 @@ impl Connection for FakeConnection {
         sql.split(';')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|text| crate::script::Statement { text, line: 1 })
+            .map(|text| crate::script::Statement {
+                text,
+                start: text.as_ptr() as usize - sql.as_ptr() as usize,
+                line: 1,
+            })
             .collect()
     }
 

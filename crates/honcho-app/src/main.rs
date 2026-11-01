@@ -4,6 +4,7 @@ mod editor_view;
 mod find;
 mod keymap;
 mod prompt;
+mod query;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -78,10 +79,13 @@ fn menus() -> Vec<Menu> {
         },
         Menu {
             name: "Connection".into(),
-            items: vec![MenuItem::action(
-                "Connections…",
-                workspace::ManageConnections,
-            )],
+            items: vec![
+                MenuItem::action("Connections…", workspace::ManageConnections),
+                MenuItem::separator(),
+                MenuItem::action("Run Statement or Selection", query::RunStatement),
+                MenuItem::action("Run All", query::RunAll),
+                MenuItem::action("Cancel Query", query::CancelQuery),
+            ],
         },
         Menu {
             name: "View".into(),

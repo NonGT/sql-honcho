@@ -10,6 +10,7 @@ use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, PlatformKeyboard
 use crate::connection_dialog::*;
 use crate::editor_view::*;
 use crate::find::*;
+use crate::query::*;
 use crate::workspace::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,8 +159,8 @@ fn editor(p: Platform) -> Vec<Binding> {
             ("shift-tab", Outdent, EDITOR),
             ("P-]", Indent, EDITOR),
             ("P-[", Outdent, EDITOR),
-            ("P-enter", InsertLineBelow, EDITOR),
-            ("P-shift-enter", InsertLineAbove, EDITOR),
+            ("P-enter", RunStatement, EDITOR),
+            ("P-shift-enter", RunAll, EDITOR),
             ("P-z", Undo, EDITOR),
             ("P-shift-z", Redo, EDITOR),
             ("P-a", SelectAll, EDITOR),
@@ -263,6 +264,7 @@ fn workspace(p: Platform) -> Vec<Binding> {
             ("P--", ZoomOut, None),
             ("P-0", ZoomReset, None),
             ("P-shift-c", ManageConnections, None),
+            ("P-.", CancelQuery, None),
         ]
     );
     match p {
