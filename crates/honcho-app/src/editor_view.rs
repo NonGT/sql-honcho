@@ -163,6 +163,8 @@ pub struct EditorView {
     /// Extra key context, e.g. "FindQuery", so owners can bind keys to this input.
     context: &'static str,
     placeholder: Option<SharedString>,
+    /// Draws every char as a bullet and won't copy, for password fields.
+    pub masked: bool,
     /// Find matches to highlight, sorted, in char offsets.
     pub search_matches: Vec<Range<usize>>,
     /// The find bar has a query for this editor, even if nothing matched.
@@ -194,6 +196,7 @@ impl EditorView {
             single_line: false,
             context: "",
             placeholder: None,
+            masked: false,
             search_matches: Vec::new(),
             searching: false,
         }
@@ -207,6 +210,11 @@ impl EditorView {
             placeholder: Some(placeholder.to_string().into()),
             ..Self::new("", None, 0, cx)
         }
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
+        self.placeholder = Some(placeholder.to_string().into());
+        cx.notify();
     }
 
     pub fn text(&self) -> String {
@@ -276,12 +284,18 @@ impl EditorView {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            return;
+        }
         let (text, lines) = self.editor.copy_text();
         *LINE_CLIPBOARD.lock().unwrap() = lines.then(|| text.clone());
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            return;
+        }
         let mut copied = (String::new(), false);
         self.edit(cx, |e| copied = e.cut());
         *LINE_CLIPBOARD.lock().unwrap() = copied.1.then(|| copied.0.clone());
@@ -1185,7 +1199,7 @@ fn shape_line(
             display.extend(std::iter::repeat_n(' ', n));
             dcol += n;
         } else {
-            display.push(ch);
+            display.push(if view.masked { '•' } else { ch });
             dcol += 1;
         }
         let added = display.len() - before;

@@ -1,3 +1,5 @@
+mod connection_dialog;
+mod connections;
 mod editor_view;
 mod find;
 mod keymap;
@@ -75,6 +77,13 @@ fn menus() -> Vec<Menu> {
             ],
         },
         Menu {
+            name: "Connection".into(),
+            items: vec![MenuItem::action(
+                "Connections…",
+                workspace::ManageConnections,
+            )],
+        },
+        Menu {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Zoom In", workspace::ZoomIn),
@@ -94,6 +103,7 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         theme::init_font(cx);
         keymap::install(cx);
+        connections::Connections::init(cx);
         if keymap::Platform::current() == keymap::Platform::Linux {
             cx.set_prompt_builder(prompt::build);
         }

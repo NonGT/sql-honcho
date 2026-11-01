@@ -7,6 +7,7 @@
 
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, PlatformKeyboardMapper};
 
+use crate::connection_dialog::*;
 use crate::editor_view::*;
 use crate::find::*;
 use crate::workspace::*;
@@ -48,6 +49,7 @@ const EDITOR: Option<&str> = Some("Editor");
 const FIND_BAR: Option<&str> = Some("FindBar");
 const FIND_QUERY: Option<&str> = Some("FindQuery");
 const REPLACE_QUERY: Option<&str> = Some("ReplaceQuery");
+const CONNECTION_FIELD: Option<&str> = Some("ConnectionField");
 
 macro_rules! bindings {
     ($p:expr, [$( ($keys:expr, $action:expr, $ctx:expr) ),* $(,)?]) => {
@@ -68,6 +70,14 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
     let mut b = editor(p);
     b.extend(workspace(p));
     b.extend(find(p));
+    b.extend(bindings!(
+        p,
+        [
+            ("tab", NextField, CONNECTION_FIELD),
+            ("shift-tab", PrevField, CONNECTION_FIELD),
+            ("enter", Submit, CONNECTION_FIELD),
+        ]
+    ));
     b
 }
 
@@ -252,6 +262,7 @@ fn workspace(p: Platform) -> Vec<Binding> {
             ("P-+", ZoomIn, None),
             ("P--", ZoomOut, None),
             ("P-0", ZoomReset, None),
+            ("P-shift-c", ManageConnections, None),
         ]
     );
     match p {

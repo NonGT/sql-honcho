@@ -141,18 +141,20 @@ impl ConnectionStore {
             .map(|d| d.config_dir().join("connections.json"))
     }
 
+    pub fn empty(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            connections: Vec::new(),
+        }
+    }
+
     /// A missing file is an empty store. A broken one is an error, so it
     /// doesn't get overwritten by the next save.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
         let path = path.into();
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    path,
-                    connections: Vec::new(),
-                })
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::empty(path)),
             Err(source) => return Err(ConfigError::Io { path, source }),
         };
         let parse_error = |message: String| ConfigError::Parse {

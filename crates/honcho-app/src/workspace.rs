@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{
     actions, canvas, div, point, prelude::*, px, App, Bounds, Context, CursorStyle, Decorations,
-    Entity, ExternalPaths, FocusHandle, Focusable, HitboxBehavior, MouseButton, Pixels, Point,
-    PromptLevel, ResizeEdge, SharedString, Size, Subscription, Task, Window,
+    Entity, EntityId, ExternalPaths, FocusHandle, Focusable, HitboxBehavior, MouseButton, Pixels,
+    Point, PromptLevel, ResizeEdge, SharedString, Size, Subscription, Task, Window,
 };
 
+use crate::connection_dialog::{self, ConnectionDialog, DialogEvent};
+use crate::connections::{self, ActiveConnection};
 use crate::editor_view::EditorView;
 use crate::find::{self, FindBar};
 use crate::theme::{self, EditorFont, Theme, FONT_SIZE};
@@ -13,8 +16,18 @@ use crate::theme::{self, EditorFont, Theme, FONT_SIZE};
 actions!(
     workspace,
     [
-        NewFile, OpenFile, Save, SaveAs, CloseTab, NextTab, PrevTab, ZoomIn, ZoomOut, ZoomReset,
+        NewFile,
+        OpenFile,
+        Save,
+        SaveAs,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
         Quit,
+        ManageConnections,
     ]
 );
 
@@ -27,6 +40,9 @@ pub struct Workspace {
     subscriptions: Vec<Subscription>,
     /// The user already agreed to lose unsaved changes on close.
     discard_confirmed: bool,
+    connection_dialog: Option<Entity<ConnectionDialog>>,
+    /// Keyed by the tab's editor.
+    tab_connections: HashMap<EntityId, ActiveConnection>,
 }
 
 impl Workspace {
@@ -39,6 +55,8 @@ impl Workspace {
             next_untitled: 1,
             subscriptions: vec![cx.observe(&find, |_, _, cx| cx.notify())],
             discard_confirmed: false,
+            connection_dialog: None,
+            tab_connections: HashMap::new(),
             find,
         };
         this.new_tab(String::new(), None, window, cx);
@@ -109,6 +127,41 @@ impl Workspace {
 
     pub(crate) fn active_editor(&self) -> &Entity<EditorView> {
         &self.tabs[self.active]
+    }
+
+    pub(crate) fn active_connection(&self) -> Option<&ActiveConnection> {
+        self.tab_connections.get(&self.active_editor().entity_id())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_dialog(&self) -> Option<&Entity<ConnectionDialog>> {
+        self.connection_dialog.as_ref()
+    }
+
+    pub(crate) fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dialog) = &self.connection_dialog {
+            window.focus(&dialog.focus_handle(cx));
+            return;
+        }
+        let dialog = cx.new(|cx| ConnectionDialog::new(window, cx));
+        self.subscriptions.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &DialogEvent, window, cx| {
+                if let DialogEvent::Connected(conn) = event {
+                    let id = this.active_editor().entity_id();
+                    if let Some(old) = this.tab_connections.insert(id, conn.clone()) {
+                        close_session(old, cx);
+                    }
+                }
+                this.connection_dialog = None;
+                let editor = this.active_editor().clone();
+                window.focus(&editor.focus_handle(cx));
+                cx.notify();
+            },
+        ));
+        self.connection_dialog = Some(dialog);
+        cx.notify();
     }
 
     fn new_tab(
@@ -326,7 +379,10 @@ impl Workspace {
     }
 
     fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.remove(ix);
+        let editor = self.tabs.remove(ix);
+        if let Some(conn) = self.tab_connections.remove(&editor.entity_id()) {
+            close_session(conn, cx);
+        }
         if self.tabs.is_empty() {
             self.new_tab(String::new(), None, window, cx);
             return;
@@ -438,6 +494,11 @@ impl Workspace {
                 let active = ix == self.active;
                 let dirty = t.is_dirty();
                 let label: SharedString = t.title().into();
+                let color = self
+                    .tab_connections
+                    .get(&tab.entity_id())
+                    .and_then(|c| c.saved.color)
+                    .map(connections::color);
                 div()
                     .flex()
                     .flex_none()
@@ -447,10 +508,10 @@ impl Workspace {
                     .pr_2()
                     .h_full()
                     .border_t_2()
-                    .border_color(if active {
-                        Theme::accent()
-                    } else {
-                        Theme::panel()
+                    .border_color(match color {
+                        Some(c) => c,
+                        None if active => Theme::accent(),
+                        None => Theme::panel(),
                     })
                     .when(active, |d| d.bg(Theme::tab_active()))
                     .text_color(if active {
@@ -508,6 +569,26 @@ impl Workspace {
             honcho_core::LineEnding::CrLf => "CRLF",
         };
         let right = format!("Spaces: {}    UTF-8    {ending}    SQL", ed.tab_size);
+        let connection = match self.active_connection() {
+            Some(c) => div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .text_color(Theme::text())
+                .child(connection_dialog::color_dot(c.saved.color))
+                .child(c.saved.name.clone())
+                .when(c.saved.read_only, |d| {
+                    d.child(div().text_color(Theme::muted()).child("read-only"))
+                }),
+            None => div().child("No connection"),
+        };
+        let connection = connection
+            .id("status-connection")
+            .px_1p5()
+            .rounded_sm()
+            .cursor_pointer()
+            .hover(|d| d.bg(Theme::border()))
+            .on_click(cx.listener(|this, _, window, cx| this.open_connections(window, cx)));
         div()
             .flex()
             .flex_none()
@@ -520,7 +601,14 @@ impl Workspace {
             .border_color(Theme::border())
             .text_color(Theme::muted())
             .text_size(px(11.5))
-            .child(left)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(connection)
+                    .child(left),
+            )
             .child(right)
     }
 }
@@ -582,6 +670,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &find::FindPrev, window, cx| {
                 this.find.update(cx, |f, cx| f.next(false, window, cx))
             }))
+            .on_action(cx.listener(|this, _: &ManageConnections, window, cx| {
+                this.open_connections(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
@@ -606,6 +697,7 @@ impl Render for Workspace {
                     }),
             )
             .child(self.render_status(cx))
+            .children(self.connection_dialog.clone())
     }
 }
 
@@ -654,6 +746,11 @@ fn resize_cursor_overlay() -> impl IntoElement {
     )
     .absolute()
     .size_full()
+}
+
+fn close_session(conn: ActiveConnection, cx: &mut App) {
+    cx.background_spawn(async move { conn.session.close().await })
+        .detach();
 }
 
 /// On Linux the file dialogs go through xdg-desktop-portal, which some

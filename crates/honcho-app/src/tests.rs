@@ -2,9 +2,14 @@
 //! simulated keystrokes through the platform keymap.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui::{App, ClipboardItem, Entity, TestAppContext, VisualTestContext};
+use honcho_config::{ConnectionStore, MemorySecrets};
+use honcho_db::{DbRuntime, DriverKind};
 
+use crate::connection_dialog::ConnectionDialog;
+use crate::connections::Connections;
 use crate::keymap::{self, Platform};
 use crate::theme;
 use crate::workspace::Workspace;
@@ -16,8 +21,19 @@ fn open(
     cx.update(|cx| {
         theme::init_font(cx);
         keymap::install(cx);
+        test_connections(cx);
     });
     cx.add_window_view(|window, cx| Workspace::new(paths, window, cx))
+}
+
+fn test_connections(cx: &mut App) {
+    let dir = tempfile::tempdir().unwrap().keep();
+    cx.set_global(Connections {
+        store: ConnectionStore::empty(dir.join("connections.json")),
+        secrets: Arc::new(MemorySecrets::default()),
+        runtime: Arc::new(DbRuntime::new().unwrap()),
+        load_error: None,
+    });
 }
 
 /// `P-` becomes the platform's primary modifier.
@@ -284,4 +300,150 @@ fn opening_a_file_gives_back_the_untitled_number(cx: &mut TestAppContext) {
     press(cx, "P-n");
     let title = ws.read_with(cx, |ws, cx| ws.active_editor().read(cx).title());
     assert_eq!(title, "Untitled-1");
+}
+
+fn dialog(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<Entity<ConnectionDialog>> {
+    ws.read_with(cx, |ws, _| ws.connection_dialog().cloned())
+}
+
+fn status(d: &Entity<ConnectionDialog>, cx: &mut VisualTestContext) -> Option<String> {
+    d.read_with(cx, |d, _| d.status_text().map(str::to_string))
+}
+
+/// Fills the form field by field, the way a user tabs through it.
+fn fill(cx: &mut VisualTestContext, values: [&str; 6]) {
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            press(cx, "tab");
+        }
+        cx.simulate_input(v);
+    }
+}
+
+#[gpui::test]
+fn saving_a_connection_keeps_the_password_out_of_the_file(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).expect("dialog opens");
+    fill(
+        cx,
+        ["shop prod", "db.example.com", "3307", "app", "pw!", "shop"],
+    );
+    d.update(cx, |d, cx| {
+        d.save(cx);
+    });
+    assert_eq!(status(&d, cx).as_deref(), Some("Saved."));
+
+    let (saved, path) = cx.update(|_, cx| {
+        let state = cx.global::<Connections>();
+        (
+            state.store.connections().to_vec(),
+            state.store.path().to_path_buf(),
+        )
+    });
+    assert_eq!(saved.len(), 1);
+    let c = &saved[0];
+    assert_eq!(
+        (c.name.as_str(), c.host.as_str(), c.port, c.user.as_str()),
+        ("shop prod", "db.example.com", Some(3307), "app")
+    );
+    assert_eq!(c.database.as_deref(), Some("shop"));
+    let pw = cx.update(|_, cx| c.password(cx.global::<Connections>().secrets.as_ref()));
+    assert_eq!(pw.unwrap().as_deref(), Some("pw!"));
+    let file = std::fs::read_to_string(path).unwrap();
+    assert!(
+        file.contains("db.example.com") && !file.contains("pw!"),
+        "{file}"
+    );
+}
+
+#[gpui::test]
+fn password_field_wont_copy(cx: &mut TestAppContext) {
+    let (_ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+    fill(cx, ["x", "", "", "admin", "secret", ""]);
+    press(cx, "shift-tab");
+    press(cx, "P-a P-c");
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+        Some("before")
+    );
+    press(cx, "shift-tab P-a P-c");
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+        Some("admin"),
+        "other fields still copy"
+    );
+}
+
+#[gpui::test]
+fn bad_input_is_reported_and_not_saved(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    d.update(cx, |d, cx| {
+        d.save(cx);
+    });
+    assert_eq!(
+        status(&d, cx).as_deref(),
+        Some("Give the connection a name.")
+    );
+    fill(cx, ["local", "", "99999", "", "", ""]);
+    d.update(cx, |d, cx| {
+        d.save(cx);
+    });
+    assert!(status(&d, cx).unwrap().contains("Port 99999"));
+    let count = cx.update(|_, cx| cx.global::<Connections>().store.connections().len());
+    assert_eq!(count, 0);
+
+    press(cx, "escape");
+    assert!(dialog(&ws, cx).is_none(), "escape closes the dialog");
+}
+
+#[gpui::test]
+fn connect_attaches_the_session_to_the_tab(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    d.update(cx, |d, _| d.set_driver(DriverKind::Fake));
+    fill(cx, ["fake db", "", "", "dev", "", "app"]);
+    press(cx, "enter");
+
+    // the session opens on the database runtime's own threads
+    cx.executor().allow_parking();
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if dialog(&ws, cx).is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(dialog(&ws, cx).is_none(), "dialog closes after connecting");
+    let name = ws.read_with(cx, |ws, _| {
+        ws.active_connection().map(|c| c.saved.name.clone())
+    });
+    assert_eq!(name.as_deref(), Some("fake db"));
+}
+
+#[gpui::test]
+fn duplicate_and_delete(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    fill(cx, ["a", "h", "", "u", "pw", ""]);
+    d.update(cx, |d, cx| {
+        d.save(cx);
+    });
+    let id = d.read_with(cx, |d, _| d.selected_id().unwrap().to_string());
+    d.update_in(cx, |d, window, cx| d.delete_now(&id, window, cx));
+    let left = cx.update(|_, cx| {
+        let state = cx.global::<Connections>();
+        (
+            state.store.connections().len(),
+            state.secrets.get(&format!("{id}/password")).unwrap(),
+        )
+    });
+    assert_eq!(left, (0, None));
+    assert!(d.read_with(cx, |d, _| d.selected_id().is_none()));
 }
