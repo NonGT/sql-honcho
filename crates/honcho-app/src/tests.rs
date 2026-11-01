@@ -415,11 +415,21 @@ fn wait_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestCo
 }
 
 fn connect_fake(ws: &Entity<Workspace>, cx: &mut VisualTestContext, color: Option<ColorTag>) {
+    connect_fake_with(ws, cx, color, false)
+}
+
+fn connect_fake_with(
+    ws: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    color: Option<ColorTag>,
+    auto_reconnect: bool,
+) {
     press(cx, "P-shift-c");
     let d = dialog(ws, cx).unwrap();
     d.update(cx, |d, _| {
         d.set_driver(DriverKind::Fake);
         d.set_color(color);
+        d.set_auto_reconnect(auto_reconnect);
     });
     fill(cx, ["fake db", "", "", "dev", "", "app"]);
     press(cx, "enter");
@@ -647,4 +657,48 @@ fn results_panel_toggles(cx: &mut TestAppContext) {
     assert!(q.read_with(cx, |q, _| q.panel_collapsed()));
     press(cx, "P-j");
     assert!(!q.read_with(cx, |q, _| q.panel_collapsed()));
+}
+
+fn wait_for_message(ws: &Entity<Workspace>, cx: &mut VisualTestContext, text: &str) {
+    let q = query_tab(ws, cx);
+    wait_until(cx, |cx| {
+        q.read_with(cx, |q, _| {
+            !q.is_running() && q.output_text().iter().any(|m| m == text)
+        })
+    });
+}
+
+#[gpui::test]
+fn auto_reconnect_after_the_server_drops_a_query(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake_with(&ws, cx, None, true);
+    cx.simulate_input("lose");
+    press(cx, "P-enter");
+    wait_for_message(
+        &ws,
+        cx,
+        "Reconnected. The query that was cut off wasn't run again.",
+    );
+    let q = query_tab(&ws, cx);
+    assert!(q.read_with(cx, |q, _| q.lost.is_none()));
+
+    press(cx, "P-a");
+    cx.simulate_input("select 2");
+    run(&ws, cx, "P-enter");
+    assert_eq!(result_rows(&ws, cx), [2]);
+}
+
+#[gpui::test]
+fn without_auto_reconnect_a_lost_connection_waits_for_the_user(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("lose");
+    run(&ws, cx, "P-enter");
+    let q = query_tab(&ws, cx);
+    assert!(q.read_with(cx, |q, _| q.lost.is_some()));
+
+    press(cx, "P-a");
+    cx.simulate_input("select 2");
+    let messages = run(&ws, cx, "P-enter");
+    assert_eq!(messages, ["The connection was lost. Reconnect first."]);
 }

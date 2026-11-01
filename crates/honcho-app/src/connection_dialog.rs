@@ -538,6 +538,11 @@ impl ConnectionDialog {
     pub fn set_color(&mut self, color: Option<ColorTag>) {
         self.draft.color = color;
     }
+
+    #[cfg(test)]
+    pub fn set_auto_reconnect(&mut self, on: bool) {
+        self.draft.auto_reconnect = on;
+    }
 }
 
 impl Focusable for ConnectionDialog {
@@ -735,38 +740,52 @@ impl Render for ConnectionDialog {
                 }),
         );
 
-        let read_only = div()
-            .id("read-only")
-            .flex()
-            .items_center()
-            .gap_2()
-            .cursor_pointer()
-            .child(
-                div()
-                    .size(px(14.))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(Theme::muted())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(10.))
-                    .when(self.draft.read_only, |d| {
-                        d.bg(Theme::accent())
-                            .border_color(Theme::accent())
-                            .child("✓")
-                    }),
-            )
-            .child("Read-only")
-            .child(
-                div()
-                    .text_color(Theme::muted())
-                    .child("refuses anything that isn't a read"),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.draft.read_only = !this.draft.read_only;
-                cx.notify();
-            }));
+        let checkbox = |id: &'static str, label: &'static str, hint: &'static str, on: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .size(px(14.))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(Theme::muted())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10.))
+                        .when(on, |d| {
+                            d.bg(Theme::accent())
+                                .border_color(Theme::accent())
+                                .child("✓")
+                        }),
+                )
+                .child(label)
+                .child(div().text_color(Theme::muted()).child(hint))
+        };
+        let read_only = checkbox(
+            "read-only",
+            "Read-only",
+            "refuses anything that isn't a read",
+            self.draft.read_only,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.draft.read_only = !this.draft.read_only;
+            cx.notify();
+        }));
+        let auto_reconnect = checkbox(
+            "auto-reconnect",
+            "Reconnect automatically",
+            "after the server closes it",
+            self.draft.auto_reconnect,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.draft.auto_reconnect = !this.draft.auto_reconnect;
+            cx.notify();
+        }));
 
         let label = |text: &'static str| {
             div()
@@ -807,6 +826,7 @@ impl Render for ConnectionDialog {
             .child(field("Database", &self.fields.database, None))
             .child(row().child(label("Color")).child(colors))
             .child(row().child(label("")).child(read_only))
+            .child(row().child(label("")).child(auto_reconnect))
             .child(div().flex_1())
             .child(div().min_h(px(18.)).children(status))
             .child(

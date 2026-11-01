@@ -138,6 +138,8 @@ pub struct QueryTab {
     /// Why the connection is gone, when it is.
     pub lost: Option<String>,
     reconnecting: bool,
+    /// A run is waiting on a ping or a reconnect before it starts.
+    preparing: bool,
     /// The editor state the run target was worked out for.
     target_key: Option<(u64, usize, Vec<honcho_core::Selection>)>,
     panel_height: Pixels,
@@ -165,6 +167,7 @@ impl QueryTab {
             output: None,
             lost: None,
             reconnecting: false,
+            preparing: false,
             target_key: None,
             panel_height: PANEL_HEIGHT,
             panel_collapsed: false,
@@ -174,7 +177,13 @@ impl QueryTab {
     }
 
     pub fn is_running(&self) -> bool {
-        self.running.is_some()
+        self.running.is_some() || self.preparing
+    }
+
+    fn auto_reconnect(&self) -> bool {
+        self.connection
+            .as_ref()
+            .is_some_and(|c| c.saved.auto_reconnect)
     }
 
     pub fn color(&self) -> Option<ColorTag> {
@@ -291,6 +300,12 @@ impl QueryTab {
         .detach();
     }
 
+    /// A message that doesn't pull the panel over to the messages tab.
+    fn note(&mut self, text: &str) {
+        let out = self.output.get_or_insert_with(Output::default);
+        out.message(MessageLevel::Info, text, None);
+    }
+
     fn say(&mut self, level: MessageLevel, text: &str, line: Option<u32>) {
         let out = self.output.get_or_insert_with(Output::default);
         out.message(level, text, line);
@@ -301,6 +316,39 @@ impl QueryTab {
         let Some(conn) = &self.connection else {
             return;
         };
+        if self.preparing {
+            return;
+        }
+        if self.auto_reconnect() {
+            if self.lost.is_some() {
+                self.output = Some(Output::default());
+                self.preparing = true;
+                self.reconnect_then(Some(target), cx);
+                return;
+            }
+            // The server drops idle connections (wait_timeout and the like).
+            // Find out before sending, so a query is never sent twice.
+            let session = conn.session.clone();
+            self.preparing = true;
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let alive = session.ping().await;
+                this.update(cx, |this, cx| match alive {
+                    Err(DbError::ConnectionLost(reason)) => {
+                        this.lost = Some(reason);
+                        this.output = Some(Output::default());
+                        this.reconnect_then(Some(target), cx);
+                    }
+                    _ => {
+                        this.preparing = false;
+                        this.start(target, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         if self.lost.is_some() {
             self.output = Some(Output::default());
             self.say(
@@ -311,6 +359,13 @@ impl QueryTab {
             cx.notify();
             return;
         }
+        self.start(target, cx);
+    }
+
+    fn start(&mut self, target: Target, cx: &mut Context<Self>) {
+        let Some(conn) = &self.connection else {
+            return;
+        };
         let mut handle = conn.session.execute(target.text);
         let cancel = handle.cancel_token();
         let first_line = target.first_line;
@@ -406,12 +461,16 @@ impl QueryTab {
                     Some(l) => format!("Line {}: {e}", l + 1),
                     None => e.to_string(),
                 };
-                if let DbError::ConnectionLost(reason) = &e {
-                    self.lost = Some(reason.clone());
-                }
                 let out = self.output.get_or_insert_with(Output::default);
                 out.message(MessageLevel::Error, text, line);
                 out.shown = out.sets.len();
+                if let DbError::ConnectionLost(reason) = &e {
+                    self.lost = Some(reason.clone());
+                    if self.auto_reconnect() {
+                        // not run again: it may have done part of its work
+                        self.reconnect_then(None, cx);
+                    }
+                }
             }
         }
     }
@@ -424,10 +483,18 @@ impl QueryTab {
     }
 
     fn reconnect(&mut self, cx: &mut Context<Self>) {
+        self.reconnect_then(None, cx);
+    }
+
+    /// Opens a new session, then runs `then` if given. Runs that waited on
+    /// this were never sent, so running them now can't repeat anything.
+    fn reconnect_then(&mut self, then: Option<Target>, cx: &mut Context<Self>) {
         let Some(saved) = self.connection.as_ref().map(|c| c.saved.clone()) else {
+            self.preparing = false;
             return;
         };
         let Some(driver) = connections::driver(saved.driver) else {
+            self.preparing = false;
             return;
         };
         if self.reconnecting {
@@ -457,10 +524,24 @@ impl QueryTab {
             };
             this.update(cx, |this, cx| {
                 this.reconnecting = false;
+                this.preparing = false;
                 match result {
                     Ok(session) => {
                         this.set_connection(ActiveConnection { saved, session }, cx);
-                        this.say(MessageLevel::Info, "Reconnected.", None);
+                        match then {
+                            Some(target) => {
+                                this.start(target, cx);
+                                this.note(
+                                    "The server had closed the connection. Reconnected; \
+                                     session variables and temporary tables start fresh.",
+                                );
+                            }
+                            None => this.say(
+                                MessageLevel::Info,
+                                "Reconnected. The query that was cut off wasn't run again.",
+                                None,
+                            ),
+                        }
                     }
                     Err(e) => this.say(
                         MessageLevel::Error,

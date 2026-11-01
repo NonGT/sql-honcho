@@ -69,6 +69,9 @@ pub struct SavedConnection {
     pub color: Option<ColorTag>,
     #[serde(default)]
     pub read_only: bool,
+    /// Reopen the session when the server has closed it.
+    #[serde(default)]
+    pub auto_reconnect: bool,
     #[serde(default)]
     pub options: BTreeMap<String, String>,
 }
@@ -85,6 +88,7 @@ impl SavedConnection {
             database: None,
             color: None,
             read_only: false,
+            auto_reconnect: false,
             options: BTreeMap::new(),
         }
     }
