@@ -10,6 +10,7 @@ mod driver;
 mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+pub mod mysql;
 mod runtime;
 mod sink;
 mod types;
