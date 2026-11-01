@@ -779,7 +779,7 @@ impl Render for ConnectionDialog {
         let auto_reconnect = checkbox(
             "auto-reconnect",
             "Reconnect automatically",
-            "when the server has closed the connection",
+            "after the server closes it",
             self.draft.auto_reconnect,
         )
         .on_click(cx.listener(|this, _, _, cx| {
