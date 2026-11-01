@@ -261,7 +261,15 @@ pub async fn lists_metadata(f: Fixture) {
     find(ObjectKind::Table, "users");
     find(ObjectKind::View, "active_users");
     let procedure = find(ObjectKind::Procedure, "refresh_stats");
-    find(ObjectKind::Function, "order_total");
+    // routines carry their parameters, for completion details
+    let function = find(ObjectKind::Function, "order_total");
+    assert!(
+        function
+            .signature
+            .as_deref()
+            .is_some_and(|s| s.contains("p_user")),
+        "{function:?}"
+    );
 
     let routines = s
         .objects(

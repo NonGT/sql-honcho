@@ -35,7 +35,7 @@ pub enum LineState {
     Dollar(String),
 }
 
-const KEYWORDS: &[&str] = &[
+pub const KEYWORDS: &[&str] = &[
     "ADD",
     "AFTER",
     "AGGREGATE",

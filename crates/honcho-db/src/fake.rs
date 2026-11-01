@@ -100,7 +100,10 @@ fn objects_in(database: &str) -> Vec<ObjectRef> {
         mk(ObjectKind::Table, "users"),
         mk(ObjectKind::View, "active_users"),
         mk(ObjectKind::Procedure, "refresh_stats"),
-        mk(ObjectKind::Function, "order_total"),
+        ObjectRef {
+            signature: Some("(p_user int) → decimal(12,2)".into()),
+            ..mk(ObjectKind::Function, "order_total")
+        },
     ]
 }
 

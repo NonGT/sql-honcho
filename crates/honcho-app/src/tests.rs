@@ -961,3 +961,61 @@ fn expanded_nodes_come_back_next_time(cx: &mut TestAppContext) {
         fresh.read_with(cx, |b, _| b.is_idle() && b.labels() == before)
     });
 }
+
+fn menu(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<Vec<String>> {
+    ws.read_with(cx, |ws, cx| {
+        ws.active_editor()
+            .read(cx)
+            .completion
+            .as_ref()
+            .map(|m| m.items.iter().map(|i| i.label.clone()).collect())
+    })
+}
+
+/// Waits until the menu's first item is `first`; metadata arrives from
+/// the fake driver on another thread.
+fn wait_for_menu(ws: &Entity<Workspace>, cx: &mut VisualTestContext, first: &str) {
+    wait_until(cx, |cx| {
+        menu(ws, cx).is_some_and(|m| m.first().is_some_and(|f| f == first))
+    });
+}
+
+#[gpui::test]
+fn completes_tables_and_alias_columns(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("SELECT * FROM ord");
+    wait_for_menu(&ws, cx, "orders");
+    press(cx, "tab");
+    assert_eq!(text(&ws, cx), "SELECT * FROM orders");
+    assert_eq!(menu(&ws, cx), None);
+
+    cx.simulate_input(" o WHERE o.");
+    wait_for_menu(&ws, cx, "id");
+    assert_eq!(menu(&ws, cx).unwrap(), ["id", "user_id", "amount"]);
+    press(cx, "down tab");
+    assert_eq!(text(&ws, cx), "SELECT * FROM orders o WHERE o.user_id");
+}
+
+#[gpui::test]
+fn keywords_complete_without_a_connection(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    cx.simulate_input("sel");
+    assert_eq!(menu(&ws, cx).unwrap()[0], "SELECT");
+    press(cx, "escape");
+    assert_eq!(menu(&ws, cx), None);
+    // Enter without picking an item is just a new line
+    press(cx, "enter");
+    assert_eq!(text(&ws, cx), "sel\n");
+    press(cx, "backspace ctrl-space");
+    assert!(menu(&ws, cx).is_some());
+    press(cx, "down up enter");
+    // typed in lowercase, so the keyword goes in lowercase
+    assert_eq!(text(&ws, cx), "select");
+
+    // moving away closes the menu
+    cx.simulate_input(" fr");
+    assert!(menu(&ws, cx).is_some());
+    press(cx, "left");
+    assert_eq!(menu(&ws, cx), None);
+}

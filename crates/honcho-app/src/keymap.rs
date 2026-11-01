@@ -54,6 +54,9 @@ const FIND_QUERY: Option<&str> = Some("FindQuery");
 const REPLACE_QUERY: Option<&str> = Some("ReplaceQuery");
 const CONNECTION_FIELD: Option<&str> = Some("ConnectionField");
 const RESULT_GRID: Option<&str> = Some("ResultGrid");
+/// The editor while its completion menu is open; registered after the
+/// editor's own keys so these win.
+const COMPLETING: Option<&str> = Some("Editor && completing");
 
 macro_rules! bindings {
     ($p:expr, [$( ($keys:expr, $action:expr, $ctx:expr) ),* $(,)?]) => {
@@ -77,6 +80,12 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
     b.extend(bindings!(
         p,
         [
+            ("ctrl-space", ShowCompletions, EDITOR),
+            ("up", CompletionUp, COMPLETING),
+            ("down", CompletionDown, COMPLETING),
+            ("enter", EnterInCompletion, COMPLETING),
+            ("tab", AcceptCompletion, COMPLETING),
+            ("escape", DismissCompletion, COMPLETING),
             ("tab", NextField, CONNECTION_FIELD),
             ("shift-tab", PrevField, CONNECTION_FIELD),
             ("up", CellUp, RESULT_GRID),
@@ -291,6 +300,7 @@ fn workspace(p: Platform) -> Vec<Binding> {
             ("P-shift-c", ManageConnections, None),
             ("P-.", CancelQuery, None),
             ("P-j", TogglePanel, None),
+            ("P-i", ShowCompletions, EDITOR),
             ("P-b", ToggleBrowser, None),
         ]
     );

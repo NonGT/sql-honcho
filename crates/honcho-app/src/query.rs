@@ -8,20 +8,22 @@ use gpui::{
     Focusable, MouseButton, Pixels, PromptLevel, SharedString, Subscription, Task, Window,
 };
 use honcho_config::{ColorTag, SavedConnection};
-use honcho_core::Editor;
+use honcho_core::{complete, Editor};
 use honcho_db::script;
 use honcho_db::{DbError, DriverKind, MessageLevel, QueryEvent};
 use tokio_util::sync::CancellationToken;
 
+use crate::catalog::{self, Catalog, Catalogs};
 use crate::connection_dialog::color_dot;
 use crate::connections::{self, ActiveConnection};
-use crate::editor_view::EditorView;
+use crate::editor_view::{self, CompletionMenu, EditorView};
 use crate::grid::{Format, ResultGrid};
 use crate::theme::{self, Theme};
 
 actions!(
     query,
     [
+        RefreshSchema,
         RunStatement,
         RunAll,
         CancelQuery,
@@ -180,6 +182,14 @@ pub struct QueryTab {
     panel_collapsed: bool,
     /// Pointer y and panel height when a resize drag started.
     panel_drag: Option<(Pixels, Pixels)>,
+    /// Revision, cursor and length when the editor last changed, to tell
+    /// typing from other edits and moves.
+    last_edit: (u64, usize, usize),
+    /// Completion is wanted: the menu shows, or waits on metadata.
+    completing: bool,
+    catalog: Option<(Entity<Catalog>, Subscription)>,
+    /// The run changes the schema; forget the catalog when it's done.
+    ddl_running: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -189,6 +199,7 @@ impl QueryTab {
     pub fn new(editor: Entity<EditorView>, cx: &mut Context<Self>) -> Self {
         let subs = vec![cx.observe(&editor, |this, _, cx| {
             this.update_target(cx);
+            this.editor_changed(cx);
             cx.notify();
         })];
         Self {
@@ -209,6 +220,10 @@ impl QueryTab {
             panel_height: PANEL_HEIGHT,
             panel_collapsed: false,
             panel_drag: None,
+            last_edit: (0, 0, 0),
+            completing: false,
+            catalog: None,
+            ddl_running: false,
             _subs: subs,
         }
     }
@@ -231,6 +246,112 @@ impl QueryTab {
         self.connection.as_ref().map(|c| c.saved.driver)
     }
 
+    fn catalog(&mut self, cx: &mut Context<Self>) -> Option<Entity<Catalog>> {
+        let saved = self.connection.as_ref()?.saved.clone();
+        if self.catalog.is_none() {
+            let catalog = Catalogs::get(&saved, cx);
+            let sub = cx.observe(&catalog, |this, _, cx| {
+                if this.completing {
+                    this.refresh_completion(cx);
+                }
+            });
+            self.catalog = Some((catalog, sub));
+        }
+        self.catalog.as_ref().map(|(c, _)| c.clone())
+    }
+
+    fn forget_schema(&mut self, cx: &mut Context<Self>) {
+        if let Some(catalog) = self.catalog(cx) {
+            catalog.update(cx, |c, cx| c.clear(cx));
+        }
+    }
+
+    /// Opens completion while a name is being typed and closes it when the
+    /// cursor goes elsewhere.
+    fn editor_changed(&mut self, cx: &mut Context<Self>) {
+        let ed = &self.editor.read(cx).editor;
+        let sels = ed.selections();
+        let now = (ed.revision(), ed.newest_selection().head, ed.len_chars());
+        let prev = std::mem::replace(&mut self.last_edit, now);
+        if now == prev {
+            // a repaint, or the menu itself changing
+            return;
+        }
+        let single = sels.len() == 1 && sels[0].is_empty();
+        let in_word = now.1 > 0
+            && ed
+                .slice(now.1 - 1..now.1)
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '`');
+        let typed = now.0 != prev.0 && now.2 == prev.2 + 1 && now.1 == prev.1 + 1;
+        let erased = now.0 != prev.0 && now.2 + 1 == prev.2 && now.1 + 1 == prev.1;
+        self.completing = single && in_word && (typed || (erased && self.completing));
+        if self.completing {
+            self.refresh_completion(cx);
+        } else {
+            self.close_completion(cx);
+        }
+    }
+
+    fn close_completion(&mut self, cx: &mut Context<Self>) {
+        self.completing = false;
+        self.editor.update(cx, |e, cx| {
+            if e.completion.take().is_some() {
+                cx.notify();
+            }
+        });
+    }
+
+    fn refresh_completion(&mut self, cx: &mut Context<Self>) {
+        let kind = self.kind().unwrap_or(DriverKind::MySql);
+        let catalog = self.catalog(cx);
+        let (result, base) = {
+            let ed = &self.editor.read(cx).editor;
+            let text = ed.text();
+            let at = ed.rope().char_to_byte(ed.newest_selection().head);
+            // the statement around the cursor, or nothing between statements
+            let statements = script::split(kind, &text);
+            let (stmt, base) = statements
+                .iter()
+                .find(|s| s.start <= at && at <= s.start + s.text.len())
+                .map_or(("", at), |s| (s.text, s.start));
+            let current = self.database.as_deref();
+            let result = match &catalog {
+                Some(c) => complete::complete(stmt, at - base, &c.read(cx).view(current)),
+                None => complete::complete(stmt, at - base, &catalog::View::empty()),
+            };
+            (result, base)
+        };
+        if let Some(catalog) = &catalog {
+            if !result.missing.is_empty() {
+                let missing = result.missing.clone();
+                catalog.update(cx, |c, cx| c.fetch(&missing, cx));
+            }
+        }
+        self.editor.update(cx, |e, cx| {
+            let rope = e.editor.rope();
+            let replace = rope.byte_to_char(base + result.replace.start)
+                ..rope.byte_to_char(base + result.replace.end);
+            // the best match is highlighted, unless the user picked one with
+            // the arrows; then that one stays as more names arrive
+            let navigated = e.completion.as_ref().is_some_and(|m| m.navigated);
+            let selected = e
+                .completion
+                .as_ref()
+                .filter(|m| m.navigated)
+                .and_then(|m| m.items.get(m.selected))
+                .and_then(|old| result.items.iter().position(|i| i == old))
+                .unwrap_or(0);
+            e.completion = (!result.items.is_empty()).then_some(CompletionMenu {
+                items: result.items,
+                selected,
+                replace,
+                navigated,
+            });
+            cx.notify();
+        });
+    }
+
     pub fn set_connection(&mut self, conn: ActiveConnection, cx: &mut Context<Self>) {
         if let Some(old) = self.connection.replace(conn) {
             close_session(old, cx);
@@ -239,6 +360,7 @@ impl QueryTab {
         self.database = None;
         self.databases = None;
         self.target_key = None;
+        self.catalog = None;
         self.update_target(cx);
         self.refresh_database(cx);
         cx.notify();
@@ -403,6 +525,9 @@ impl QueryTab {
         let Some(conn) = &self.connection else {
             return;
         };
+        self.ddl_running = script::split(conn.saved.driver, &target.text)
+            .iter()
+            .any(|s| changes_schema(s.text));
         let mut handle = conn.session.execute(target.text);
         let cancel = handle.cancel_token();
         let first_line = target.first_line;
@@ -485,6 +610,9 @@ impl QueryTab {
                 out.shown = 0;
                 for grid in &out.sets {
                     grid.update(cx, |g, cx| g.finish(cx));
+                }
+                if std::mem::take(&mut self.ddl_running) {
+                    self.forget_schema(cx);
                 }
             }
             QueryEvent::Finished(Err(e)) => {
@@ -1174,6 +1302,16 @@ impl QueryTab {
     }
 }
 
+/// Statements after which the catalog is out of date.
+fn changes_schema(statement: &str) -> bool {
+    let first = statement
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    matches!(first.as_str(), "CREATE" | "ALTER" | "DROP" | "RENAME")
+}
+
 fn elapsed(d: Duration) -> String {
     if d < Duration::from_secs(1) {
         format!("{} ms", d.as_millis())
@@ -1216,6 +1354,13 @@ impl Render for QueryTab {
                 cx.listener(|this, _, _, _| this.panel_drag = None),
             )
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
+            .on_action(
+                cx.listener(|this, _: &editor_view::ShowCompletions, _, cx| {
+                    this.completing = true;
+                    this.refresh_completion(cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &RefreshSchema, _, cx| this.forget_schema(cx)))
             .on_action(
                 cx.listener(|this, _: &RunStatement, window, cx| {
                     this.run_action(false, window, cx)
