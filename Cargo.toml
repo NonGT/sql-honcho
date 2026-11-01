@@ -7,3 +7,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/NonGT/sql-honcho"
+
+# The rustls name check fix (blackbeam/mysql_async#408) is not released yet;
+# without it verify-ca behaves like verify-full. Drop this after 0.37.1.
+[patch.crates-io]
+mysql_async = { git = "https://github.com/blackbeam/mysql_async", rev = "d7525dcb1d35f3d60101a2e95e84171c3d3ac4a5" }

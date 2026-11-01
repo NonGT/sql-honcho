@@ -1549,7 +1549,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1738,7 +1738,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3591,7 +3591,7 @@ dependencies = [
  "darling",
  "heck 0.5.0",
  "manyhow",
- "num-bigint",
+ "num-bigint 0.4.8",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
@@ -3602,9 +3602,8 @@ dependencies = [
 
 [[package]]
 name = "mysql_async"
-version = "0.37.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40d11da0e2d9fad4640c9f9198ee431c6d68444568f83ef1f10f3367270071e4"
+version = "0.37.0"
+source = "git+https://github.com/blackbeam/mysql_async?rev=d7525dcb1d35f3d60101a2e95e84171c3d3ac4a5#d7525dcb1d35f3d60101a2e95e84171c3d3ac4a5"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -3633,9 +3632,9 @@ dependencies = [
 
 [[package]]
 name = "mysql_common"
-version = "0.37.3"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f27695f286b461da077b8c2f72f47feaa04ce3c3f9c0976257410e90e21208a"
+checksum = "d11189bb0e285f58b71744ee23aa8b943bd5120ef0877555813d2107374d3970"
 dependencies = [
  "base64",
  "bitflags 2.13.2",
@@ -3644,16 +3643,17 @@ dependencies = [
  "bytes",
  "crc32fast",
  "flate2",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "hex",
  "mysql-common-derive",
- "num-bigint",
+ "num-bigint 0.5.1",
  "num-traits",
  "regex",
  "saturating",
  "serde",
  "serde_json",
  "sha1",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "uuid",
 ]
@@ -3771,7 +3771,7 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-complex",
  "num-integer",
  "num-iter",
@@ -3784,6 +3784,16 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -3852,7 +3862,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
 ]
@@ -4529,7 +4539,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4994,7 +5004,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5378,13 +5388,13 @@ dependencies = [
 
 [[package]]
 name = "sha1"
-version = "0.10.7"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -5928,7 +5938,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6850,7 +6860,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -7333,7 +7343,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
