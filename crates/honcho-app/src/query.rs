@@ -700,7 +700,13 @@ impl QueryTab {
         let Some(grid) = self.shown_grid() else {
             return;
         };
-        let dir = std::env::current_dir().unwrap_or_default();
+        let dir = directories::UserDirs::new()
+            .and_then(|d| {
+                d.download_dir()
+                    .map(|p| p.to_path_buf())
+                    .or(Some(d.home_dir().to_path_buf()))
+            })
+            .unwrap_or_default();
         let name = format!("result.{}", format.extension());
         let path = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn(async move |this, cx| {

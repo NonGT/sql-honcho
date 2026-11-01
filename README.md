@@ -5,8 +5,8 @@ A native SQL editor and database client written in Rust on top of
 
 The goal is a fast editor that behaves like VS Code (multi-cursor, line
 operations, the usual keybindings) plus a client for PostgreSQL, MySQL/MariaDB,
-SQL Server and SQLite. So far the editor is done and queries run against
-MySQL/MariaDB from each tab; the results grid is next.
+SQL Server and SQLite. So far it has the editor, saved connections, and
+running queries against MySQL/MariaDB with results in a grid.
 
 ## Build
 
@@ -52,6 +52,11 @@ Bindings follow VS Code's defaults on each platform; the full tables are in
     Cmd+Enter / Ctrl+Enter       run the selection, or the statement at the cursor
     Cmd+Shift+Enter              run the whole tab (Ctrl+Shift+Enter)
     Cmd+. / Ctrl+.               cancel the running query
+
+In the results grid: drag to select, click a header or row number for the
+whole column or row, Cmd/Ctrl+C copies as TSV for spreadsheets, Enter or a
+double-click opens the full value, and the arrow in a header sorts.
+Cmd/Ctrl+J hides the results.
 
 The statement Cmd+Enter would run is marked in the gutter whenever the tab
 is connected. On a connection tagged red, UPDATE or DELETE without WHERE asks

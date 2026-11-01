@@ -31,7 +31,8 @@ for s in "${services[@]}"; do
       q "SELECT (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'app')
            + (SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = 'app')" \
         | expect "$s objects" 5
-      q "SELECT email FROM users WHERE id = 2" | expect "$s thai text" "ข@example.com"
+      # compare bytes: a client with the wrong charset reads mojibake back as Thai
+      q "SELECT HEX(email) FROM users WHERE id = 2" | expect "$s thai text" E0B882406578616D706C652E636F6D
       q "SHOW DATABASES LIKE 'analytics'" | expect "$s analytics db" analytics
       ;;
     postgres)

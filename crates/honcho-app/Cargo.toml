@@ -9,6 +9,7 @@ name = "sql-honcho"
 path = "src/main.rs"
 
 [dependencies]
+directories = "6.0.0"
 honcho-config = { path = "../honcho-config" }
 honcho-core = { path = "../honcho-core" }
 honcho-db = { path = "../honcho-db" }
