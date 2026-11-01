@@ -56,6 +56,7 @@ Bindings follow VS Code's defaults on each platform; the full tables are in
     Cmd+F / Ctrl+F               find; Cmd+Alt+F / Ctrl+H replace
     Cmd+Shift+C / Ctrl+Shift+C   connections
     Cmd+B / Ctrl+B               show or hide the object browser
+    Ctrl+Space, Cmd+I / Ctrl+I   completion (it also opens while typing a name)
     Cmd+Enter / Ctrl+Enter       run the selection, or the statement at the cursor
     Cmd+Shift+Enter              run the whole tab (Ctrl+Shift+Enter)
     Cmd+. / Ctrl+.               cancel the running query
@@ -70,6 +71,12 @@ In the results grid: drag to select, click a header or row number for the
 whole column or row, Cmd/Ctrl+C copies as TSV for spreadsheets, Enter or a
 double-click opens the full value, and the arrow in a header sorts.
 Cmd/Ctrl+J hides the results.
+
+Completion knows tables, views, columns, routines and databases, follows
+aliases through joins and subqueries in FROM, and matches fuzzily. Tab takes
+the highlighted item; Enter only does after picking one with the arrows, so
+Enter at the end of a word still starts a new line. Keywords come in the case
+you're typing in.
 
 The statement Cmd+Enter would run is marked in the gutter whenever the tab
 is connected. On a connection tagged red, UPDATE or DELETE without WHERE asks
