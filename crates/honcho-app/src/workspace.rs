@@ -45,6 +45,8 @@ pub struct Workspace {
     connection_dialog: Option<Entity<ConnectionDialog>>,
     browser: Entity<ObjectBrowser>,
     show_browser: bool,
+    /// Pointer x and pane width when dragging the browser's edge began.
+    browser_drag: Option<(Pixels, Pixels)>,
     /// Keyed by the tab's editor.
     query_tabs: HashMap<EntityId, Entity<QueryTab>>,
 }
@@ -66,6 +68,7 @@ impl Workspace {
             discard_confirmed: false,
             connection_dialog: None,
             show_browser: true,
+            browser_drag: None,
             browser,
             query_tabs: HashMap::new(),
             find,
@@ -725,6 +728,27 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
+            .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, window, cx| {
+                if let Some((x, width)) = this.browser_drag {
+                    // leave the editor room, and keep the tree usable
+                    let max = window.viewport_size().width - px(320.);
+                    let w = (width + e.position.x - x).max(px(160.)).min(max);
+                    this.browser.update(cx, |b, cx| {
+                        b.width = w;
+                        cx.notify();
+                    });
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.browser_drag.take().is_some() {
+                        let w = this.browser.read(cx).width;
+                        this.browser.update(cx, |b, cx| b.set_width(w, cx));
+                    }
+                }),
+            )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_paths(paths.paths().to_vec(), window, cx)
             }))
@@ -736,11 +760,38 @@ impl Render for Workspace {
                     .when(self.show_browser, |d| {
                         d.child(
                             div()
-                                .w(px(260.))
+                                .relative()
+                                .w(self.browser.read(cx).width)
                                 .flex_none()
                                 .border_r_1()
                                 .border_color(Theme::border())
-                                .child(self.browser.clone()),
+                                .child(self.browser.clone())
+                                // the right edge drags to resize; a double
+                                // click puts it back
+                                .child(
+                                    div()
+                                        .id("browser-edge")
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .right(px(-3.))
+                                        .w(px(6.))
+                                        .cursor(CursorStyle::ResizeLeftRight)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                if e.click_count == 2 {
+                                                    this.browser.update(cx, |b, cx| {
+                                                        b.set_width(browser::DEFAULT_WIDTH, cx)
+                                                    });
+                                                    return;
+                                                }
+                                                let width = this.browser.read(cx).width;
+                                                this.browser_drag = Some((e.position.x, width));
+                                            }),
+                                        ),
+                                ),
                         )
                     })
                     .child(

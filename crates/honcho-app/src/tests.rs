@@ -1153,3 +1153,54 @@ fn completion_notes_a_lost_connection(cx: &mut TestAppContext) {
         note(cx)
     );
 }
+
+#[gpui::test]
+fn browser_edge_drags_to_resize(cx: &mut TestAppContext) {
+    use gpui::{point, px, Modifiers, MouseButton};
+    let (ws, cx) = open(cx, vec![]);
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    let width = |cx: &mut VisualTestContext| b.read_with(cx, |b, _| b.width);
+    assert_eq!(width(cx), crate::browser::DEFAULT_WIDTH);
+
+    // the edge sits on the pane's right border
+    let y = px(300.);
+    cx.simulate_mouse_down(point(px(260.), y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(point(px(330.), y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(point(px(360.), y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(point(px(360.), y), MouseButton::Left, Modifiers::none());
+    assert_eq!(width(cx), px(360.));
+    cx.run_until_parked();
+
+    // remembered for next time
+    let fresh = cx.update(|_, cx| {
+        cx.new(|cx| {
+            let mut b = crate::browser::ObjectBrowser::new(cx);
+            b.restore_expanded(cx);
+            b
+        })
+    });
+    assert_eq!(fresh.read_with(cx, |b, _| b.width), px(360.));
+
+    // too narrow is held at a minimum
+    cx.simulate_mouse_down(point(px(360.), y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(point(px(20.), y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(point(px(20.), y), MouseButton::Left, Modifiers::none());
+    assert_eq!(width(cx), px(160.));
+
+    // a double click on the edge puts it back
+    cx.simulate_click(point(px(160.), y), Modifiers::none());
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: point(px(160.), y),
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: point(px(160.), y),
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+    });
+    assert_eq!(width(cx), crate::browser::DEFAULT_WIDTH);
+}
