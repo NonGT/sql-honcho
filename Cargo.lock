@@ -5563,6 +5563,7 @@ dependencies = [
  "honcho-config",
  "honcho-core",
  "honcho-db",
+ "serde_json",
  "tempfile",
  "tokio-util",
 ]

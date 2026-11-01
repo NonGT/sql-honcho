@@ -4,25 +4,26 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, div, prelude::*, px, uniform_list, App, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, MouseButton, PromptLevel, SharedString, Subscription, Task, Window,
+    actions, div, prelude::*, px, App, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
+    Focusable, MouseButton, Pixels, PromptLevel, SharedString, Subscription, Task, Window,
 };
 use honcho_config::ColorTag;
 use honcho_core::Editor;
 use honcho_db::script;
-use honcho_db::{Column, DbError, DriverKind, MessageLevel, QueryEvent, Row, SessionOptions};
+use honcho_db::{DbError, DriverKind, MessageLevel, QueryEvent, SessionOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::connection_dialog::color_dot;
 use crate::connections::{self, ActiveConnection, Connections};
 use crate::editor_view::EditorView;
+use crate::grid::{Format, ResultGrid};
 use crate::theme::{self, Theme};
 
-actions!(query, [RunStatement, RunAll, CancelQuery]);
+actions!(query, [RunStatement, RunAll, CancelQuery, TogglePanel]);
 
-const PANEL_HEIGHT: f32 = 240.;
-const CELL_WIDTH: f32 = 150.;
-const CELL_BYTES: usize = 200;
+const PANEL_HEIGHT: Pixels = px(260.);
+const PANEL_MIN: Pixels = px(80.);
+const PANEL_BAR: Pixels = px(28.);
 
 /// What a run will execute.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,11 +95,6 @@ pub enum TabEvent {
     NeedConnection,
 }
 
-pub struct ResultSet {
-    pub columns: Vec<Column>,
-    pub rows: Vec<Row>,
-}
-
 pub struct OutputMessage {
     pub level: MessageLevel,
     pub text: String,
@@ -108,7 +104,7 @@ pub struct OutputMessage {
 
 #[derive(Default)]
 pub struct Output {
-    pub sets: Vec<ResultSet>,
+    pub sets: Vec<Entity<ResultGrid>>,
     pub messages: Vec<OutputMessage>,
     /// Which sub-tab shows: a result set, or the messages after them.
     pub shown: usize,
@@ -144,6 +140,10 @@ pub struct QueryTab {
     reconnecting: bool,
     /// The editor state the run target was worked out for.
     target_key: Option<(u64, usize, Vec<honcho_core::Selection>)>,
+    panel_height: Pixels,
+    panel_collapsed: bool,
+    /// Pointer y and panel height when a resize drag started.
+    panel_drag: Option<(Pixels, Pixels)>,
     _subs: Vec<Subscription>,
 }
 
@@ -166,6 +166,9 @@ impl QueryTab {
             lost: None,
             reconnecting: false,
             target_key: None,
+            panel_height: PANEL_HEIGHT,
+            panel_collapsed: false,
+            panel_drag: None,
             _subs: subs,
         }
     }
@@ -312,13 +315,14 @@ impl QueryTab {
         let cancel = handle.cancel_token();
         let first_line = target.first_line;
         self.output = Some(Output::default());
+        self.panel_collapsed = false;
 
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = handle.next().await {
                 let done = matches!(event, QueryEvent::Finished(_));
                 let alive = this
                     .update(cx, |this, cx| {
-                        this.apply(event, first_line);
+                        this.apply(event, first_line, cx);
                         cx.notify();
                     })
                     .is_ok();
@@ -351,16 +355,17 @@ impl QueryTab {
         cx.notify();
     }
 
-    fn apply(&mut self, event: QueryEvent, first_line: u32) {
+    fn apply(&mut self, event: QueryEvent, first_line: u32, cx: &mut Context<Self>) {
+        let kind = self.kind().unwrap_or(DriverKind::MySql);
         let out = self.output.get_or_insert_with(Output::default);
         match event {
-            QueryEvent::Columns(columns) => out.sets.push(ResultSet {
-                columns,
-                rows: Vec::new(),
-            }),
+            QueryEvent::Columns(columns) => {
+                let grid = cx.new(|cx| ResultGrid::new(kind, columns, cx));
+                out.sets.push(grid);
+            }
             QueryEvent::Rows(rows) => {
-                if let Some(set) = out.sets.last_mut() {
-                    set.rows.extend(rows);
+                if let Some(grid) = out.sets.last() {
+                    grid.update(cx, |g, cx| g.append(rows, cx));
                 }
             }
             QueryEvent::Done {
@@ -386,6 +391,9 @@ impl QueryTab {
                 );
                 // land on the first result, or on the messages if none
                 out.shown = 0;
+                for grid in &out.sets {
+                    grid.update(cx, |g, cx| g.finish(cx));
+                }
             }
             QueryEvent::Finished(Err(e)) => {
                 let line = match &e {
@@ -676,6 +684,52 @@ impl QueryTab {
         )
     }
 
+    fn shown_grid(&self) -> Option<Entity<ResultGrid>> {
+        let out = self.output.as_ref()?;
+        out.sets.get(out.shown).cloned()
+    }
+
+    fn copy_as(&mut self, format: Format, cx: &mut Context<Self>) {
+        if let Some(grid) = self.shown_grid() {
+            let text = grid.read(cx).export(format);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
+    fn export(&mut self, format: Format, cx: &mut Context<Self>) {
+        let Some(grid) = self.shown_grid() else {
+            return;
+        };
+        let dir = std::env::current_dir().unwrap_or_default();
+        let name = format!("result.{}", format.extension());
+        let path = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = path.await else {
+                return;
+            };
+            let Ok(text) = grid.read_with(cx, |g, _| g.export_all(format)) else {
+                return;
+            };
+            let shown = path.display().to_string();
+            let written = cx
+                .background_spawn(async move { std::fs::write(&path, text) })
+                .await;
+            this.update(cx, |this, cx| {
+                match written {
+                    Ok(()) => this.say(MessageLevel::Info, &format!("Saved {shown}"), None),
+                    Err(e) => this.say(
+                        MessageLevel::Error,
+                        &format!("Couldn't save {shown}: {e}"),
+                        None,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn render_output(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let out = self.output.as_ref()?;
         let shown = out.shown.min(out.sets.len());
@@ -685,6 +739,7 @@ impl QueryTab {
                 .px_3()
                 .h_full()
                 .flex()
+                .flex_none()
                 .items_center()
                 .cursor_pointer()
                 .border_b_2()
@@ -700,6 +755,7 @@ impl QueryTab {
                 })
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.panel_collapsed = false;
                     if let Some(o) = &mut this.output {
                         o.shown = ix;
                     }
@@ -710,8 +766,8 @@ impl QueryTab {
             .sets
             .iter()
             .enumerate()
-            .map(|(ix, s)| {
-                let n = s.rows.len();
+            .map(|(ix, grid)| {
+                let n = grid.read(cx).rows.len();
                 tab(
                     ix,
                     format!(
@@ -729,16 +785,67 @@ impl QueryTab {
             shown == out.sets.len(),
         ));
 
+        let small = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px_1p5()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_color(Theme::muted())
+                .hover(|d| d.bg(Theme::border()).text_color(Theme::text()))
+                .child(label)
+        };
+        let has_grid = shown < out.sets.len();
+        let actions = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_0p5()
+            .px_2()
+            .when(has_grid, |d| {
+                d.child(div().text_color(Theme::gutter_text()).pr_1().child("Copy"))
+                    .children(
+                        [Format::Tsv, Format::Csv, Format::Json, Format::Insert].map(|f| {
+                            small(f.label(), f.label())
+                                .on_click(cx.listener(move |this, _, _, cx| this.copy_as(f, cx)))
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_color(Theme::gutter_text())
+                            .pl_2()
+                            .pr_1()
+                            .child("Save"),
+                    )
+                    .children(
+                        [("save-csv", Format::Csv), ("save-json", Format::Json)].map(|(id, f)| {
+                            small(id, f.label())
+                                .on_click(cx.listener(move |this, _, _, cx| this.export(f, cx)))
+                        }),
+                    )
+            })
+            .child(
+                small("toggle-panel", if self.panel_collapsed { "▴" } else { "▾" })
+                    .ml_2()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
+            );
+
         let body = match out.sets.get(shown) {
-            Some(set) => self.render_rows(set, shown, cx).into_any_element(),
+            Some(grid) => grid.clone().into_any_element(),
             None => self.render_messages(out, cx).into_any_element(),
+        };
+        let height = if self.panel_collapsed {
+            PANEL_BAR
+        } else {
+            self.panel_height
         };
         Some(
             div()
                 .flex_none()
-                .h(px(PANEL_HEIGHT))
+                .h(height)
                 .flex()
                 .flex_col()
+                .relative()
                 .border_t_1()
                 .border_color(Theme::border())
                 .bg(Theme::panel())
@@ -747,67 +854,52 @@ impl QueryTab {
                     div()
                         .flex()
                         .flex_none()
-                        .h(px(26.))
+                        .h(PANEL_BAR)
+                        .justify_between()
                         .border_b_1()
                         .border_color(Theme::border())
-                        .children(tabs),
+                        .child(
+                            div()
+                                .id("output-tabs")
+                                .flex()
+                                .overflow_x_scroll()
+                                .children(tabs),
+                        )
+                        .child(actions),
                 )
-                .child(div().flex_1().min_h_0().child(body)),
+                .when(!self.panel_collapsed, |d| {
+                    d.child(div().flex_1().min_h_0().child(body))
+                })
+                // drag the top edge to resize
+                .child(
+                    div()
+                        .id("panel-resize")
+                        .absolute()
+                        .top(px(-3.))
+                        .left_0()
+                        .right_0()
+                        .h(px(6.))
+                        .cursor(CursorStyle::ResizeUpDown)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                                this.panel_collapsed = false;
+                                this.panel_drag = Some((e.position.y, this.panel_height));
+                                cx.stop_propagation();
+                            }),
+                        ),
+                ),
         )
     }
 
-    fn render_rows(&self, set: &ResultSet, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let cell = || {
-            div()
-                .w(px(CELL_WIDTH))
-                .flex_none()
-                .px_2()
-                .overflow_hidden()
-                .whitespace_nowrap()
-        };
-        let header = div()
-            .flex()
-            .flex_none()
-            .h(px(22.))
-            .items_center()
-            .border_b_1()
-            .border_color(Theme::border())
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .children(set.columns.iter().map(|c| cell().child(c.name.clone())));
-        let count = set.rows.len();
-        let rows = uniform_list(
-            ("rows", ix),
-            count,
-            cx.processor(move |this, range: Range<usize>, _, _| {
-                let Some(set) = this.output.as_ref().and_then(|o| o.sets.get(ix)) else {
-                    return Vec::new();
-                };
-                range
-                    .filter_map(|r| set.rows.get(r))
-                    .map(|row| {
-                        div()
-                            .flex()
-                            .h(px(20.))
-                            .items_center()
-                            .children(row.iter().map(|v| {
-                                let text = v.display(CELL_BYTES).replace('\n', "⏎");
-                                cell()
-                                    .when(v.is_null(), |d| d.text_color(Theme::muted()))
-                                    .when(v.is_numeric(), |d| d.flex().justify_end())
-                                    .child(text)
-                            }))
-                    })
-                    .collect()
-            }),
-        )
-        .flex_1();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .font_family(theme::font_family(cx))
-            .child(header)
-            .child(rows)
+    #[cfg(test)]
+    pub fn panel_collapsed(&self) -> bool {
+        self.panel_collapsed
+    }
+
+    fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        self.panel_collapsed = !self.panel_collapsed;
+        cx.notify();
     }
 
     fn render_messages(&self, out: &Output, cx: &mut Context<Self>) -> impl IntoElement {
@@ -865,13 +957,25 @@ impl Focusable for QueryTab {
 }
 
 impl Render for QueryTab {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let max_panel = window.viewport_size().height - px(200.);
         div()
             .key_context("QueryTab")
             .size_full()
             .relative()
             .flex()
             .flex_col()
+            .on_mouse_move(cx.listener(move |this, e: &gpui::MouseMoveEvent, _, cx| {
+                if let Some((y, h)) = this.panel_drag {
+                    this.panel_height = (h + y - e.position.y).max(PANEL_MIN).min(max_panel);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.panel_drag = None),
+            )
+            .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
             .on_action(
                 cx.listener(|this, _: &RunStatement, window, cx| {
                     this.run_action(false, window, cx)

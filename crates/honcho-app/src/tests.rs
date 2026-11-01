@@ -4,12 +4,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{App, ClipboardItem, Entity, TestAppContext, VisualTestContext};
+use gpui::{App, ClipboardItem, Entity, Focusable, TestAppContext, VisualTestContext};
 use honcho_config::{ColorTag, ConnectionStore, MemorySecrets};
 use honcho_db::{DbRuntime, DriverKind};
 
 use crate::connection_dialog::ConnectionDialog;
 use crate::connections::Connections;
+use crate::grid::{CellRange, Format, ResultGrid};
 use crate::keymap::{self, Platform};
 use crate::query::QueryTab;
 use crate::theme;
@@ -442,9 +443,12 @@ fn result_rows(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<usize>
     q.read_with(cx, |q, _| {
         q.output
             .iter()
-            .flat_map(|o| o.sets.iter().map(|s| s.rows.len()))
-            .collect()
+            .flat_map(|o| o.sets.clone())
+            .collect::<Vec<_>>()
     })
+    .into_iter()
+    .map(|g| g.read_with(cx, |g, _| g.rows.len()))
+    .collect()
 }
 
 #[gpui::test]
@@ -549,4 +553,91 @@ fn duplicate_and_delete(cx: &mut TestAppContext) {
     });
     assert_eq!(left, (0, None));
     assert!(d.read_with(cx, |d, _| d.selected_id().is_none()));
+}
+
+fn first_grid(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<ResultGrid> {
+    let q = query_tab(ws, cx);
+    q.read_with(cx, |q, _| q.output.as_ref().unwrap().sets[0].clone())
+}
+
+fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+    cx.read_from_clipboard().and_then(|c| c.text())
+}
+
+#[gpui::test]
+fn grid_sorts_and_copies_a_block(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 5");
+    run(&ws, cx, "P-enter");
+    let grid = first_grid(&ws, cx);
+
+    // descending by id: 4, 3, 2, 1, 0
+    grid.update(cx, |g, cx| {
+        g.toggle_sort(0, cx);
+        g.toggle_sort(0, cx);
+    });
+    assert_eq!(grid.read_with(cx, |g, _| g.sort), Some((0, false)));
+    grid.update_in(cx, |g, window, cx| {
+        window.focus(&g.focus_handle(cx));
+        g.selection = Some(CellRange {
+            anchor: (1, 0),
+            head: (2, 1),
+        });
+    });
+    press(cx, "P-c");
+    assert_eq!(clipboard(cx).as_deref(), Some("3\trow 3\n2\trow 2\n"));
+
+    // arrows move, shift extends
+    press(cx, "down shift-left shift-up");
+    let sel = grid.read_with(cx, |g, _| g.selection).unwrap();
+    assert_eq!((sel.rows(), sel.cols()), (2..4, 0..2));
+
+    // a third click on the header goes back to the server's order
+    grid.update(cx, |g, cx| g.toggle_sort(0, cx));
+    press(cx, "P-a P-c");
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("0\trow 0\n1\trow 1\n2\trow 2\n3\trow 3\n4\trow 4\n")
+    );
+}
+
+#[gpui::test]
+fn copy_buttons_and_the_viewer(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("types");
+    run(&ws, cx, "P-enter");
+    let grid = first_grid(&ws, cx);
+    let json = grid.read_with(cx, |g, _| g.export(Format::Json));
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed[0]["n"], 42);
+    assert_eq!(parsed[0]["z"], serde_json::Value::Null);
+    assert_eq!(parsed[0]["t"], "สวัสดี 😀");
+
+    // enter opens the full value, escape closes it
+    grid.update_in(cx, |g, window, cx| {
+        window.focus(&g.focus_handle(cx));
+        g.selection = Some(CellRange {
+            anchor: (0, 2),
+            head: (0, 2),
+        });
+    });
+    press(cx, "enter");
+    assert!(grid.read_with(cx, |g, cx| g.viewer_text(cx)).as_deref() == Some("สวัสดี 😀"));
+    press(cx, "escape");
+    assert!(grid.read_with(cx, |g, cx| g.viewer_text(cx)).is_none());
+}
+
+#[gpui::test]
+fn results_panel_toggles(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 1");
+    run(&ws, cx, "P-enter");
+    let q = query_tab(&ws, cx);
+    press(cx, "P-j");
+    assert!(q.read_with(cx, |q, _| q.panel_collapsed()));
+    press(cx, "P-j");
+    assert!(!q.read_with(cx, |q, _| q.panel_collapsed()));
 }

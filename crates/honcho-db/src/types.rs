@@ -54,6 +54,8 @@ pub struct Column {
     /// Type name as the server reports it, e.g. `varchar(255)` or `int4`.
     pub type_name: String,
     pub nullable: Option<bool>,
+    /// Table the column was read from, when the server says.
+    pub table: Option<String>,
 }
 
 impl Column {
@@ -62,6 +64,7 @@ impl Column {
             name: name.into(),
             type_name: type_name.into(),
             nullable: None,
+            table: None,
         }
     }
 }
