@@ -23,6 +23,7 @@ use crate::theme::{self, Theme};
 actions!(browser, [ToggleBrowser]);
 
 const ROW_HEIGHT: Pixels = px(22.);
+pub const DEFAULT_WIDTH: Pixels = px(260.);
 const INDENT: f32 = 14.;
 const SEARCH_LIMIT: usize = 500;
 const SEARCH_DELAY: Duration = Duration::from_millis(250);
@@ -203,6 +204,8 @@ pub struct ObjectBrowser {
     /// Connections reopened after dropping and not loaded anything since;
     /// a second drop is reported instead of retried.
     reconnected: HashSet<String>,
+    /// The pane's width, set by dragging its edge.
+    pub width: Pixels,
 }
 
 impl EventEmitter<BrowserEvent> for ObjectBrowser {}
@@ -224,6 +227,7 @@ impl ObjectBrowser {
             search: None,
             scroll: UniformListScrollHandle::new(),
             reconnected: HashSet::new(),
+            width: DEFAULT_WIDTH,
         };
         this.rebuild(cx);
         this
@@ -779,6 +783,13 @@ impl ObjectBrowser {
         cx.notify();
     }
 
+    /// Remembers the width once a drag is over.
+    pub fn set_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        self.width = width;
+        self.save_expanded(cx);
+        cx.notify();
+    }
+
     fn save_expanded(&self, cx: &App) {
         let path = cx
             .global::<Connections>()
@@ -786,7 +797,8 @@ impl ObjectBrowser {
             .path()
             .with_file_name("browser.json");
         let expanded: Vec<&Path> = self.expanded.iter().collect();
-        let Ok(json) = serde_json::to_string(&serde_json::json!({ "expanded": expanded })) else {
+        let state = serde_json::json!({ "expanded": expanded, "width": f32::from(self.width) });
+        let Ok(json) = serde_json::to_string(&state) else {
             return;
         };
         cx.background_spawn(async move {
@@ -803,12 +815,18 @@ impl ObjectBrowser {
             .store
             .path()
             .with_file_name("browser.json");
-        let saved: Option<Vec<Path>> = std::fs::read_to_string(path)
+        let state = std::fs::read_to_string(path)
             .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| serde_json::from_value(v["expanded"].clone()).ok());
-        if let Some(paths) = saved {
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let Some(state) = state else {
+            self.rebuild(cx);
+            return;
+        };
+        if let Ok(paths) = serde_json::from_value::<Vec<Path>>(state["expanded"].clone()) {
             self.expanded = paths.into_iter().filter(|p| p.len() > 1).collect();
+        }
+        if let Some(w) = state["width"].as_f64() {
+            self.width = px(w as f32);
         }
         self.rebuild(cx);
     }
