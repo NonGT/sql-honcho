@@ -28,6 +28,10 @@ actions!(
         ExtendDown,
         ExtendLeft,
         ExtendRight,
+        PageUpCells,
+        PageDownCells,
+        FirstRow,
+        LastRow,
         SelectAllCells,
         CopyCells,
         OpenCell,
@@ -41,6 +45,8 @@ const DEFAULT_WIDTH: Pixels = px(150.);
 const MIN_WIDTH: Pixels = px(40.);
 const SORT_BUTTON: Pixels = px(18.);
 const EDGE: Pixels = px(4.);
+const BAR: Pixels = px(10.);
+const MIN_THUMB: Pixels = px(24.);
 /// Cells show at most this much; the viewer has the rest.
 const SHOWN_CHARS: usize = 300;
 
@@ -80,10 +86,52 @@ enum Drag {
         start_x: Pixels,
         start_width: Pixels,
     },
+    /// Dragging a scrollbar thumb: pointer and scroll offset at the start.
+    ScrollY(Pixels, Pixels),
+    ScrollX(Pixels, Pixels),
+}
+
+/// A scrollbar: the track and the thumb's offset and length along it.
+#[derive(Clone, Copy)]
+struct Bar {
+    track: Bounds<Pixels>,
+    start: Pixels,
+    len: Pixels,
+    /// How far the content can scroll.
+    max: Pixels,
+}
+
+impl Bar {
+    fn new(
+        track: Bounds<Pixels>,
+        along: Pixels,
+        view: Pixels,
+        content: Pixels,
+        scroll: Pixels,
+    ) -> Option<Self> {
+        if content <= view || along <= MIN_THUMB {
+            return None;
+        }
+        let len = (along * (view / content)).max(MIN_THUMB);
+        let max = content - view;
+        Some(Self {
+            track,
+            start: (along - len) * (scroll / max),
+            len,
+            max,
+        })
+    }
+
+    /// Scroll offset per pixel of thumb movement.
+    fn ratio(&self, along: Pixels) -> f32 {
+        self.max / (along - self.len)
+    }
 }
 
 #[derive(Clone, Copy)]
 enum Hit {
+    VBar,
+    HBar,
     Corner,
     Header { col: usize, edge: bool, sort: bool },
     RowNumber(usize),
@@ -253,10 +301,48 @@ impl ResultGrid {
         self.scroll.y = self.scroll.y.max(px(0.)).min(max_y);
     }
 
+    fn vbar(&self) -> Option<Bar> {
+        let m = self.metrics?;
+        let b = m.bounds;
+        let track = Bounds::from_corners(
+            point(b.right() - BAR, b.top() + HEADER_HEIGHT),
+            b.bottom_right(),
+        );
+        Bar::new(
+            track,
+            track.size.height,
+            b.size.height - HEADER_HEIGHT,
+            ROW_HEIGHT * self.rows.len() as f32,
+            self.scroll.y,
+        )
+    }
+
+    fn hbar(&self) -> Option<Bar> {
+        let m = self.metrics?;
+        let b = m.bounds;
+        let track = Bounds::from_corners(
+            point(b.left() + m.row_number_width, b.bottom() - BAR),
+            point(b.right() - BAR, b.bottom()),
+        );
+        Bar::new(
+            track,
+            track.size.width,
+            b.size.width - m.row_number_width,
+            self.total_width(),
+            self.scroll.x,
+        )
+    }
+
     fn hit(&self, pos: Point<Pixels>) -> Hit {
         let Some(m) = self.metrics else {
             return Hit::Outside;
         };
+        if self.vbar().is_some_and(|b| b.track.contains(&pos)) {
+            return Hit::VBar;
+        }
+        if self.hbar().is_some_and(|b| b.track.contains(&pos)) {
+            return Hit::HBar;
+        }
         let local = pos - m.bounds.origin;
         if local.x < px(0.) || local.y < px(0.) {
             return Hit::Outside;
@@ -327,6 +413,25 @@ impl ResultGrid {
             _ => *sel = Some(CellRange::cell(head.0, head.1)),
         };
         match self.hit(e.position) {
+            Hit::VBar => {
+                let bar = self.vbar().expect("hit a bar");
+                let y = e.position.y - bar.track.top();
+                // clicking off the thumb jumps there first
+                if y < bar.start || y > bar.start + bar.len {
+                    self.scroll.y = (y - bar.len / 2.) * bar.ratio(bar.track.size.height);
+                    self.clamp_scroll();
+                }
+                self.drag = Drag::ScrollY(e.position.y, self.scroll.y);
+            }
+            Hit::HBar => {
+                let bar = self.hbar().expect("hit a bar");
+                let x = e.position.x - bar.track.left();
+                if x < bar.start || x > bar.start + bar.len {
+                    self.scroll.x = (x - bar.len / 2.) * bar.ratio(bar.track.size.width);
+                    self.clamp_scroll();
+                }
+                self.drag = Drag::ScrollX(e.position.x, self.scroll.x);
+            }
             Hit::Header {
                 col, edge: true, ..
             } => {
@@ -383,6 +488,26 @@ impl ResultGrid {
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if e.pressed_button != Some(MouseButton::Left) {
             return;
+        }
+        match self.drag {
+            Drag::ScrollY(from, start) => {
+                if let Some(bar) = self.vbar() {
+                    self.scroll.y =
+                        start + (e.position.y - from) * bar.ratio(bar.track.size.height);
+                    self.clamp_scroll();
+                    cx.notify();
+                }
+                return;
+            }
+            Drag::ScrollX(from, start) => {
+                if let Some(bar) = self.hbar() {
+                    self.scroll.x = start + (e.position.x - from) * bar.ratio(bar.track.size.width);
+                    self.clamp_scroll();
+                    cx.notify();
+                }
+                return;
+            }
+            _ => {}
         }
         let hit = self.hit(e.position);
         let Some(sel) = &mut self.selection else {
@@ -463,6 +588,15 @@ impl ResultGrid {
         }
         self.reveal(head);
         cx.notify();
+    }
+
+    fn page_rows(&self) -> isize {
+        self.metrics.map_or(20, |m| {
+            ((m.bounds.size.height - HEADER_HEIGHT) / ROW_HEIGHT)
+                .floor()
+                .max(1.) as isize
+                - 1
+        })
     }
 
     /// Scrolls just enough to show the cell.
@@ -624,6 +758,20 @@ impl Render for ResultGrid {
             .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.step(1, 0, true, cx)))
             .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| this.step(0, -1, true, cx)))
             .on_action(cx.listener(|this, _: &ExtendRight, _, cx| this.step(0, 1, true, cx)))
+            .on_action(cx.listener(|this, _: &PageUpCells, _, cx| {
+                let n = this.page_rows();
+                this.step(-n, 0, false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PageDownCells, _, cx| {
+                let n = this.page_rows();
+                this.step(n, 0, false, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &FirstRow, _, cx| this.step(isize::MIN / 2, 0, false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &LastRow, _, cx| this.step(isize::MAX / 2, 0, false, cx)),
+            )
             .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all(cx)))
             .on_action(cx.listener(|this, _: &CopyCells, _, cx| this.copy_as(Format::Tsv, cx)))
             .on_action(cx.listener(|this, _: &OpenCell, window, cx| this.open_cell(window, cx)))
@@ -650,6 +798,7 @@ struct Prepaint {
     sticky_quads: Vec<(Bounds<Pixels>, Hsla)>,
     cells: Vec<Text>,
     sticky: Vec<Text>,
+    bars: Vec<Bounds<Pixels>>,
     edges: Vec<Hitbox>,
 }
 
@@ -728,6 +877,7 @@ impl Element for GridElement {
                 sticky_quads: Vec::new(),
                 cells: Vec::new(),
                 sticky: Vec::new(),
+                bars: Vec::new(),
                 edges: Vec::new(),
             };
             let body_top = bounds.top() + HEADER_HEIGHT;
@@ -887,6 +1037,21 @@ impl Element for GridElement {
                 Bounds::new(bounds.origin, size(rn_w, HEADER_HEIGHT)),
                 Theme::panel(),
             ));
+            for bar in [grid.vbar(), grid.hbar()].into_iter().flatten() {
+                let vertical = bar.track.size.height > bar.track.size.width;
+                let thumb = if vertical {
+                    Bounds::new(
+                        point(bar.track.left() + px(2.), bar.track.top() + bar.start),
+                        size(BAR - px(4.), bar.len),
+                    )
+                } else {
+                    Bounds::new(
+                        point(bar.track.left() + bar.start, bar.track.top() + px(2.)),
+                        size(bar.len, BAR - px(4.)),
+                    )
+                };
+                p.bars.push(thumb);
+            }
             for r in rows {
                 let label = shape((r + 1).to_string(), Theme::gutter_text());
                 let x = bounds.left() + rn_w - PAD - label.width;
@@ -931,6 +1096,9 @@ impl Element for GridElement {
                 window.with_content_mask(Some(ContentMask { bounds: t.clip }), |window| {
                     t.line.paint(t.origin, t.height, window, cx).ok();
                 });
+            }
+            for b in &p.bars {
+                window.paint_quad(fill(*b, Theme::selection_match()).corner_radii(px(3.)));
             }
             for h in &p.edges {
                 window.set_cursor_style(CursorStyle::ResizeColumn, h);

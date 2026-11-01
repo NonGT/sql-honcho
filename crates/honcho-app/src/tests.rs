@@ -593,6 +593,13 @@ fn grid_sorts_and_copies_a_block(cx: &mut TestAppContext) {
     let sel = grid.read_with(cx, |g, _| g.selection).unwrap();
     assert_eq!((sel.rows(), sel.cols()), (2..4, 0..2));
 
+    press(cx, "P-end");
+    let sel = grid.read_with(cx, |g, _| g.selection).unwrap();
+    assert_eq!(sel.head.0, 4);
+    press(cx, "P-home");
+    let sel = grid.read_with(cx, |g, _| g.selection).unwrap();
+    assert_eq!(sel.head.0, 0);
+
     // a third click on the header goes back to the server's order
     grid.update(cx, |g, cx| g.toggle_sort(0, cx));
     press(cx, "P-a P-c");
