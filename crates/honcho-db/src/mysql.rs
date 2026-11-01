@@ -1,0 +1,399 @@
+//! MySQL and MariaDB, over `mysql_async`.
+
+mod convert;
+mod split;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use mysql_async::prelude::*;
+use mysql_async::{Conn, DriverError, Opts, OptsBuilder, Row};
+
+use crate::types::*;
+use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink};
+
+pub use split::{split, Statement};
+
+const DEFAULT_PORT: u16 = 3306;
+const ER_QUERY_INTERRUPTED: u16 = 1317;
+const AUTH_ERRORS: &[u16] = &[
+    1044, // access denied to database
+    1045, // access denied
+    1698, // no password for this user
+    1862, // password expired
+];
+
+pub struct MySqlDriver;
+
+#[async_trait]
+impl Driver for MySqlDriver {
+    fn kind(&self) -> DriverKind {
+        DriverKind::MySql
+    }
+
+    async fn connect(&self, config: &ConnectConfig) -> Result<Box<dyn Connection>> {
+        let host = match config.host.as_str() {
+            "" => "localhost",
+            h => h,
+        };
+        let opts: Opts = OptsBuilder::default()
+            .ip_or_hostname(host)
+            .tcp_port(config.port.unwrap_or(DEFAULT_PORT))
+            .user(Some(&config.user))
+            .pass(config.password.clone())
+            .db_name(config.database.clone())
+            // by default it switches to the server's unix socket when the
+            // host is local, which isn't there when the server is in Docker
+            .prefer_socket(false)
+            .into();
+        let conn = Conn::new(opts.clone()).await.map_err(connect_error)?;
+        Ok(Box::new(MySqlConnection {
+            conn: Some(conn),
+            opts,
+            cancelled: Mutex::new(Arc::default()),
+        }))
+    }
+}
+
+pub struct MySqlConnection {
+    conn: Option<Conn>,
+    opts: Opts,
+    /// Set by the canceller handed out for the current run.
+    cancelled: Mutex<Arc<AtomicBool>>,
+}
+
+impl MySqlConnection {
+    fn conn(&mut self) -> Result<&mut Conn> {
+        self.conn
+            .as_mut()
+            .ok_or_else(|| DbError::ConnectionLost("connection closed".into()))
+    }
+
+    async fn database_or_current(&mut self, database: &Option<String>) -> Result<String> {
+        match database {
+            Some(db) => Ok(db.clone()),
+            None => self
+                .current_database()
+                .await?
+                .ok_or_else(|| DbError::query("no database selected")),
+        }
+    }
+}
+
+#[async_trait]
+impl Connection for MySqlConnection {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            schemas: false,
+            cross_database: true,
+        }
+    }
+
+    async fn execute(&mut self, sql: &str, sink: &mut ResultSink) -> Result<()> {
+        let cancelled = self.cancelled.lock().unwrap().clone();
+        let conn = self.conn()?;
+        for statement in split(sql) {
+            let warnings = run(conn, statement.text, sink, &cancelled)
+                .await
+                .map_err(|e| at_line(e, statement.line))?;
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(DbError::Cancelled);
+            }
+            if warnings > 0 {
+                show_warnings(conn, sink).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn canceller(&self) -> Option<Box<dyn Canceller>> {
+        let conn = self.conn.as_ref()?;
+        let flag = Arc::new(AtomicBool::new(false));
+        *self.cancelled.lock().unwrap() = flag.clone();
+        Some(Box::new(MySqlCanceller {
+            flag,
+            opts: OptsBuilder::from_opts(self.opts.clone())
+                .db_name(None::<String>)
+                .into(),
+            id: conn.id(),
+        }))
+    }
+
+    async fn ping(&mut self) -> Result<()> {
+        self.conn()?.ping().await.map_err(query_error)
+    }
+
+    async fn current_database(&mut self) -> Result<Option<String>> {
+        let db: Option<Option<String>> = self
+            .conn()?
+            .query_first("SELECT DATABASE()")
+            .await
+            .map_err(query_error)?;
+        Ok(db.flatten())
+    }
+
+    async fn use_database(&mut self, name: &str) -> Result<()> {
+        self.conn()?
+            .query_drop(format!("USE {}", quote(name)))
+            .await
+            .map_err(query_error)
+    }
+
+    async fn databases(&mut self) -> Result<Vec<String>> {
+        self.conn()?
+            .query("SHOW DATABASES")
+            .await
+            .map_err(query_error)
+    }
+
+    async fn objects(&mut self, scope: &Scope, kinds: &[ObjectKind]) -> Result<Vec<ObjectRef>> {
+        let db = self.database_or_current(&scope.database).await?;
+        let want = |k: ObjectKind| kinds.is_empty() || kinds.contains(&k);
+        let conn = self.conn()?;
+        let mut found: Vec<(ObjectKind, String)> = Vec::new();
+
+        if want(ObjectKind::Table) || want(ObjectKind::View) || want(ObjectKind::Sequence) {
+            let rows: Vec<(String, String)> = conn
+                .exec(
+                    "SELECT table_name, table_type FROM information_schema.tables \
+                     WHERE table_schema = ? ORDER BY table_name",
+                    (&db,),
+                )
+                .await
+                .map_err(query_error)?;
+            found.extend(rows.into_iter().map(|(name, ty)| {
+                let kind = match ty.as_str() {
+                    "VIEW" | "SYSTEM VIEW" => ObjectKind::View,
+                    "SEQUENCE" => ObjectKind::Sequence,
+                    _ => ObjectKind::Table,
+                };
+                (kind, name)
+            }));
+        }
+        if want(ObjectKind::Procedure) || want(ObjectKind::Function) {
+            let rows: Vec<(String, String)> = conn
+                .exec(
+                    "SELECT routine_name, routine_type FROM information_schema.routines \
+                     WHERE routine_schema = ? ORDER BY routine_name",
+                    (&db,),
+                )
+                .await
+                .map_err(query_error)?;
+            // MariaDB also lists packages here
+            found.extend(rows.into_iter().filter_map(|(name, ty)| match ty.as_str() {
+                "PROCEDURE" => Some((ObjectKind::Procedure, name)),
+                "FUNCTION" => Some((ObjectKind::Function, name)),
+                _ => None,
+            }));
+        }
+        if want(ObjectKind::Trigger) {
+            let rows: Vec<String> = conn
+                .exec(
+                    "SELECT trigger_name FROM information_schema.triggers \
+                     WHERE trigger_schema = ? ORDER BY trigger_name",
+                    (&db,),
+                )
+                .await
+                .map_err(query_error)?;
+            found.extend(rows.into_iter().map(|name| (ObjectKind::Trigger, name)));
+        }
+
+        Ok(found
+            .into_iter()
+            .filter(|(kind, _)| want(*kind))
+            .map(|(kind, name)| ObjectRef::new(kind, name).in_database(db.clone()))
+            .collect())
+    }
+
+    async fn columns(&mut self, object: &ObjectRef) -> Result<Vec<ColumnInfo>> {
+        type ColumnRow = (String, String, String, Option<String>, String, String);
+        let db = self.database_or_current(&object.database).await?;
+        let rows: Vec<ColumnRow> = self
+            .conn()?
+            .exec(
+                "SELECT column_name, column_type, is_nullable, column_default, column_key, \
+                 column_comment FROM information_schema.columns \
+                 WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
+                (&db, &object.name),
+            )
+            .await
+            .map_err(query_error)?;
+        if rows.is_empty() {
+            return Err(DbError::query(format!(
+                "no table or view {}.{}",
+                db, object.name
+            )));
+        }
+        Ok(rows
+            .into_iter()
+            .map(
+                |(name, data_type, nullable, default, key, comment)| ColumnInfo {
+                    name,
+                    data_type,
+                    nullable: nullable == "YES",
+                    default,
+                    primary_key: key == "PRI",
+                    comment: Some(comment).filter(|c| !c.is_empty()),
+                },
+            )
+            .collect())
+    }
+
+    async fn definition(&mut self, object: &ObjectRef) -> Result<String> {
+        let (show, column) = match object.kind {
+            ObjectKind::Table => ("TABLE", 1),
+            ObjectKind::View => ("VIEW", 1),
+            ObjectKind::Procedure => ("PROCEDURE", 2),
+            ObjectKind::Function => ("FUNCTION", 2),
+            ObjectKind::Trigger => ("TRIGGER", 2),
+            _ => return Err(DbError::Unsupported("definition for this object")),
+        };
+        let db = self.database_or_current(&object.database).await?;
+        let sql = format!("SHOW CREATE {show} {}.{}", quote(&db), quote(&object.name));
+        let row: Option<Row> = self.conn()?.query_first(sql).await.map_err(query_error)?;
+        row.and_then(|r| r.get::<Option<String>, _>(column).flatten())
+            .ok_or_else(|| {
+                DbError::query(
+                    "the server hides this definition from you; MySQL needs the \
+                     SHOW_ROUTINE privilege for routines you didn't create",
+                )
+            })
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        match self.conn.take() {
+            Some(conn) => conn.disconnect().await.map_err(query_error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Runs one statement, which can still return several result sets (CALL),
+/// and returns the server's warning count.
+async fn run(
+    conn: &mut Conn,
+    sql: &str,
+    sink: &mut ResultSink,
+    cancelled: &AtomicBool,
+) -> Result<u16> {
+    let mut result = conn.query_iter(sql).await.map_err(query_error)?;
+    loop {
+        match result.columns().filter(|c| !c.is_empty()) {
+            Some(columns) => {
+                sink.columns(columns.iter().map(convert::column).collect())
+                    .await?;
+                while let Some(row) = result.next().await.map_err(query_error)? {
+                    if cancelled.load(Ordering::SeqCst) {
+                        return Err(DbError::Cancelled);
+                    }
+                    let row = row
+                        .unwrap()
+                        .into_iter()
+                        .zip(columns.iter())
+                        .map(|(v, c)| convert::value(c, v))
+                        .collect();
+                    sink.row(row).await?;
+                }
+                sink.done(None).await?;
+            }
+            None => {
+                sink.done(Some(result.affected_rows())).await?;
+                result.next().await.map_err(query_error)?;
+            }
+        }
+        if result.is_empty() {
+            return Ok(result.warnings());
+        }
+    }
+}
+
+async fn show_warnings(conn: &mut Conn, sink: &mut ResultSink) -> Result<()> {
+    let rows: Vec<(String, u32, String)> =
+        conn.query("SHOW WARNINGS").await.map_err(query_error)?;
+    for (level, code, text) in rows {
+        let level = match level.as_str() {
+            "Note" => MessageLevel::Info,
+            "Warning" => MessageLevel::Warning,
+            _ => MessageLevel::Error,
+        };
+        sink.message(Message {
+            level,
+            text,
+            code: Some(code.to_string()),
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+struct MySqlCanceller {
+    flag: Arc<AtomicBool>,
+    opts: Opts,
+    id: u32,
+}
+
+#[async_trait]
+impl Canceller for MySqlCanceller {
+    async fn cancel(&self) -> Result<()> {
+        self.flag.store(true, Ordering::SeqCst);
+        let mut conn = Conn::new(self.opts.clone()).await.map_err(connect_error)?;
+        let killed = conn.query_drop(format!("KILL QUERY {}", self.id)).await;
+        let _ = conn.disconnect().await;
+        killed.map_err(query_error)
+    }
+}
+
+fn quote(ident: &str) -> String {
+    format!("`{}`", ident.replace('`', "``"))
+}
+
+fn connect_error(e: mysql_async::Error) -> DbError {
+    match e {
+        mysql_async::Error::Server(s) if AUTH_ERRORS.contains(&s.code) => DbError::Auth(s.message),
+        mysql_async::Error::Server(s) => DbError::Connect(s.message),
+        other => DbError::Connect(other.to_string()),
+    }
+}
+
+fn query_error(e: mysql_async::Error) -> DbError {
+    match e {
+        mysql_async::Error::Server(s) if s.code == ER_QUERY_INTERRUPTED => DbError::Cancelled,
+        mysql_async::Error::Server(s) => DbError::Query {
+            message: s.message,
+            code: Some(s.code.to_string()),
+            line: None,
+        },
+        mysql_async::Error::Io(e) => DbError::ConnectionLost(e.to_string()),
+        mysql_async::Error::Driver(DriverError::ConnectionClosed) => {
+            DbError::ConnectionLost("server closed the connection".into())
+        }
+        other => DbError::Other(other.to_string()),
+    }
+}
+
+/// Turns the statement-relative "at line N" of a server error into a line
+/// in the whole script, or points at the statement when there's none.
+fn at_line(e: DbError, statement_line: u32) -> DbError {
+    match e {
+        DbError::Query {
+            message,
+            code,
+            line: None,
+        } => {
+            let relative = message
+                .rsplit_once(" at line ")
+                .and_then(|(_, n)| n.trim().parse::<u32>().ok())
+                .unwrap_or(1);
+            DbError::Query {
+                message,
+                code,
+                line: Some(statement_line + relative.max(1) - 1),
+            }
+        }
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests;
