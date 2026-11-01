@@ -1,6 +1,7 @@
 mod editor_view;
 mod find;
 mod keymap;
+mod prompt;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 
 use gpui::{
     px, size, App, AppContext, Application, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds,
-    WindowOptions,
+    WindowDecorations, WindowOptions,
 };
 
 use editor_view as ed;
@@ -93,6 +94,9 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         theme::init_font(cx);
         keymap::install(cx);
+        if keymap::Platform::current() == keymap::Platform::Linux {
+            cx.set_prompt_builder(prompt::build);
+        }
         cx.set_menus(menus());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -109,6 +113,10 @@ fn main() {
                     title: Some("sql-honcho".into()),
                     ..Default::default()
                 }),
+                // gpui asks for server decorations by default, but GNOME and
+                // weston don't draw any, which leaves the window without a title
+                // bar. Only Linux looks at this.
+                window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Workspace::new(paths, window, cx)),
