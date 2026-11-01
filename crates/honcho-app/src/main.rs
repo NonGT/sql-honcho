@@ -2,6 +2,7 @@ mod connection_dialog;
 mod connections;
 mod editor_view;
 mod find;
+mod grid;
 mod keymap;
 mod prompt;
 mod query;
@@ -85,6 +86,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Run Statement or Selection", query::RunStatement),
                 MenuItem::action("Run All", query::RunAll),
                 MenuItem::action("Cancel Query", query::CancelQuery),
+                MenuItem::action("Toggle Results", query::TogglePanel),
             ],
         },
         Menu {

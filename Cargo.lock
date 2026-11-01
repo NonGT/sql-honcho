@@ -5559,10 +5559,12 @@ dependencies = [
 name = "sql-honcho"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "gpui",
  "honcho-config",
  "honcho-core",
  "honcho-db",
+ "serde_json",
  "tempfile",
  "tokio-util",
 ]

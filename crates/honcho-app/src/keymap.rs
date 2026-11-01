@@ -10,6 +10,7 @@ use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, PlatformKeyboard
 use crate::connection_dialog::*;
 use crate::editor_view::*;
 use crate::find::*;
+use crate::grid::*;
 use crate::query::*;
 use crate::workspace::*;
 
@@ -51,6 +52,7 @@ const FIND_BAR: Option<&str> = Some("FindBar");
 const FIND_QUERY: Option<&str> = Some("FindQuery");
 const REPLACE_QUERY: Option<&str> = Some("ReplaceQuery");
 const CONNECTION_FIELD: Option<&str> = Some("ConnectionField");
+const RESULT_GRID: Option<&str> = Some("ResultGrid");
 
 macro_rules! bindings {
     ($p:expr, [$( ($keys:expr, $action:expr, $ctx:expr) ),* $(,)?]) => {
@@ -76,6 +78,22 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
         [
             ("tab", NextField, CONNECTION_FIELD),
             ("shift-tab", PrevField, CONNECTION_FIELD),
+            ("up", CellUp, RESULT_GRID),
+            ("down", CellDown, RESULT_GRID),
+            ("left", CellLeft, RESULT_GRID),
+            ("right", CellRight, RESULT_GRID),
+            ("shift-up", ExtendUp, RESULT_GRID),
+            ("shift-down", ExtendDown, RESULT_GRID),
+            ("shift-left", ExtendLeft, RESULT_GRID),
+            ("shift-right", ExtendRight, RESULT_GRID),
+            ("pageup", PageUpCells, RESULT_GRID),
+            ("pagedown", PageDownCells, RESULT_GRID),
+            ("P-home", FirstRow, RESULT_GRID),
+            ("P-end", LastRow, RESULT_GRID),
+            ("P-a", SelectAllCells, RESULT_GRID),
+            ("P-c", CopyCells, RESULT_GRID),
+            ("enter", OpenCell, RESULT_GRID),
+            ("escape", CloseViewer, RESULT_GRID),
             ("enter", Submit, CONNECTION_FIELD),
             // after clicking a swatch or checkbox focus sits on the dialog
             ("enter", Submit, Some("ConnectionDialog")),
@@ -267,6 +285,7 @@ fn workspace(p: Platform) -> Vec<Binding> {
             ("P-0", ZoomReset, None),
             ("P-shift-c", ManageConnections, None),
             ("P-.", CancelQuery, None),
+            ("P-j", TogglePanel, None),
         ]
     );
     match p {

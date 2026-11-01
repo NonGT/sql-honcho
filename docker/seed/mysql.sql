@@ -1,4 +1,7 @@
 -- Shared by MySQL and MariaDB. Runs as root against the `app` database.
+-- The image's init client defaults to latin1, which would store the Thai
+-- text below double-encoded.
+SET NAMES utf8mb4;
 CREATE DATABASE IF NOT EXISTS analytics;
 GRANT ALL PRIVILEGES ON analytics.* TO 'honcho'@'%';
 

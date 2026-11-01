@@ -110,6 +110,9 @@ impl Theme {
     pub fn accent() -> Hsla {
         c(0x3d8bfd)
     }
+    pub fn grid_stripe() -> Hsla {
+        ca(0xffffff06)
+    }
     pub fn run_target() -> Hsla {
         ca(0x3d8bfd0c)
     }

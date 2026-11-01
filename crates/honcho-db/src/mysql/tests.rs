@@ -160,7 +160,18 @@ both_servers!(
     cancels_sleep_within_a_second,
     marks_a_killed_connection_lost,
     read_only_is_enforced_by_the_server_too,
+    reads_thai_from_a_table,
 );
+
+async fn reads_thai_from_a_table(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt, server).await;
+    let events = run(&s, "SELECT email FROM users WHERE id = 2").await;
+    assert_eq!(
+        rows_of(&events),
+        vec![vec![Value::Text("ข@example.com".into())]]
+    );
+}
 
 async fn maps_more_types(server: Server) {
     let rt = DbRuntime::new().unwrap();

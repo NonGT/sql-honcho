@@ -10,6 +10,7 @@ pub fn column(c: &mysql_async::Column) -> Column {
         name: c.name_str().into_owned(),
         type_name: type_name(c),
         nullable: Some(!c.flags().contains(ColumnFlags::NOT_NULL_FLAG)),
+        table: Some(c.org_table_str().into_owned()).filter(|t| !t.is_empty()),
     }
 }
 
