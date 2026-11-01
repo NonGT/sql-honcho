@@ -1,6 +1,6 @@
 //! A scripted in-memory driver. Each `;`-separated statement is a command:
 //!
-//! - `rows N`: a result set of N rows (`id`, `name`)
+//! - `rows N` or `select N`: a result set of N rows (`id`, `name`)
 //! - `trickle N MS`: N rows, one every MS milliseconds
 //! - `types`: one row with a value of each kind (see [`types_row`])
 //! - `update N`: a statement that affected N rows
@@ -123,7 +123,7 @@ impl Connection for FakeConnection {
                     .map_err(|_| DbError::query(format!("bad number: {arg}")))
             };
             match cmd {
-                "rows" => {
+                "rows" | "select" => {
                     sink.columns(vec![
                         Column::new("id", "int"),
                         Column::new("name", "varchar(64)"),
@@ -171,6 +171,14 @@ impl Connection for FakeConnection {
             }
         }
         Ok(())
+    }
+
+    fn statements<'a>(&self, sql: &'a str) -> Vec<crate::script::Statement<'a>> {
+        sql.split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|text| crate::script::Statement { text, line: 1 })
+            .collect()
     }
 
     fn canceller(&self) -> Option<Box<dyn Canceller>> {

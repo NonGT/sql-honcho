@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::script::Statement;
 use crate::types::{
     Capabilities, ColumnInfo, ConnectConfig, DriverKind, ObjectKind, ObjectRef, Scope,
 };
@@ -22,6 +23,12 @@ pub trait Connection: Send {
     /// through `sink`. If a sink call fails the receiver is gone: stop and
     /// return that error.
     async fn execute(&mut self, sql: &str, sink: &mut ResultSink) -> Result<()>;
+
+    /// How `execute` would split the SQL, for checking read-only sessions.
+    /// Drivers that send scripts whole needn't override it.
+    fn statements<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
+        vec![Statement { text: sql, line: 1 }]
+    }
 
     /// Something that can interrupt the next `execute` from another task.
     /// Taken right before each run.

@@ -13,7 +13,7 @@ use mysql_async::{Conn, DriverError, Opts, OptsBuilder, Row};
 use crate::types::*;
 use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink};
 
-pub use split::{split, Statement};
+pub use split::split;
 
 const DEFAULT_PORT: u16 = 3306;
 const ER_QUERY_INTERRUPTED: u16 = 1317;
@@ -47,7 +47,12 @@ impl Driver for MySqlDriver {
             // host is local, which isn't there when the server is in Docker
             .prefer_socket(false)
             .into();
-        let conn = Conn::new(opts.clone()).await.map_err(connect_error)?;
+        let mut conn = Conn::new(opts.clone()).await.map_err(connect_error)?;
+        if config.read_only {
+            conn.query_drop("SET SESSION TRANSACTION READ ONLY")
+                .await
+                .map_err(connect_error)?;
+        }
         Ok(Box::new(MySqlConnection {
             conn: Some(conn),
             opts,
@@ -105,6 +110,10 @@ impl Connection for MySqlConnection {
             }
         }
         Ok(())
+    }
+
+    fn statements<'a>(&self, sql: &'a str) -> Vec<crate::script::Statement<'a>> {
+        split(sql)
     }
 
     fn canceller(&self) -> Option<Box<dyn Canceller>> {

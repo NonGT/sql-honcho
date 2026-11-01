@@ -6,7 +6,8 @@ use crate::{DbError, Value};
 
 pub type Row = Vec<Value>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DriverKind {
     MySql,
     SqlServer,
@@ -25,6 +26,9 @@ pub struct ConnectConfig {
     pub password: Option<String>,
     pub database: Option<String>,
     pub connect_timeout: Option<Duration>,
+    /// Refuse anything but reads, in the session and on the server where
+    /// the driver can.
+    pub read_only: bool,
     /// Driver-specific options, passed through as-is.
     pub options: BTreeMap<String, String>,
 }
@@ -38,6 +42,7 @@ impl fmt::Debug for ConnectConfig {
             .field("password", &self.password.as_ref().map(|_| "***"))
             .field("database", &self.database)
             .field("connect_timeout", &self.connect_timeout)
+            .field("read_only", &self.read_only)
             .field("options", &self.options)
             .finish()
     }

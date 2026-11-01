@@ -159,6 +159,7 @@ both_servers!(
     reports_error_lines_in_the_script,
     cancels_sleep_within_a_second,
     marks_a_killed_connection_lost,
+    read_only_is_enforced_by_the_server_too,
 );
 
 async fn maps_more_types(server: Server) {
@@ -313,5 +314,36 @@ async fn marks_a_killed_connection_lost(server: Server) {
     match events.last() {
         Some(QueryEvent::Finished(Err(e))) => assert!(e.is_fatal(), "{e:?}"),
         other => panic!("expected the connection to be gone, got {other:?}"),
+    }
+}
+
+async fn read_only_is_enforced_by_the_server_too(server: Server) {
+    let config = ConnectConfig {
+        read_only: true,
+        ..config(server)
+    };
+    let rt = DbRuntime::new().unwrap();
+    let s = rt
+        .connect(
+            Arc::new(MySqlDriver),
+            config.clone(),
+            SessionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let events = run(&s, "SELECT COUNT(*) FROM users;\nDELETE FROM orders").await;
+    assert!(
+        matches!(events.last(), Some(QueryEvent::Finished(Err(DbError::ReadOnly(m)))) if m.starts_with("line 2:")),
+        "{events:?}"
+    );
+    assert_eq!(rows_of(&events), Vec::<Vec<Value>>::new());
+
+    // past the session check, straight to the connection
+    let mut conn = MySqlDriver.connect(&config).await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let mut sink = ResultSink::new(tx);
+    match conn.execute("DELETE FROM orders", &mut sink).await {
+        Err(DbError::Query { code, .. }) => assert_eq!(code.as_deref(), Some("1792")),
+        other => panic!("expected the server to refuse, got {other:?}"),
     }
 }
