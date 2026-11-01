@@ -20,6 +20,9 @@ need the usual gpui packages, e.g. on Debian/Ubuntu:
       libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev \
       libfreetype-dev libvulkan-dev libssl-dev libzstd-dev
 
+File dialogs on Linux go through xdg-desktop-portal, so a desktop without
+one (plain XFCE, for example) needs `xdg-desktop-portal-gtk` installed.
+
 On Windows you need the Visual Studio C++ build tools and a Windows SDK. On
 ARM64 Windows you also need clang on PATH (`winget install LLVM.LLVM`) for
 the `ring` dependency. If a release build fails running `fxc.exe`, point

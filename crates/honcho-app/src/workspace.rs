@@ -193,11 +193,13 @@ impl Workspace {
             multiple: true,
             prompt: None,
         });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
+        cx.spawn_in(window, async move |this, cx| match rx.await {
+            Ok(Ok(Some(paths))) => {
                 this.update_in(cx, |this, window, cx| this.open_paths(paths, window, cx))
                     .ok();
             }
+            Ok(Err(err)) => dialog_failed(err, cx).await,
+            _ => {}
         })
         .detach();
     }
@@ -244,6 +246,10 @@ impl Workspace {
                 (Some(p), _) => p,
                 (None, Some(rx)) => match rx.await {
                     Ok(Ok(Some(p))) => p,
+                    Ok(Err(err)) => {
+                        dialog_failed(err, cx).await;
+                        return false;
+                    }
                     _ => return false,
                 },
                 (None, None) => return false,
@@ -648,6 +654,23 @@ fn resize_cursor_overlay() -> impl IntoElement {
     )
     .absolute()
     .size_full()
+}
+
+/// On Linux the file dialogs go through xdg-desktop-portal, which some
+/// desktops don't run; say so instead of doing nothing.
+async fn dialog_failed(err: impl std::fmt::Display, cx: &mut gpui::AsyncWindowContext) {
+    let detail = format!("{err}\n\nOn Linux this needs xdg-desktop-portal.");
+    if let Ok(rx) = cx.update(|window, cx| {
+        window.prompt(
+            PromptLevel::Critical,
+            "Couldn't open the file dialog",
+            Some(&detail),
+            &["OK"],
+            cx,
+        )
+    }) {
+        rx.await.ok();
+    }
 }
 
 #[cfg(test)]
