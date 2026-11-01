@@ -5,8 +5,8 @@ A native SQL editor and database client written in Rust on top of
 
 The goal is a fast editor that behaves like VS Code (multi-cursor, line
 operations, the usual keybindings) plus a client for PostgreSQL, MySQL/MariaDB,
-SQL Server and SQLite. Right now only the editor exists; database connections
-come next.
+SQL Server and SQLite. So far the editor is done and MySQL/MariaDB connections
+can be saved and opened; running queries from a tab comes next.
 
 ## Build
 
@@ -19,6 +19,10 @@ need the usual gpui packages, e.g. on Debian/Ubuntu:
     sudo apt install pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
       libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev \
       libfreetype-dev libvulkan-dev libssl-dev libzstd-dev
+
+Passwords are kept in the OS keyring. On Linux that is the Secret Service,
+which GNOME Keyring or KeePassXC provide; without one, connections still
+work but their passwords can't be saved.
 
 File dialogs on Linux go through xdg-desktop-portal, so a desktop without
 one (plain XFCE, for example) needs `xdg-desktop-portal-gtk` installed.
@@ -44,6 +48,7 @@ Bindings follow VS Code's defaults on each platform; the full tables are in
     Alt+Up/Down                  move lines
     Cmd+/ / Ctrl+/               toggle -- comment
     Cmd+F / Ctrl+F               find; Cmd+Alt+F / Ctrl+H replace
+    Cmd+Shift+C / Ctrl+Shift+C   connections (or click the left end of the status bar)
 
 Copy with no selection copies the whole line. Pasting N lines into N cursors
 puts one line at each cursor.
