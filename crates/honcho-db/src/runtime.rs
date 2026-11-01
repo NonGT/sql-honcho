@@ -159,8 +159,9 @@ impl Session {
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let capabilities = conn.capabilities();
+        let via = tunnel.as_ref().map(|t| t.ssh_host.clone());
         handle.spawn(async move {
-            run_session(conn, rx, read_only, options).await;
+            run_session(conn, rx, read_only, via, options).await;
             // the tunnel outlives every query, cancels included
             drop(tunnel);
         });
@@ -273,6 +274,7 @@ async fn run_session(
     mut conn: Box<dyn Connection>,
     mut rx: mpsc::UnboundedReceiver<Command>,
     read_only: bool,
+    via: Option<String>,
     options: SessionOptions,
 ) {
     let mut broken: Option<String> = None;
@@ -326,6 +328,13 @@ async fn run_session(
                         elapsed: started.elapsed(),
                     }),
                     Outcome::Done(Err(e)) => {
+                        // with a tunnel either hop may have gone; say there is one
+                        let e = match (e, &via) {
+                            (DbError::ConnectionLost(r), Some(host)) => {
+                                DbError::ConnectionLost(format!("{r} (through SSH {host})"))
+                            }
+                            (e, _) => e,
+                        };
                         if e.is_fatal() {
                             broken = Some(e.to_string());
                         }

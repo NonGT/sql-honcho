@@ -369,6 +369,23 @@ impl Canceller for MySqlCanceller {
     }
 }
 
+/// The I/O errors behind a dropped connection read like library internals
+/// ("peer closed connection without sending TLS close_notify: https://…").
+fn lost_reason(io: &str) -> String {
+    let closed = [
+        "close_notify",
+        "connection closed",
+        "unexpected end of file",
+        "Broken pipe",
+        "Connection reset",
+    ];
+    if closed.iter().any(|c| io.contains(c)) {
+        "the server closed the connection".into()
+    } else {
+        io.trim_start_matches("Input/output error: ").to_string()
+    }
+}
+
 fn quote(ident: &str) -> String {
     format!("`{}`", ident.replace('`', "``"))
 }
@@ -437,7 +454,7 @@ fn query_error(e: mysql_async::Error) -> DbError {
             code: Some(s.code.to_string()),
             line: None,
         },
-        mysql_async::Error::Io(e) => DbError::ConnectionLost(e.to_string()),
+        mysql_async::Error::Io(e) => DbError::ConnectionLost(lost_reason(&e.to_string())),
         mysql_async::Error::Driver(DriverError::ConnectionClosed) => {
             DbError::ConnectionLost("server closed the connection".into())
         }
