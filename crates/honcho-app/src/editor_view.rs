@@ -10,6 +10,7 @@ use gpui::{
     ParentElement, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString, Style,
     Styled, TextRun, UTF16Selection, Window,
 };
+use honcho_core::complete::{Candidate, Kind};
 use honcho_core::sql::{self, Highlighter};
 use honcho_core::{Editor, LineEnding, Motion, Selection};
 
@@ -58,6 +59,12 @@ actions!(
         SelectAll,
         SelectLine,
         Copy,
+        ShowCompletions,
+        CompletionUp,
+        CompletionDown,
+        AcceptCompletion,
+        EnterInCompletion,
+        DismissCompletion,
         Cut,
         Paste,
         AddCursorAbove,
@@ -172,7 +179,20 @@ pub struct EditorView {
     /// Char range that running now would execute, marked so it's never a
     /// guess.
     pub run_target: Option<Range<usize>>,
+    /// Filled in by whoever knows the schema (the query tab).
+    pub completion: Option<CompletionMenu>,
 }
+
+pub struct CompletionMenu {
+    pub items: Vec<Candidate>,
+    pub selected: usize,
+    /// Chars the accepted item replaces.
+    pub replace: Range<usize>,
+    /// Arrows were used: Enter picks the item instead of starting a line.
+    pub navigated: bool,
+}
+
+const MENU_ROWS: usize = 10;
 
 impl EditorView {
     pub fn new(
@@ -203,6 +223,7 @@ impl EditorView {
             search_matches: Vec::new(),
             searching: false,
             run_target: None,
+            completion: None,
         }
     }
 
@@ -318,6 +339,98 @@ impl EditorView {
         }
         let lines = LINE_CLIPBOARD.lock().unwrap().as_deref() == Some(text.as_str());
         self.edit(cx, |e| e.paste(&text, lines));
+    }
+
+    fn move_completion(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.completion {
+            let n = menu.items.len() as isize;
+            menu.selected = (menu.selected as isize + delta).rem_euclid(n.max(1)) as usize;
+            menu.navigated = true;
+            cx.notify();
+        }
+    }
+
+    pub fn accept_completion(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
+        let Some(menu) = self.completion.take() else {
+            return;
+        };
+        let Some(item) = menu.items.get(ix.unwrap_or(menu.selected)) else {
+            return;
+        };
+        let range = menu.replace.clone();
+        let insert = item.insert.clone();
+        self.edit(cx, |e| {
+            e.set_selections(vec![Selection::new(range.start, range.end)], 0);
+            e.insert(&insert);
+        });
+    }
+
+    fn render_completion(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.completion.as_ref()?;
+        let layout = self.layout.as_ref()?;
+        let (line, col) = self.editor.line_col(menu.replace.start);
+        let ll = layout.line(line)?;
+        let x = layout.origin.x + ll.x_for_col(col) - layout.bounds.left() - px(8.);
+        let y = layout.origin.y + layout.line_height * (line + 1) as f32 - layout.bounds.top();
+        // a window of rows around the selection
+        let first = menu
+            .selected
+            .saturating_sub(MENU_ROWS - 1)
+            .min(menu.items.len().saturating_sub(MENU_ROWS));
+        let rows = menu.items.iter().enumerate().skip(first).take(MENU_ROWS);
+        Some(
+            div()
+                .absolute()
+                .left(x.max(px(0.)))
+                .top(y)
+                .min_w(px(260.))
+                .max_w(px(520.))
+                .py_0p5()
+                .bg(Theme::panel())
+                .border_1()
+                .border_color(Theme::border())
+                .rounded_md()
+                .shadow_lg()
+                .occlude()
+                .children(rows.map(|(ix, item)| {
+                    let selected = ix == menu.selected;
+                    div()
+                        .id(("completion", ix))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .h(px(22.))
+                        .cursor_pointer()
+                        .when(selected, |d| d.bg(Theme::accent_dim()))
+                        .child(
+                            div()
+                                .w(px(14.))
+                                .flex_none()
+                                .text_color(kind_color(item.kind))
+                                .child(kind_letter(item.kind)),
+                        )
+                        .child(div().flex_none().child(item.label.clone()))
+                        .child(div().flex_1())
+                        .children(item.detail.clone().map(|d| {
+                            div()
+                                .pl_3()
+                                .text_color(Theme::muted())
+                                .text_size(px(11.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(d)
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.accept_completion(Some(ix), cx);
+                            }),
+                        )
+                }))
+                .into_any_element(),
+        )
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
@@ -535,11 +648,14 @@ impl Render for EditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font = cx.global::<EditorFont>();
         let (font_family, font_size) = (font.family.clone(), font.size);
-        let context = if self.context.is_empty() {
+        let mut context = if self.context.is_empty() {
             CONTEXT.to_string()
         } else {
             format!("{CONTEXT} {}", self.context)
         };
+        if self.completion.is_some() {
+            context.push_str(" completing");
+        }
         let el = div()
             .id("editor")
             .key_context(context.as_str())
@@ -622,7 +738,52 @@ impl Render for EditorView {
             DeleteLines => |e| e.delete_lines(),
         });
 
-        el.child(EditorElement { view: cx.entity() })
+        let menu = self.render_completion(cx);
+        el.relative()
+            .on_action(cx.listener(|this, _: &CompletionUp, _, cx| this.move_completion(-1, cx)))
+            .on_action(cx.listener(|this, _: &CompletionDown, _, cx| this.move_completion(1, cx)))
+            .on_action(
+                cx.listener(|this, _: &AcceptCompletion, _, cx| this.accept_completion(None, cx)),
+            )
+            // Enter only takes an item picked with the arrows; otherwise it's
+            // a new line, so typing a word and Enter never swaps the word
+            .on_action(cx.listener(|this, _: &EnterInCompletion, _, cx| {
+                if this.completion.as_ref().is_some_and(|m| m.navigated) {
+                    this.accept_completion(None, cx);
+                } else {
+                    this.completion = None;
+                    this.edit(cx, |e| e.newline());
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DismissCompletion, _, cx| {
+                this.completion = None;
+                cx.notify();
+            }))
+            .child(EditorElement { view: cx.entity() })
+            .children(menu)
+    }
+}
+
+fn kind_letter(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Column => "c",
+        Kind::Alias => "a",
+        Kind::Table => "t",
+        Kind::View => "v",
+        Kind::Database => "d",
+        Kind::Procedure => "p",
+        Kind::Function => "f",
+        Kind::Keyword => "k",
+    }
+}
+
+fn kind_color(kind: Kind) -> Hsla {
+    match kind {
+        Kind::Column => Theme::token(sql::TokenKind::QuotedIdent),
+        Kind::Table | Kind::View | Kind::Alias => Theme::token(sql::TokenKind::Type),
+        Kind::Database => Theme::muted(),
+        Kind::Procedure | Kind::Function => Theme::token(sql::TokenKind::Function),
+        Kind::Keyword => Theme::token(sql::TokenKind::Keyword),
     }
 }
 

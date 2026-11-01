@@ -1,3 +1,4 @@
+pub mod complete;
 pub mod editor;
 pub mod search;
 pub mod sql;

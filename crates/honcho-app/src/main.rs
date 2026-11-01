@@ -1,4 +1,5 @@
 mod browser;
+mod catalog;
 mod connection_dialog;
 mod connections;
 mod editor_view;
@@ -88,6 +89,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Run All", query::RunAll),
                 MenuItem::action("Cancel Query", query::CancelQuery),
                 MenuItem::action("Toggle Results", query::TogglePanel),
+                MenuItem::action("Refresh Completions", query::RefreshSchema),
             ],
         },
         Menu {

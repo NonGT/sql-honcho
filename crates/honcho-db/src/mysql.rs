@@ -176,7 +176,7 @@ impl Connection for MySqlConnection {
         let db = self.database_or_current(&scope.database).await?;
         let want = |k: ObjectKind| kinds.is_empty() || kinds.contains(&k);
         let conn = self.conn()?;
-        let mut found: Vec<(ObjectKind, String)> = Vec::new();
+        let mut found: Vec<(ObjectKind, String, Option<String>)> = Vec::new();
 
         if want(ObjectKind::Table) || want(ObjectKind::View) || want(ObjectKind::Sequence) {
             let rows: Vec<(String, String)> = conn
@@ -193,23 +193,36 @@ impl Connection for MySqlConnection {
                     "SEQUENCE" => ObjectKind::Sequence,
                     _ => ObjectKind::Table,
                 };
-                (kind, name)
+                (kind, name, None)
             }));
         }
         if want(ObjectKind::Procedure) || want(ObjectKind::Function) {
-            let rows: Vec<(String, String)> = conn
+            type RoutineRow = (String, String, Option<String>, Option<String>);
+            let rows: Vec<RoutineRow> = conn
                 .exec(
-                    "SELECT routine_name, routine_type FROM information_schema.routines \
-                     WHERE routine_schema = ? ORDER BY routine_name",
+                    "SELECT r.routine_name, r.routine_type, r.dtd_identifier, \
+                     (SELECT GROUP_CONCAT(CONCAT_WS(' ', p.parameter_mode, p.parameter_name, \
+                       p.dtd_identifier) ORDER BY p.ordinal_position SEPARATOR ', ') \
+                      FROM information_schema.parameters p \
+                      WHERE p.specific_schema = r.routine_schema \
+                        AND p.specific_name = r.specific_name AND p.ordinal_position > 0) \
+                     FROM information_schema.routines r \
+                     WHERE r.routine_schema = ? ORDER BY r.routine_name",
                     (&db,),
                 )
                 .await
                 .map_err(query_error)?;
             // MariaDB also lists packages here
-            found.extend(rows.into_iter().filter_map(|(name, ty)| match ty.as_str() {
-                "PROCEDURE" => Some((ObjectKind::Procedure, name)),
-                "FUNCTION" => Some((ObjectKind::Function, name)),
-                _ => None,
+            found.extend(rows.into_iter().filter_map(|(name, ty, returns, params)| {
+                let params = format!("({})", params.unwrap_or_default());
+                match ty.as_str() {
+                    "PROCEDURE" => Some((ObjectKind::Procedure, name, Some(params))),
+                    "FUNCTION" => {
+                        let returns = returns.map(|r| format!(" → {r}")).unwrap_or_default();
+                        Some((ObjectKind::Function, name, Some(params + &returns)))
+                    }
+                    _ => None,
+                }
             }));
         }
         if want(ObjectKind::Trigger) {
@@ -221,13 +234,19 @@ impl Connection for MySqlConnection {
                 )
                 .await
                 .map_err(query_error)?;
-            found.extend(rows.into_iter().map(|name| (ObjectKind::Trigger, name)));
+            found.extend(
+                rows.into_iter()
+                    .map(|name| (ObjectKind::Trigger, name, None)),
+            );
         }
 
         Ok(found
             .into_iter()
-            .filter(|(kind, _)| want(*kind))
-            .map(|(kind, name)| ObjectRef::new(kind, name).in_database(db.clone()))
+            .filter(|(kind, ..)| want(*kind))
+            .map(|(kind, name, signature)| ObjectRef {
+                signature,
+                ..ObjectRef::new(kind, name).in_database(db.clone())
+            })
             .collect())
     }
 
