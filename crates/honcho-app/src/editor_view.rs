@@ -190,6 +190,8 @@ pub struct CompletionMenu {
     pub replace: Range<usize>,
     /// Arrows were used: Enter picks the item instead of starting a line.
     pub navigated: bool,
+    /// Shown under the items, e.g. that the schema couldn't be loaded.
+    pub note: Option<String>,
 }
 
 const MENU_ROWS: usize = 10;
@@ -428,6 +430,17 @@ impl EditorView {
                                 this.accept_completion(Some(ix), cx);
                             }),
                         )
+                }))
+                .children(menu.note.clone().map(|n| {
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .when(!menu.items.is_empty(), |d| {
+                            d.border_t_1().border_color(Theme::border())
+                        })
+                        .text_color(Theme::error())
+                        .text_size(px(11.))
+                        .child(n)
                 }))
                 .into_any_element(),
         )

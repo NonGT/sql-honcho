@@ -51,6 +51,10 @@ pub struct Catalog {
     asked: HashSet<Need>,
     /// Needs waiting for the session to open.
     queued: Vec<Need>,
+    /// Reopened after the session dropped; dropping again is reported.
+    reconnected: bool,
+    /// Why completion is down to keywords, when the connection is gone.
+    lost: Option<String>,
 }
 
 impl Catalog {
@@ -63,6 +67,8 @@ impl Catalog {
             columns: HashMap::new(),
             asked: HashSet::new(),
             queued: Vec::new(),
+            reconnected: false,
+            lost: None,
         }
     }
 
@@ -72,7 +78,32 @@ impl Catalog {
         self.objects.clear();
         self.columns.clear();
         self.asked.clear();
+        // and a lost connection gets another go
+        if matches!(self.conn, Conn::Failed) {
+            self.conn = Conn::Closed;
+        }
+        self.reconnected = false;
+        self.lost = None;
         cx.notify();
+    }
+
+    /// Breaks the session the way a dropped connection would.
+    #[cfg(test)]
+    pub fn drop_session(&self, cx: &App) -> gpui::Task<()> {
+        let session = match &self.conn {
+            Conn::Open(s) => Some(s.clone()),
+            _ => None,
+        };
+        cx.background_spawn(async move {
+            if let Some(s) = session {
+                let mut h = s.execute("lose");
+                while h.next().await.is_some() {}
+            }
+        })
+    }
+
+    pub fn lost(&self) -> Option<&str> {
+        self.lost.as_deref()
     }
 
     /// The catalog seen from a tab on `current` database.
@@ -124,9 +155,13 @@ impl Catalog {
                         this.load(session.clone(), need, cx);
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     this.conn = Conn::Failed;
                     this.queued.clear();
+                    if this.reconnected {
+                        this.lost = Some(format!("Connection lost and reconnecting failed: {e}"));
+                        cx.notify();
+                    }
                 }
             })
             .ok();
@@ -165,6 +200,14 @@ impl Catalog {
                     }),
             };
             this.update(cx, |this, cx| {
+                if let Err(e) = &loaded {
+                    if e.is_fatal() {
+                        this.dropped(need, e.to_string(), cx);
+                        return;
+                    }
+                } else {
+                    this.reconnected = false;
+                }
                 match (need, loaded) {
                     (Need::Databases, Ok(Loaded::Databases(d))) => this.databases = Some(d),
                     (Need::Objects(db), Ok(Loaded::Objects(o))) => {
@@ -181,6 +224,28 @@ impl Catalog {
             .ok();
         })
         .detach();
+    }
+}
+
+impl Catalog {
+    /// The session dropped while loading `need`: reopen it once and ask
+    /// again; if it drops again right away, say so.
+    fn dropped(&mut self, need: Need, reason: String, cx: &mut Context<Self>) {
+        // other loads cut off by the same drop wait for the same reconnect
+        if matches!(self.conn, Conn::Opening) {
+            self.queued.push(need);
+            return;
+        }
+        if std::mem::replace(&mut self.reconnected, true) {
+            self.conn = Conn::Failed;
+            self.lost = Some(format!("Connection lost: {reason}"));
+            cx.notify();
+            return;
+        }
+        self.queued.push(need);
+        if !matches!(self.conn, Conn::Opening) {
+            self.open(cx);
+        }
     }
 }
 

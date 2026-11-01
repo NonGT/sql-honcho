@@ -200,6 +200,9 @@ pub struct ObjectBrowser {
     menu: Option<Menu>,
     search: Option<Search>,
     scroll: UniformListScrollHandle,
+    /// Connections reopened after dropping and not loaded anything since;
+    /// a second drop is reported instead of retried.
+    reconnected: HashSet<String>,
 }
 
 impl EventEmitter<BrowserEvent> for ObjectBrowser {}
@@ -220,6 +223,7 @@ impl ObjectBrowser {
             menu: None,
             search: None,
             scroll: UniformListScrollHandle::new(),
+            reconnected: HashSet::new(),
         };
         this.rebuild(cx);
         this
@@ -349,6 +353,9 @@ impl ObjectBrowser {
         cx.spawn(async move |this, cx| {
             let loaded = fetch(&session, &item).await;
             this.update(cx, |this, cx| {
+                if loaded.is_ok() {
+                    this.reconnected.remove(&conn_id);
+                }
                 match loaded {
                     Ok(Fetched::Items(items)) => {
                         this.children.insert(path.clone(), Children::Loaded(items));
@@ -364,6 +371,19 @@ impl ObjectBrowser {
                             this.children.insert(p, Children::Loaded(objects));
                         }
                         this.children.insert(db, Children::Loaded(items));
+                    }
+                    Err(e) if e.is_fatal() && this.reconnect(&conn_id, cx) => {
+                        // the reopened session reloads every open node,
+                        // this one included
+                        return;
+                    }
+                    Err(e) if e.is_fatal() => {
+                        this.children.insert(
+                            path.clone(),
+                            Children::Failed(format!(
+                                "Connection lost: {e}. Refresh to try again."
+                            )),
+                        );
                     }
                     Err(e) => {
                         this.children
@@ -403,6 +423,23 @@ impl ObjectBrowser {
         }
     }
 
+    /// Reopens a connection whose session dropped, once. False when it was
+    /// just reopened and dropped again, so the caller reports it.
+    fn reconnect(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(saved) = self.saved(id, cx) else {
+            return false;
+        };
+        // other loads cut off by the same drop wait for the same reconnect
+        if matches!(self.conns.get(id), Some(Conn::Opening)) {
+            return true;
+        }
+        if !self.reconnected.insert(id.to_string()) {
+            return false;
+        }
+        self.open_connection(saved, cx);
+        true
+    }
+
     fn open_connection(&mut self, saved: SavedConnection, cx: &mut Context<Self>) {
         let id = saved.id.clone();
         if let Some(Conn::Open(old)) = self.conns.remove(&id) {
@@ -439,7 +476,12 @@ impl ObjectBrowser {
                         );
                     }
                     Err(e) => {
-                        this.conns.insert(id, Conn::Failed(e.to_string()));
+                        let message = if this.reconnected.contains(&id) {
+                            format!("Connection lost and reconnecting failed: {e}")
+                        } else {
+                            e.to_string()
+                        };
+                        this.conns.insert(id, Conn::Failed(message));
                     }
                 }
                 this.rebuild(cx);
@@ -492,15 +534,29 @@ impl ObjectBrowser {
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DELAY).await;
             let mut results = HashMap::new();
+            let mut dropped = Vec::new();
             for (id, session) in sessions {
-                if let Ok(found) = session.search(query.clone(), SEARCH_LIMIT).await {
-                    results.insert(id, found);
+                match session.search(query.clone(), SEARCH_LIMIT).await {
+                    Ok(found) => {
+                        results.insert(id, found);
+                    }
+                    Err(e) if e.is_fatal() => dropped.push(id),
+                    Err(_) => {}
                 }
             }
             this.update(cx, |this, cx| {
                 if let Some(search) = &mut this.search {
                     if search.term == query {
                         search.results = results;
+                    }
+                }
+                // reopening searches again once the session is back
+                for id in dropped {
+                    if !this.reconnect(&id, cx) {
+                        this.conns.insert(
+                            id,
+                            Conn::Failed("Connection lost and reconnecting failed.".into()),
+                        );
                     }
                 }
                 this.rebuild(cx);
@@ -640,6 +696,9 @@ impl ObjectBrowser {
     }
 
     fn refresh(&mut self, path: Path, item: Item, cx: &mut Context<Self>) {
+        if let Some(id) = path.first().and_then(|c| c.strip_prefix("c:")) {
+            self.reconnected.remove(id);
+        }
         // drop everything cached below this node
         self.children
             .retain(|p, _| !(p.len() >= path.len() && p[..path.len()] == path[..]));
@@ -1201,6 +1260,34 @@ impl ObjectBrowser {
             }
         }
         self.rebuild(cx);
+    }
+
+    /// Breaks a connection's session the way a dropped connection would.
+    #[cfg(test)]
+    pub fn drop_session(&self, cx: &App) -> Task<()> {
+        let sessions: Vec<Session> = self
+            .conns
+            .values()
+            .filter_map(|c| match c {
+                Conn::Open(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        cx.background_spawn(async move {
+            for s in sessions {
+                let mut h = s.execute("lose");
+                while h.next().await.is_some() {}
+            }
+        })
+    }
+
+    /// Notes shown on rows (loading, errors), for tests.
+    #[cfg(test)]
+    pub fn notes(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter_map(|r| r.note.as_ref().map(|(n, _)| n.clone()))
+            .collect()
     }
 
     #[cfg(test)]

@@ -424,6 +424,16 @@ fn connect_fake_with(
     color: Option<ColorTag>,
     auto_reconnect: bool,
 ) {
+    connect_fake_as(ws, cx, "dev", color, auto_reconnect)
+}
+
+fn connect_fake_as(
+    ws: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    user: &str,
+    color: Option<ColorTag>,
+    auto_reconnect: bool,
+) {
     press(cx, "P-shift-c");
     let d = dialog(ws, cx).unwrap();
     d.update(cx, |d, _| {
@@ -431,7 +441,7 @@ fn connect_fake_with(
         d.set_color(color);
         d.set_auto_reconnect(auto_reconnect);
     });
-    fill(cx, ["fake db", "", "", "dev", "", "app"]);
+    fill(cx, ["fake db", "", "", user, "", "app"]);
     press(cx, "enter");
     wait_until(cx, |cx| dialog(ws, cx).is_none());
 }
@@ -1018,4 +1028,123 @@ fn keywords_complete_without_a_connection(cx: &mut TestAppContext) {
     assert!(menu(&ws, cx).is_some());
     press(cx, "left");
     assert_eq!(menu(&ws, cx), None);
+}
+
+/// Tests that switch `REFUSE_FLAKY` take turns, since it's process-wide.
+static FLAKY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn browser_notes(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.read_with(cx, |b, _| b.notes())
+}
+
+fn drop_browser_session(ws: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    let task = b.read_with(cx, |b, cx| b.drop_session(cx));
+    cx.executor().allow_parking();
+    cx.background_executor.block_test(task);
+}
+
+#[gpui::test]
+fn tree_reconnects_when_its_session_drops(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    browse(&ws, cx, "Tables (2)");
+    browse(&ws, cx, "orders");
+    drop_browser_session(&ws, cx);
+
+    browse(&ws, cx, "Columns");
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    wait_until(cx, |cx| {
+        b.read_with(cx, |b, _| {
+            b.is_idle() && b.labels().iter().any(|l| l.trim() == "amount")
+        })
+    });
+    assert!(
+        browser_notes(&ws, cx).is_empty(),
+        "{:?}",
+        browser_notes(&ws, cx)
+    );
+}
+
+#[gpui::test]
+fn tree_says_lost_when_reconnecting_fails(cx: &mut TestAppContext) {
+    let _flaky = FLAKY.lock().unwrap_or_else(|e| e.into_inner());
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake_as(&ws, cx, "flaky", None, false);
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    drop_browser_session(&ws, cx);
+    honcho_db::fake::REFUSE_FLAKY.store(true, std::sync::atomic::Ordering::SeqCst);
+    browse(&ws, cx, "Tables (2)");
+    browse(&ws, cx, "orders");
+    browse(&ws, cx, "Columns");
+    let notes = browser_notes(&ws, cx);
+    honcho_db::fake::REFUSE_FLAKY.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.starts_with("Connection lost and reconnecting failed")),
+        "{notes:?}"
+    );
+}
+
+#[gpui::test]
+fn completion_reconnects_when_its_session_drops(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("SELECT * FROM orders o WHERE o.");
+    wait_for_menu(&ws, cx, "id");
+
+    let catalog = query_tab(&ws, cx).read_with(cx, |q, _| q.catalog_for_test().unwrap());
+    let task = catalog.read_with(cx, |c, cx| c.drop_session(cx));
+    cx.background_executor.block_test(task);
+
+    // users' columns haven't been fetched, so this needs the dropped session
+    cx.simulate_input(";\nSELECT * FROM users u WHERE u.");
+    wait_for_menu(&ws, cx, "id");
+    let note = ws.read_with(cx, |ws, cx| {
+        ws.active_editor()
+            .read(cx)
+            .completion
+            .as_ref()
+            .and_then(|m| m.note.clone())
+    });
+    assert_eq!(note, None);
+    assert_eq!(menu(&ws, cx).unwrap(), ["id", "email"]);
+}
+
+#[gpui::test]
+fn completion_notes_a_lost_connection(cx: &mut TestAppContext) {
+    let _flaky = FLAKY.lock().unwrap_or_else(|e| e.into_inner());
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake_as(&ws, cx, "flaky", None, false);
+    cx.simulate_input("SELECT * FROM orders o WHERE o.");
+    wait_for_menu(&ws, cx, "id");
+    let catalog = query_tab(&ws, cx).read_with(cx, |q, _| q.catalog_for_test().unwrap());
+    let task = catalog.read_with(cx, |c, cx| c.drop_session(cx));
+    cx.background_executor.block_test(task);
+    honcho_db::fake::REFUSE_FLAKY.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    cx.simulate_input(";\nSELECT * FROM users u WHERE u.");
+    let note = |cx: &mut VisualTestContext| {
+        ws.read_with(cx, |ws, cx| {
+            ws.active_editor()
+                .read(cx)
+                .completion
+                .as_ref()
+                .and_then(|m| m.note.clone())
+        })
+    };
+    wait_until(cx, |cx| note(cx).is_some());
+    honcho_db::fake::REFUSE_FLAKY.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        note(cx)
+            .unwrap()
+            .starts_with("Connection lost and reconnecting failed"),
+        "{:?}",
+        note(cx)
+    );
 }
