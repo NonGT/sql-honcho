@@ -4,8 +4,9 @@ use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
     PromptLevel, SharedString, Task, Window,
 };
-use honcho_config::{ColorTag, SavedConnection};
-use honcho_db::{ConnectConfig, DriverKind, SessionOptions, TlsConfig, TlsMode};
+use honcho_config::{ColorTag, SavedConnection, SavedSsh};
+use honcho_db::tunnel::{self, HostKeyProblem, SshAuth, SshConfig};
+use honcho_db::{ConnectConfig, DbError, DriverKind, SessionOptions, TlsConfig, TlsMode};
 
 use crate::connections::{self, ActiveConnection, Connections};
 use crate::editor_view::{self, EditorView};
@@ -36,6 +37,11 @@ struct Fields {
     ca: Entity<EditorView>,
     cert: Entity<EditorView>,
     key: Entity<EditorView>,
+    ssh_host: Entity<EditorView>,
+    ssh_port: Entity<EditorView>,
+    ssh_user: Entity<EditorView>,
+    ssh_key: Entity<EditorView>,
+    ssh_secret: Entity<EditorView>,
 }
 
 impl Fields {
@@ -58,6 +64,13 @@ impl Fields {
         match section {
             Section::General => self.in_order()[..6].to_vec(),
             Section::Tls => vec![&self.ca, &self.cert, &self.key],
+            Section::Ssh => vec![
+                &self.ssh_host,
+                &self.ssh_port,
+                &self.ssh_user,
+                &self.ssh_key,
+                &self.ssh_secret,
+            ],
         }
     }
 }
@@ -66,6 +79,15 @@ impl Fields {
 enum Section {
     General,
     Tls,
+    Ssh,
+}
+
+fn auth_label(auth: SshAuth) -> &'static str {
+    match auth {
+        SshAuth::Password => "Password",
+        SshAuth::Key => "Key file",
+        SshAuth::Agent => "Agent",
+    }
 }
 
 fn mode_label(mode: TlsMode) -> &'static str {
@@ -104,6 +126,8 @@ pub struct ConnectionDialog {
     is_new: bool,
     fields: Fields,
     status: Option<Status>,
+    /// An unknown SSH host key waiting on the user, and the run to retry.
+    host_key: Option<(HostKeyProblem, SavedConnection, bool)>,
     section: Section,
     busy: bool,
     /// The saved password is still being read from the keyring.
@@ -134,9 +158,15 @@ impl ConnectionDialog {
             ca: field("system roots", cx),
             cert: field("none", cx),
             key: field("none", cx),
+            ssh_host: field("host or ~/.ssh/config alias", cx),
+            ssh_port: field("22", cx),
+            ssh_user: field("from ~/.ssh/config, or your login", cx),
+            ssh_key: field("from ~/.ssh/config", cx),
+            ssh_secret: field("", cx),
         };
         fields.password.update(cx, |p, _| p.masked = true);
-        for f in fields.in_order() {
+        fields.ssh_secret.update(cx, |p, _| p.masked = true);
+        for f in fields.in_order().into_iter().chain(fields.on(Section::Ssh)) {
             cx.observe(f, |_, _, cx| cx.notify()).detach();
         }
         let mut this = Self {
@@ -145,6 +175,7 @@ impl ConnectionDialog {
             is_new: true,
             fields,
             status: None,
+            host_key: None,
             section: Section::General,
             busy: false,
             password_load: None,
@@ -217,6 +248,18 @@ impl ConnectionDialog {
         for (field, value) in self.fields.in_order().into_iter().zip(values) {
             Self::set_field(field, value, cx);
         }
+        let ssh = saved.ssh.clone().unwrap_or_default();
+        let ssh_values = [
+            ssh.host.clone(),
+            ssh.port.map(|p| p.to_string()).unwrap_or_default(),
+            ssh.user.clone(),
+            path(&ssh.key_file),
+            String::new(),
+        ];
+        for (field, value) in self.fields.on(Section::Ssh).into_iter().zip(ssh_values) {
+            Self::set_field(field, &value, cx);
+        }
+        self.host_key = None;
         self.password_load = (!is_new).then(|| self.load_password(saved.clone(), cx));
         self.draft = saved;
         self.is_new = is_new;
@@ -230,7 +273,14 @@ impl ConnectionDialog {
     fn load_password(&mut self, saved: SavedConnection, cx: &mut Context<Self>) -> Task<()> {
         let secrets = cx.global::<Connections>().secrets.clone();
         let id = saved.id.clone();
-        let read = cx.background_spawn(async move { saved.password(secrets.as_ref()) });
+        let read = cx.background_spawn(async move {
+            let password = saved.password(secrets.as_ref())?;
+            let ssh = match saved.ssh {
+                Some(_) => saved.ssh_secret(secrets.as_ref())?,
+                None => None,
+            };
+            Ok::<_, honcho_config::SecretError>((password, ssh))
+        });
         cx.spawn(async move |this, cx| {
             let result = read.await;
             this.update(cx, |this, cx| {
@@ -239,10 +289,18 @@ impl ConnectionDialog {
                 }
                 this.password_load = None;
                 match result {
-                    Ok(Some(p)) if this.fields.password.read(cx).text().is_empty() => {
-                        Self::set_field(&this.fields.password, &p, cx)
+                    Ok((password, ssh)) => {
+                        for (field, value) in [
+                            (this.fields.password.clone(), password),
+                            (this.fields.ssh_secret.clone(), ssh),
+                        ] {
+                            if let Some(v) = value {
+                                if field.read(cx).text().is_empty() {
+                                    Self::set_field(&field, &v, cx);
+                                }
+                            }
+                        }
                     }
-                    Ok(_) => {}
                     Err(e) => this.set_status(e.to_string(), true),
                 }
                 cx.notify();
@@ -306,6 +364,29 @@ impl ConnectionDialog {
         if tls.cert_file.is_some() != tls.key_file.is_some() {
             return Err("A client certificate needs both the certificate and its key.".into());
         }
+        let ssh = match &self.draft.ssh {
+            Some(draft) => {
+                let host = text(&self.fields.ssh_host);
+                if host.is_empty() {
+                    return Err("Give the SSH host, or turn SSH off.".into());
+                }
+                let port = match text(&self.fields.ssh_port) {
+                    p if p.is_empty() => None,
+                    p => Some(
+                        p.parse::<u16>()
+                            .map_err(|_| format!("SSH port {p} isn't a number from 1 to 65535."))?,
+                    ),
+                };
+                Some(SavedSsh {
+                    host,
+                    port,
+                    user: text(&self.fields.ssh_user),
+                    auth: draft.auth,
+                    key_file: path(&self.fields.ssh_key),
+                })
+            }
+            None => None,
+        };
         Ok(SavedConnection {
             name,
             host: text(&self.fields.host),
@@ -313,6 +394,7 @@ impl ConnectionDialog {
             user: text(&self.fields.user),
             database,
             tls,
+            ssh,
             ..self.draft.clone()
         })
     }
@@ -323,6 +405,17 @@ impl ConnectionDialog {
 
     fn password_change(&self, cx: &App) -> PasswordChange {
         match self.password(cx) {
+            None if self.password_load.is_some() => PasswordChange::Keep,
+            p => PasswordChange::Set(p),
+        }
+    }
+
+    fn ssh_secret(&self, cx: &App) -> Option<String> {
+        Some(self.fields.ssh_secret.read(cx).text()).filter(|p| !p.is_empty())
+    }
+
+    fn ssh_secret_change(&self, cx: &App) -> PasswordChange {
+        match self.ssh_secret(cx) {
             None if self.password_load.is_some() => PasswordChange::Keep,
             p => PasswordChange::Set(p),
         }
@@ -360,13 +453,21 @@ impl ConnectionDialog {
             }
         };
         let change = self.password_change(cx);
+        // without SSH there's no secret to keep
+        let ssh_change = match saved.ssh {
+            Some(_) => self.ssh_secret_change(cx),
+            None => PasswordChange::Set(None),
+        };
         let secrets = cx.global::<Connections>().secrets.clone();
         let owner = saved.clone();
         let write = cx.background_spawn(async move {
-            match change {
-                PasswordChange::Keep => Ok(()),
-                PasswordChange::Set(p) => owner.set_password(secrets.as_ref(), p.as_deref()),
+            if let PasswordChange::Set(p) = change {
+                owner.set_password(secrets.as_ref(), p.as_deref())?;
             }
+            if let PasswordChange::Set(p) = ssh_change {
+                owner.set_ssh_secret(secrets.as_ref(), p.as_deref())?;
+            }
+            Ok::<_, honcho_config::SecretError>(())
         });
         self.busy = true;
         self.set_status("Saving…", false);
@@ -444,7 +545,7 @@ impl ConnectionDialog {
         }
         self.keyring_job(
             "The password wasn't copied",
-            move |secrets| original.copy_password_to(&copy, secrets),
+            move |secrets| original.copy_secrets_to(&copy, secrets),
             cx,
         );
     }
@@ -492,7 +593,7 @@ impl ConnectionDialog {
         }
         self.keyring_job(
             "The saved password couldn't be deleted",
-            move |secrets| removed.set_password(secrets, None),
+            move |secrets| removed.forget_secrets(secrets),
             cx,
         );
     }
@@ -506,6 +607,15 @@ impl ConnectionDialog {
             database: saved.database.clone(),
             read_only: saved.read_only,
             tls: saved.tls.clone(),
+            ssh: saved.ssh.as_ref().map(|ssh| SshConfig {
+                host: ssh.host.clone(),
+                port: ssh.port,
+                user: Some(ssh.user.clone()).filter(|u| !u.is_empty()),
+                auth: ssh.auth,
+                key_file: ssh.key_file.clone(),
+                secret: self.ssh_secret(cx),
+                ..Default::default()
+            }),
             options: saved.options.clone(),
             connect_timeout: Some(TEST_TIMEOUT),
         }
@@ -572,6 +682,10 @@ impl ConnectionDialog {
             this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
+                    Err(DbError::HostKey(problem)) if !problem.changed => {
+                        this.status = None;
+                        this.host_key = Some((*problem, saved.clone(), keep));
+                    }
                     Err(e) => this.set_status(e.to_string(), true),
                     Ok(_) => this.set_status("Connected.", false),
                 }
@@ -588,10 +702,51 @@ impl ConnectionDialog {
         .detach();
     }
 
+    /// The user trusts the SSH host key: record it and try again.
+    fn trust_host_key(&mut self, cx: &mut Context<Self>) {
+        let Some((problem, saved, keep)) = self.host_key.take() else {
+            return;
+        };
+        match tunnel::trust_host_key(&problem) {
+            Ok(()) => self.connect(saved, keep, cx),
+            Err(e) => self.set_status(e.to_string(), true),
+        }
+        cx.notify();
+    }
+
+    fn set_ssh(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.draft.ssh = if on {
+            Some(self.draft.ssh.clone().unwrap_or_default())
+        } else {
+            None
+        };
+        cx.notify();
+    }
+
+    /// The fields on screen, in Tab order.
+    fn visible_fields(&self) -> Vec<Entity<EditorView>> {
+        let f = &self.fields;
+        let fields = match (self.section, &self.draft.ssh) {
+            (Section::Ssh, None) => vec![],
+            (Section::Ssh, Some(ssh)) => {
+                let mut v = vec![&f.ssh_host, &f.ssh_port, &f.ssh_user];
+                match ssh.auth {
+                    SshAuth::Key => v.extend([&f.ssh_key, &f.ssh_secret]),
+                    SshAuth::Password => v.push(&f.ssh_secret),
+                    SshAuth::Agent => {}
+                }
+                v
+            }
+            (section, _) => f.on(section),
+        };
+        fields.into_iter().cloned().collect()
+    }
+
     fn show_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         self.section = section;
-        let first = self.fields.on(section)[0].clone();
-        window.focus(&first.focus_handle(cx));
+        if let Some(first) = self.visible_fields().first() {
+            window.focus(&first.focus_handle(cx));
+        }
         cx.notify();
     }
 
@@ -616,7 +771,10 @@ impl ConnectionDialog {
     }
 
     fn focus_field(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let fields = self.fields.on(self.section);
+        let fields = self.visible_fields();
+        if fields.is_empty() {
+            return;
+        }
         let current = fields
             .iter()
             .position(|f| f.focus_handle(cx).is_focused(window))
@@ -650,6 +808,15 @@ impl ConnectionDialog {
     pub fn show_tls(&mut self, mode: TlsMode, window: &mut Window, cx: &mut Context<Self>) {
         self.draft.tls.mode = mode;
         self.show_section(Section::Tls, window, cx);
+    }
+
+    #[cfg(test)]
+    pub fn show_ssh(&mut self, auth: SshAuth, window: &mut Window, cx: &mut Context<Self>) {
+        self.draft.ssh = Some(SavedSsh {
+            auth,
+            ..Default::default()
+        });
+        self.show_section(Section::Ssh, window, cx);
     }
 
     #[cfg(test)]
@@ -970,7 +1137,39 @@ impl Render for ConnectionDialog {
                 "General".into(),
                 Section::General,
             ))
-            .child(section_tab("section-tls", tls_label, Section::Tls));
+            .child(section_tab("section-tls", tls_label, Section::Tls))
+            .child(section_tab(
+                "section-ssh",
+                match &self.draft.ssh {
+                    Some(_) => "SSH · on".into(),
+                    None => "SSH".into(),
+                },
+                Section::Ssh,
+            ));
+
+        let ssh_on = self.draft.ssh.is_some();
+        let auth = self.draft.ssh.as_ref().map(|s| s.auth).unwrap_or_default();
+        let ssh_toggle = checkbox(
+            "ssh-on",
+            "Connect through SSH",
+            "the database host is as the SSH server sees it",
+            ssh_on,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.set_ssh(!ssh_on, cx)));
+        let auths =
+            div()
+                .flex()
+                .gap_1()
+                .children([SshAuth::Password, SshAuth::Key, SshAuth::Agent].map(|a| {
+                    button(auth_label(a), a == auth, ssh_on).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            if let Some(ssh) = &mut this.draft.ssh {
+                                ssh.auth = a;
+                                cx.notify();
+                            }
+                        },
+                    ))
+                }));
 
         let browse = |id: &'static str, target: &Entity<EditorView>| {
             let target = target.clone();
@@ -1028,9 +1227,71 @@ impl Render for ConnectionDialog {
                     .child(path_row("CA file", &self.fields.ca, "browse-ca"))
                     .child(path_row("Client cert", &self.fields.cert, "browse-cert"))
                     .child(path_row("Client key", &self.fields.key, "browse-key")),
+                Section::Ssh => d
+                    .child(row().child(label("")).child(ssh_toggle))
+                    .when(ssh_on, |d| {
+                        d.child(
+                            row()
+                                .child(field("SSH host", &self.fields.ssh_host, None).flex_1())
+                                .child(field("Port", &self.fields.ssh_port, Some(70.))),
+                        )
+                        .child(field("SSH user", &self.fields.ssh_user, None))
+                        .child(row().child(label("Auth")).child(auths))
+                        .when(auth == SshAuth::Key, |d| {
+                            d.child(path_row("Key file", &self.fields.ssh_key, "browse-ssh-key"))
+                                .child(field("Passphrase", &self.fields.ssh_secret, None))
+                        })
+                        .when(auth == SshAuth::Password, |d| {
+                            d.child(field("Password", &self.fields.ssh_secret, None))
+                        })
+                        .when(auth == SshAuth::Agent, |d| {
+                            d.child(row().child(label("")).child(
+                                div()
+                                    .text_color(Theme::muted())
+                                    .child("Uses the keys loaded in ssh-agent."),
+                            ))
+                        })
+                    }),
             })
             .child(div().flex_1())
             .child(div().min_h(px(18.)).children(status))
+            .children(self.host_key.as_ref().map(|(p, _, _)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(Theme::accent())
+                    .child(format!("First connection to the SSH server {}:{}.", p.host, p.port))
+                    .child(
+                        div()
+                            .text_color(Theme::muted())
+                            .child(format!("Its host key is {}", p.fingerprint)),
+                    )
+                    .child(
+                        div().text_color(Theme::muted()).child(
+                            "Check it with the server's admin if you can. Trusting adds it to known_hosts.",
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .justify_end()
+                            .child(button_with_id("host-key-cancel", "Cancel", false, true).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.host_key = None;
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(
+                                button_with_id("host-key-trust", "Trust and connect", true, true)
+                                    .on_click(cx.listener(|this, _, _, cx| this.trust_host_key(cx))),
+                            ),
+                    )
+            }))
             .child(
                 div()
                     .flex()

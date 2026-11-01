@@ -86,7 +86,7 @@ fn duplicate_and_remove() {
         .collect();
     assert_eq!(names, ["a", "a copy", "b"]);
     assert_eq!(copy.password(&secrets).unwrap(), None);
-    a.copy_password_to(&copy, &secrets).unwrap();
+    a.copy_secrets_to(&copy, &secrets).unwrap();
     assert_eq!(copy.password(&secrets).unwrap().as_deref(), Some("pw"));
 
     assert_eq!(store.remove(&a.id).unwrap().id, a.id);
@@ -130,4 +130,39 @@ fn default_path_is_in_the_config_dir() {
     let path = ConnectionStore::default_path().unwrap();
     assert!(path.ends_with("connections.json"));
     assert!(path.to_string_lossy().contains("sql-honcho"));
+}
+
+#[test]
+fn ssh_settings_and_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecrets::default();
+    let path = dir.path().join("c.json");
+    let mut store = ConnectionStore::load(&path).unwrap();
+    let c = SavedConnection {
+        ssh: Some(SavedSsh {
+            host: "bastion".into(),
+            user: "ops".into(),
+            auth: honcho_db::tunnel::SshAuth::Password,
+            ..Default::default()
+        }),
+        ..mysql("via ssh")
+    };
+    c.set_ssh_secret(&secrets, Some("ssh pw")).unwrap();
+    store.upsert(c.clone());
+    store.save().unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("bastion") && !text.contains("ssh pw"),
+        "{text}"
+    );
+
+    let loaded = ConnectionStore::load(&path).unwrap();
+    let config = loaded.connections()[0].connect_config(&secrets).unwrap();
+    let ssh = config.ssh.unwrap();
+    assert_eq!(ssh.host, "bastion");
+    assert_eq!(ssh.user.as_deref(), Some("ops"));
+    assert_eq!(ssh.secret.as_deref(), Some("ssh pw"));
+
+    c.forget_secrets(&secrets).unwrap();
+    assert_eq!(c.ssh_secret(&secrets).unwrap(), None);
 }

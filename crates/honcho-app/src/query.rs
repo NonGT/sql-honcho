@@ -710,6 +710,11 @@ impl QueryTab {
             Some(c) => chip("tab-connection")
                 .child(color_dot(c.saved.color))
                 .child(c.saved.name.clone())
+                .children(c.saved.ssh.as_ref().map(|ssh| {
+                    div()
+                        .text_color(Theme::muted())
+                        .child(format!("via {}", ssh.host))
+                }))
                 .when(c.saved.read_only, |d| {
                     d.child(div().text_color(Theme::muted()).child("read-only"))
                 }),

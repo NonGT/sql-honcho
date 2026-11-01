@@ -45,6 +45,14 @@ services:
       interval: 2s
       retries: 60
 
+  sshd:
+    build: ./ssh
+    ports: ["32222:22"]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
+      interval: 2s
+      retries: 30
+
   postgres:
     image: postgres:16
     environment:

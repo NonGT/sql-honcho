@@ -32,6 +32,10 @@ impl Driver for MySqlDriver {
         DriverKind::MySql
     }
 
+    fn default_port(&self) -> Option<u16> {
+        Some(DEFAULT_PORT)
+    }
+
     async fn connect(&self, config: &ConnectConfig) -> Result<Box<dyn Connection>> {
         let host = match config.host.as_str() {
             "" => "localhost",

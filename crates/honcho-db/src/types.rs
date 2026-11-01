@@ -73,6 +73,8 @@ pub struct ConnectConfig {
     /// the driver can.
     pub read_only: bool,
     pub tls: TlsConfig,
+    /// Reach the server through this SSH server instead of directly.
+    pub ssh: Option<crate::tunnel::SshConfig>,
     /// Driver-specific options, passed through as-is.
     pub options: BTreeMap<String, String>,
 }
@@ -88,6 +90,7 @@ impl fmt::Debug for ConnectConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("read_only", &self.read_only)
             .field("tls", &self.tls)
+            .field("ssh", &self.ssh)
             .field("options", &self.options)
             .finish()
     }
