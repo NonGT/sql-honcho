@@ -265,6 +265,68 @@ impl Connection for MySqlConnection {
             .collect())
     }
 
+    async fn indexes(&mut self, table: &ObjectRef) -> Result<Vec<IndexInfo>> {
+        type IndexRow = (String, i64, String);
+        let db = self.database_or_current(&table.database).await?;
+        let rows: Vec<IndexRow> = self
+            .conn()?
+            .exec(
+                // GROUP_CONCAT's separator can't appear in a column name
+                "SELECT index_name, MIN(non_unique), \
+                 GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR '\\0') \
+                 FROM information_schema.statistics \
+                 WHERE table_schema = ? AND table_name = ? \
+                 GROUP BY index_name \
+                 ORDER BY index_name <> 'PRIMARY', index_name",
+                (&db, &table.name),
+            )
+            .await
+            .map_err(query_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, non_unique, columns)| IndexInfo {
+                primary: name == "PRIMARY",
+                unique: non_unique == 0,
+                columns: columns.split('\0').map(str::to_string).collect(),
+                name,
+            })
+            .collect())
+    }
+
+    async fn search(&mut self, term: &str, limit: usize) -> Result<Vec<ObjectRef>> {
+        // MySQL 8's dictionary compares names case-sensitively, hence LOWER
+        let pattern = format!("%{}%", like_escape(term));
+        let rows: Vec<(String, String, String)> = self
+            .conn()?
+            .exec(
+                "SELECT table_schema, table_name, table_type FROM information_schema.tables \
+                 WHERE LOWER(table_name) LIKE LOWER(?) \
+                 UNION ALL SELECT routine_schema, routine_name, routine_type \
+                 FROM information_schema.routines WHERE LOWER(routine_name) LIKE LOWER(?) \
+                 UNION ALL SELECT trigger_schema, trigger_name, 'TRIGGER' \
+                 FROM information_schema.triggers WHERE LOWER(trigger_name) LIKE LOWER(?) \
+                 ORDER BY 1, 2 LIMIT ?",
+                (&pattern, &pattern, &pattern, limit as u64),
+            )
+            .await
+            .map_err(query_error)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(db, name, ty)| {
+                let kind = match ty.as_str() {
+                    "BASE TABLE" | "TEMPORARY" => ObjectKind::Table,
+                    "VIEW" | "SYSTEM VIEW" => ObjectKind::View,
+                    "SEQUENCE" => ObjectKind::Sequence,
+                    "PROCEDURE" => ObjectKind::Procedure,
+                    "FUNCTION" => ObjectKind::Function,
+                    "TRIGGER" => ObjectKind::Trigger,
+                    _ => return None,
+                };
+                Some(ObjectRef::new(kind, name).in_database(db))
+            })
+            .collect())
+    }
+
     async fn definition(&mut self, object: &ObjectRef) -> Result<String> {
         let (show, column) = match object.kind {
             ObjectKind::Table => ("TABLE", 1),
@@ -384,6 +446,18 @@ fn lost_reason(io: &str) -> String {
     } else {
         io.trim_start_matches("Input/output error: ").to_string()
     }
+}
+
+/// `term` matched literally inside LIKE.
+fn like_escape(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for c in term.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn quote(ident: &str) -> String {
