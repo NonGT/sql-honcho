@@ -702,3 +702,49 @@ fn without_auto_reconnect_a_lost_connection_waits_for_the_user(cx: &mut TestAppC
     let messages = run(&ws, cx, "P-enter");
     assert_eq!(messages, ["The connection was lost. Reconnect first."]);
 }
+
+fn open_database_list(ws: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    let q = query_tab(ws, cx);
+    q.update(cx, |q, cx| q.open_databases(cx));
+    wait_until(cx, |cx| q.read_with(cx, |q, _| q.databases_open()));
+}
+
+#[gpui::test]
+fn database_list_closes_on_escape_or_a_click_outside(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let q = query_tab(&ws, cx);
+
+    open_database_list(&ws, cx);
+    press(cx, "escape");
+    assert!(!q.read_with(cx, |q, _| q.databases_open()));
+
+    open_database_list(&ws, cx);
+    cx.simulate_click(
+        gpui::point(gpui::px(600.), gpui::px(400.)),
+        Default::default(),
+    );
+    assert!(!q.read_with(cx, |q, _| q.databases_open()));
+
+    // keyboard: app is highlighted, the next one is analytics
+    open_database_list(&ws, cx);
+    press(cx, "down enter");
+    wait_until(cx, |cx| {
+        q.read_with(cx, |q, _| q.database.as_deref() == Some("analytics"))
+    });
+    assert!(!q.read_with(cx, |q, _| q.databases_open()));
+}
+
+#[gpui::test]
+fn database_list_reconnects_when_set_to(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("lose");
+    run(&ws, cx, "P-enter");
+    let q = query_tab(&ws, cx);
+    assert!(q.read_with(cx, |q, _| q.lost.is_some()));
+
+    q.update(cx, |q, _| q.set_auto_reconnect(true));
+    open_database_list(&ws, cx);
+    assert!(q.read_with(cx, |q, _| q.lost.is_none()));
+}

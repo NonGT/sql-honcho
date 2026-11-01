@@ -94,6 +94,10 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
             ("P-c", CopyCells, RESULT_GRID),
             ("enter", OpenCell, RESULT_GRID),
             ("escape", CloseViewer, RESULT_GRID),
+            ("escape", CloseDatabases, Some("DatabaseList")),
+            ("up", PrevDatabase, Some("DatabaseList")),
+            ("down", NextDatabase, Some("DatabaseList")),
+            ("enter", PickDatabase, Some("DatabaseList")),
             ("enter", Submit, CONNECTION_FIELD),
             // after clicking a swatch or checkbox focus sits on the dialog
             ("enter", Submit, Some("ConnectionDialog")),
