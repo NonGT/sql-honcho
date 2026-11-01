@@ -11,7 +11,7 @@
 //! - `lose`: fail as if the connection dropped
 //!
 //! Connecting as user `bad` fails authentication; user `slow` never finishes
-//! connecting.
+//! connecting; user `flaky` can't connect while [`REFUSE_FLAKY`] is set.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::types::*;
 use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink, Value};
+
+/// Makes user `flaky` unable to connect, to test what happens when a
+/// reconnect fails.
+pub static REFUSE_FLAKY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Default)]
 pub struct FakeDriver {
@@ -50,6 +54,9 @@ impl Driver for FakeDriver {
                 )))
             }
             "slow" => std::future::pending::<()>().await,
+            "flaky" if REFUSE_FLAKY.load(Ordering::SeqCst) => {
+                return Err(DbError::Connect("connection refused".into()))
+            }
             _ => {}
         }
         Ok(Box::new(FakeConnection {

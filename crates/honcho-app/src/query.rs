@@ -322,6 +322,9 @@ impl QueryTab {
             };
             (result, base)
         };
+        let note = catalog
+            .as_ref()
+            .and_then(|c| c.read(cx).lost().map(str::to_string));
         if let Some(catalog) = &catalog {
             if !result.missing.is_empty() {
                 let missing = result.missing.clone();
@@ -342,11 +345,14 @@ impl QueryTab {
                 .and_then(|m| m.items.get(m.selected))
                 .and_then(|old| result.items.iter().position(|i| i == old))
                 .unwrap_or(0);
-            e.completion = (!result.items.is_empty()).then_some(CompletionMenu {
+            // keywords still work without a connection; the note says why
+            // the names are missing
+            e.completion = (!result.items.is_empty() || note.is_some()).then_some(CompletionMenu {
                 items: result.items,
                 selected,
                 replace,
                 navigated,
+                note,
             });
             cx.notify();
         });
@@ -1238,6 +1244,11 @@ impl QueryTab {
                         ),
                 ),
         )
+    }
+
+    #[cfg(test)]
+    pub fn catalog_for_test(&self) -> Option<Entity<Catalog>> {
+        self.catalog.as_ref().map(|(c, _)| c.clone())
     }
 
     #[cfg(test)]
