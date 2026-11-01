@@ -155,7 +155,7 @@ impl Workspace {
             window,
             |this, _, event: &DialogEvent, window, cx| {
                 if let DialogEvent::Connected(conn) = event {
-                    let conn = conn.clone();
+                    let conn = (**conn).clone();
                     this.active_query_tab()
                         .clone()
                         .update(cx, |q, cx| q.set_connection(conn, cx));

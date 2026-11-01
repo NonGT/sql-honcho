@@ -22,7 +22,7 @@ const DRIVERS: [DriverKind; 4] = [
 ];
 
 pub enum DialogEvent {
-    Connected(ActiveConnection),
+    Connected(Box<ActiveConnection>),
     Closed,
 }
 
@@ -576,7 +576,10 @@ impl ConnectionDialog {
                     Ok(_) => this.set_status("Connected.", false),
                 }
                 if let Some(session) = session {
-                    cx.emit(DialogEvent::Connected(ActiveConnection { saved, session }));
+                    cx.emit(DialogEvent::Connected(Box::new(ActiveConnection {
+                        saved,
+                        session,
+                    })));
                 }
                 cx.notify();
             })
@@ -802,7 +805,8 @@ impl Render for ConnectionDialog {
                 .gap_2()
                 .child(
                     div()
-                        .when(width.is_none(), |d| d.w(px(72.)).flex_none())
+                        .when(width.is_none(), |d| d.w(px(84.)).flex_none())
+                        .whitespace_nowrap()
                         .text_color(Theme::muted())
                         .child(label),
                 )
@@ -908,7 +912,7 @@ impl Render for ConnectionDialog {
 
         let label = |text: &'static str| {
             div()
-                .w(px(72.))
+                .w(px(84.))
                 .flex_none()
                 .text_color(Theme::muted())
                 .child(text)
@@ -1013,9 +1017,13 @@ impl Render for ConnectionDialog {
                 Section::Tls => d
                     .child(row().child(label("Mode")).child(modes))
                     .child(
-                        row()
-                            .child(label(""))
-                            .child(div().text_color(Theme::muted()).child(mode_hint(tls_mode))),
+                        row().child(label("")).child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(Theme::muted())
+                                .child(mode_hint(tls_mode)),
+                        ),
                     )
                     .child(path_row("CA file", &self.fields.ca, "browse-ca"))
                     .child(path_row("Client cert", &self.fields.cert, "browse-cert"))

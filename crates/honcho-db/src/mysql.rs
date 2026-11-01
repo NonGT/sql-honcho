@@ -418,7 +418,8 @@ fn connect_error(e: mysql_async::Error) -> DbError {
         }
         // rustls reports certificate problems as I/O errors
         mysql_async::Error::Io(e) if e.to_string().contains("certificate") => {
-            DbError::Tls(e.to_string())
+            let text = e.to_string();
+            DbError::Tls(text.trim_start_matches("Input/output error: ").to_string())
         }
         other => DbError::Connect(other.to_string()),
     }
