@@ -109,6 +109,17 @@ impl SavedConnection {
         }
     }
 
+    pub fn copy_password_to(
+        &self,
+        other: &SavedConnection,
+        secrets: &dyn Secrets,
+    ) -> Result<(), SecretError> {
+        match self.password(secrets)? {
+            Some(p) => other.set_password(secrets, Some(&p)),
+            None => Ok(()),
+        }
+    }
+
     pub fn connect_config(&self, secrets: &dyn Secrets) -> Result<ConnectConfig, SecretError> {
         Ok(ConnectConfig {
             host: self.host.clone(),
@@ -194,37 +205,24 @@ impl ConnectionStore {
         }
     }
 
-    /// Adds a copy, password included, right after the original.
-    pub fn duplicate(
-        &mut self,
-        id: &str,
-        secrets: &dyn Secrets,
-    ) -> Result<Option<&SavedConnection>, SecretError> {
-        let Some(ix) = self.connections.iter().position(|c| c.id == id) else {
-            return Ok(None);
-        };
+    /// Adds a copy right after the original. The password isn't copied:
+    /// keyring calls can block on a system prompt, so callers do that where
+    /// it can't freeze anything (see [`SavedConnection::copy_password_to`]).
+    pub fn duplicate(&mut self, id: &str) -> Option<&SavedConnection> {
+        let ix = self.connections.iter().position(|c| c.id == id)?;
         let original = &self.connections[ix];
         let mut copy = original.clone();
         copy.id = uuid::Uuid::new_v4().to_string();
         copy.name = format!("{} copy", original.name);
-        if let Some(password) = original.password(secrets)? {
-            copy.set_password(secrets, Some(&password))?;
-        }
         self.connections.insert(ix + 1, copy);
-        Ok(self.connections.get(ix + 1))
+        self.connections.get(ix + 1)
     }
 
-    /// Removes the connection and its password.
-    pub fn remove(
-        &mut self,
-        id: &str,
-        secrets: &dyn Secrets,
-    ) -> Result<Option<SavedConnection>, SecretError> {
-        let Some(ix) = self.connections.iter().position(|c| c.id == id) else {
-            return Ok(None);
-        };
-        self.connections[ix].set_password(secrets, None)?;
-        Ok(Some(self.connections.remove(ix)))
+    /// Removes the connection. Its password is left for the caller to
+    /// delete, for the same reason as in [`duplicate`](Self::duplicate).
+    pub fn remove(&mut self, id: &str) -> Option<SavedConnection> {
+        let ix = self.connections.iter().position(|c| c.id == id)?;
+        Some(self.connections.remove(ix))
     }
 
     /// Writes to a temp file and renames it over the old one, so a crash

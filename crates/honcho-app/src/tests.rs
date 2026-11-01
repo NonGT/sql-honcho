@@ -329,9 +329,8 @@ fn saving_a_connection_keeps_the_password_out_of_the_file(cx: &mut TestAppContex
         cx,
         ["shop prod", "db.example.com", "3307", "app", "pw!", "shop"],
     );
-    d.update(cx, |d, cx| {
-        d.save(cx);
-    });
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
     assert_eq!(status(&d, cx).as_deref(), Some("Saved."));
 
     let (saved, path) = cx.update(|_, cx| {
@@ -382,17 +381,15 @@ fn bad_input_is_reported_and_not_saved(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     press(cx, "P-shift-c");
     let d = dialog(&ws, cx).unwrap();
-    d.update(cx, |d, cx| {
-        d.save(cx);
-    });
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
     assert_eq!(
         status(&d, cx).as_deref(),
         Some("Give the connection a name.")
     );
     fill(cx, ["local", "", "99999", "", "", ""]);
-    d.update(cx, |d, cx| {
-        d.save(cx);
-    });
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
     assert!(status(&d, cx).unwrap().contains("Port 99999"));
     let count = cx.update(|_, cx| cx.global::<Connections>().store.connections().len());
     assert_eq!(count, 0);
@@ -432,11 +429,11 @@ fn duplicate_and_delete(cx: &mut TestAppContext) {
     press(cx, "P-shift-c");
     let d = dialog(&ws, cx).unwrap();
     fill(cx, ["a", "h", "", "u", "pw", ""]);
-    d.update(cx, |d, cx| {
-        d.save(cx);
-    });
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
     let id = d.read_with(cx, |d, _| d.selected_id().unwrap().to_string());
     d.update_in(cx, |d, window, cx| d.delete_now(&id, window, cx));
+    cx.run_until_parked();
     let left = cx.update(|_, cx| {
         let state = cx.global::<Connections>();
         (

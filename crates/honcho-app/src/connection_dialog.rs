@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    PromptLevel, SharedString, Window,
+    PromptLevel, SharedString, Task, Window,
 };
 use honcho_config::{ColorTag, SavedConnection};
 use honcho_db::{ConnectConfig, DriverKind, SessionOptions};
@@ -63,6 +63,15 @@ pub struct ConnectionDialog {
     fields: Fields,
     status: Option<Status>,
     busy: bool,
+    /// The saved password is still being read from the keyring.
+    password_load: Option<Task<()>>,
+}
+
+/// What a save does with the stored password.
+enum PasswordChange {
+    /// It hasn't loaded and the user typed nothing: leave it alone.
+    Keep,
+    Set(Option<String>),
 }
 
 impl EventEmitter<DialogEvent> for ConnectionDialog {}
@@ -91,6 +100,7 @@ impl ConnectionDialog {
             fields,
             status: None,
             busy: false,
+            password_load: None,
         };
         match cx
             .global::<Connections>()
@@ -119,6 +129,14 @@ impl ConnectionDialog {
         });
     }
 
+    fn set_field(field: &Entity<EditorView>, value: &str, cx: &mut Context<Self>) {
+        field.update(cx, |f, cx| {
+            f.set_text(value, cx);
+            // an unfocused field shouldn't show a selection
+            f.editor.set_cursor(f.editor.len_chars());
+        });
+    }
+
     fn load(
         &mut self,
         saved: SavedConnection,
@@ -126,40 +144,51 @@ impl ConnectionDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let password = if is_new {
-            Ok(None)
-        } else {
-            saved.password(cx.global::<Connections>().secrets.as_ref())
-        };
         self.status = None;
-        let password = match password {
-            Ok(p) => p.unwrap_or_default(),
-            Err(e) => {
-                self.set_status(e.to_string(), true);
-                String::new()
-            }
-        };
         let port = saved.port.map(|p| p.to_string()).unwrap_or_default();
         let values = [
             saved.name.as_str(),
             saved.host.as_str(),
             port.as_str(),
             saved.user.as_str(),
-            password.as_str(),
+            "",
             saved.database.as_deref().unwrap_or(""),
         ];
         for (field, value) in self.fields.in_order().into_iter().zip(values) {
-            field.update(cx, |f, cx| {
-                f.set_text(value, cx);
-                // an unfocused field shouldn't show a selection
-                f.editor.set_cursor(f.editor.len_chars());
-            });
+            Self::set_field(field, value, cx);
         }
+        self.password_load = (!is_new).then(|| self.load_password(saved.clone(), cx));
         self.draft = saved;
         self.is_new = is_new;
         self.driver_changed(cx);
         window.focus(&self.fields.name.focus_handle(cx));
         cx.notify();
+    }
+
+    // The keyring can sit on a system unlock prompt for as long as the user
+    // leaves it open, so it's never called on the UI thread.
+    fn load_password(&mut self, saved: SavedConnection, cx: &mut Context<Self>) -> Task<()> {
+        let secrets = cx.global::<Connections>().secrets.clone();
+        let id = saved.id.clone();
+        let read = cx.background_spawn(async move { saved.password(secrets.as_ref()) });
+        cx.spawn(async move |this, cx| {
+            let result = read.await;
+            this.update(cx, |this, cx| {
+                if this.draft.id != id {
+                    return;
+                }
+                this.password_load = None;
+                match result {
+                    Ok(Some(p)) if this.fields.password.read(cx).text().is_empty() => {
+                        Self::set_field(&this.fields.password, &p, cx)
+                    }
+                    Ok(_) => {}
+                    Err(e) => this.set_status(e.to_string(), true),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
     }
 
     fn driver_changed(&mut self, cx: &mut Context<Self>) {
@@ -216,58 +245,132 @@ impl ConnectionDialog {
         Some(self.fields.password.read(cx).text()).filter(|p| !p.is_empty())
     }
 
-    pub fn save(&mut self, cx: &mut Context<Self>) -> Option<SavedConnection> {
-        match self.try_save(cx) {
-            Ok(saved) => {
-                self.set_status("Saved.", false);
-                cx.notify();
-                Some(saved)
-            }
-            Err(e) => {
-                self.set_status(e, true);
-                cx.notify();
-                None
-            }
+    fn password_change(&self, cx: &App) -> PasswordChange {
+        match self.password(cx) {
+            None if self.password_load.is_some() => PasswordChange::Keep,
+            p => PasswordChange::Set(p),
         }
     }
 
-    fn try_save(&mut self, cx: &mut Context<Self>) -> Result<SavedConnection, String> {
-        let saved = self.form(cx)?;
-        let password = self.password(cx);
-        let state = cx.global_mut::<Connections>();
-        if let Some(e) = &state.load_error {
-            return Err(format!(
+    fn writable(&self, cx: &App) -> Result<(), String> {
+        let state = cx.global::<Connections>();
+        match &state.load_error {
+            Some(e) => Err(format!(
                 "Not saving over {}, which couldn't be read: {e}",
                 state.store.path().display()
-            ));
+            )),
+            None => Ok(()),
         }
-        saved
-            .set_password(state.secrets.as_ref(), password.as_deref())
-            .map_err(|e| e.to_string())?;
-        state.store.upsert(saved.clone());
-        state.store.save().map_err(|e| e.to_string())?;
-        self.draft = saved.clone();
-        self.is_new = false;
-        Ok(saved)
+    }
+
+    pub fn save(&mut self, cx: &mut Context<Self>) {
+        self.save_then(cx, |_, _, _| {});
+    }
+
+    fn save_then(
+        &mut self,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, SavedConnection, &mut Context<Self>) + 'static,
+    ) {
+        if self.busy {
+            return;
+        }
+        let saved = match self.form(cx).and_then(|s| self.writable(cx).map(|()| s)) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status(e, true);
+                cx.notify();
+                return;
+            }
+        };
+        let change = self.password_change(cx);
+        let secrets = cx.global::<Connections>().secrets.clone();
+        let owner = saved.clone();
+        let write = cx.background_spawn(async move {
+            match change {
+                PasswordChange::Keep => Ok(()),
+                PasswordChange::Set(p) => owner.set_password(secrets.as_ref(), p.as_deref()),
+            }
+        });
+        self.busy = true;
+        self.set_status("Saving…", false);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let written = write.await;
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                let result = written.map_err(|e| e.to_string()).and_then(|()| {
+                    let state = cx.global_mut::<Connections>();
+                    state.store.upsert(saved.clone());
+                    state.store.save().map_err(|e| e.to_string())
+                });
+                match result {
+                    Ok(()) => {
+                        if this.draft.id == saved.id {
+                            this.draft = saved.clone();
+                            this.is_new = false;
+                        }
+                        this.set_status("Saved.", false);
+                        then(this, saved, cx);
+                    }
+                    Err(e) => this.set_status(e, true),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs a keyring job in the background and reports a failure.
+    fn keyring_job(
+        &mut self,
+        what: &'static str,
+        job: impl FnOnce(&dyn honcho_config::Secrets) -> Result<(), honcho_config::SecretError>
+            + Send
+            + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let secrets = cx.global::<Connections>().secrets.clone();
+        let run = cx.background_spawn(async move { job(secrets.as_ref()) });
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = run.await {
+                this.update(cx, |this, cx| {
+                    this.set_status(format!("{what}: {e}"), true);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn duplicate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.selected_id().map(str::to_string) else {
             return;
         };
-        let state = cx.global_mut::<Connections>();
-        let copy = state
-            .store
-            .duplicate(&id, state.secrets.as_ref())
-            .map_err(|e| e.to_string())
-            .map(|c| c.cloned());
-        let saved = state.store.save().map_err(|e| e.to_string());
-        match (copy, saved) {
-            (Ok(Some(copy)), Ok(())) => self.load(copy, false, window, cx),
-            (Err(e), _) | (_, Err(e)) => self.set_status(e, true),
-            (Ok(None), _) => {}
+        if let Err(e) = self.writable(cx) {
+            self.set_status(e, true);
+            cx.notify();
+            return;
         }
-        cx.notify();
+        let state = cx.global_mut::<Connections>();
+        let original = state.store.get(&id).cloned();
+        let copy = state.store.duplicate(&id).cloned();
+        let saved = state.store.save();
+        let (Some(original), Some(copy)) = (original, copy) else {
+            return;
+        };
+        self.load(copy.clone(), false, window, cx);
+        if let Err(e) = saved {
+            self.set_status(e.to_string(), true);
+        }
+        self.keyring_job(
+            "The password wasn't copied",
+            move |secrets| original.copy_password_to(&copy, secrets),
+            cx,
+        );
     }
 
     fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -293,21 +396,29 @@ impl ConnectionDialog {
     }
 
     pub fn delete_now(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let state = cx.global_mut::<Connections>();
-        let result = state
-            .store
-            .remove(id, state.secrets.as_ref())
-            .map_err(|e| e.to_string())
-            .and_then(|_| state.store.save().map_err(|e| e.to_string()));
-        let next = state.store.connections().first().cloned();
-        match result {
-            Ok(()) => match next {
-                Some(next) => self.load(next, false, window, cx),
-                None => self.new_connection(window, cx),
-            },
-            Err(e) => self.set_status(e, true),
+        if let Err(e) = self.writable(cx) {
+            self.set_status(e, true);
+            cx.notify();
+            return;
         }
-        cx.notify();
+        let state = cx.global_mut::<Connections>();
+        let Some(removed) = state.store.remove(id) else {
+            return;
+        };
+        let saved = state.store.save();
+        let next = state.store.connections().first().cloned();
+        match next {
+            Some(next) => self.load(next, false, window, cx),
+            None => self.new_connection(window, cx),
+        }
+        if let Err(e) = saved {
+            self.set_status(e.to_string(), true);
+        }
+        self.keyring_job(
+            "The saved password couldn't be deleted",
+            move |secrets| removed.set_password(secrets, None),
+            cx,
+        );
     }
 
     fn connect_config(&self, saved: &SavedConnection, cx: &App) -> ConnectConfig {
@@ -323,27 +434,30 @@ impl ConnectionDialog {
         }
     }
 
-    /// Opens a session from the form. `keep` connects for real (after
-    /// saving); otherwise it's only a test and the session is closed.
+    /// Test (`keep` false) or connect for real, after saving.
     fn open(&mut self, keep: bool, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
-        let saved = if keep {
-            self.save(cx)
-        } else {
-            match self.form(cx) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    self.set_status(e, true);
-                    None
-                }
-            }
-        };
-        let Some(saved) = saved else {
+        if matches!(self.password_change(cx), PasswordChange::Keep) {
+            self.set_status("Waiting for the system keyring…", false);
             cx.notify();
             return;
-        };
+        }
+        if keep {
+            self.save_then(cx, |this, saved, cx| this.connect(saved, true, cx));
+        } else {
+            match self.form(cx) {
+                Ok(saved) => self.connect(saved, false, cx),
+                Err(e) => {
+                    self.set_status(e, true);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn connect(&mut self, saved: SavedConnection, keep: bool, cx: &mut Context<Self>) {
         let Some(driver) = connections::driver(saved.driver) else {
             self.set_status(
                 format!(
