@@ -10,6 +10,11 @@ use crate::{Result, ResultSink};
 pub trait Driver: Send + Sync {
     fn kind(&self) -> DriverKind;
 
+    /// Port to use when the config has none, for tunnels to aim at.
+    fn default_port(&self) -> Option<u16> {
+        None
+    }
+
     async fn connect(&self, config: &ConnectConfig) -> Result<Box<dyn Connection>>;
 }
 

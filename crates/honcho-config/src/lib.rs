@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use honcho_db::tunnel::{SshAuth, SshConfig};
 use honcho_db::{ConnectConfig, DriverKind, TlsConfig};
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +53,19 @@ impl ColorTag {
     ];
 }
 
+/// An SSH server to reach the database through. Its password or key
+/// passphrase lives with the other secrets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedSsh {
+    /// A host name or an alias from ~/.ssh/config.
+    pub host: String,
+    pub port: Option<u16>,
+    pub user: String,
+    pub auth: SshAuth,
+    pub key_file: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub id: String,
@@ -75,6 +89,8 @@ pub struct SavedConnection {
     #[serde(default)]
     pub tls: TlsConfig,
     #[serde(default)]
+    pub ssh: Option<SavedSsh>,
+    #[serde(default)]
     pub options: BTreeMap<String, String>,
 }
 
@@ -92,6 +108,7 @@ impl SavedConnection {
             read_only: false,
             auto_reconnect: false,
             tls: TlsConfig::default(),
+            ssh: None,
             options: BTreeMap::new(),
         }
     }
@@ -116,15 +133,44 @@ impl SavedConnection {
         }
     }
 
-    pub fn copy_password_to(
+    pub fn ssh_secret_key(&self) -> String {
+        format!("{}/ssh-secret", self.id)
+    }
+
+    /// The SSH password or key passphrase.
+    pub fn ssh_secret(&self, secrets: &dyn Secrets) -> Result<Option<String>, SecretError> {
+        secrets.get(&self.ssh_secret_key())
+    }
+
+    pub fn set_ssh_secret(
+        &self,
+        secrets: &dyn Secrets,
+        secret: Option<&str>,
+    ) -> Result<(), SecretError> {
+        match secret {
+            Some(p) => secrets.set(&self.ssh_secret_key(), p),
+            None => secrets.delete(&self.ssh_secret_key()),
+        }
+    }
+
+    /// Copies the password and the SSH secret.
+    pub fn copy_secrets_to(
         &self,
         other: &SavedConnection,
         secrets: &dyn Secrets,
     ) -> Result<(), SecretError> {
-        match self.password(secrets)? {
-            Some(p) => other.set_password(secrets, Some(&p)),
-            None => Ok(()),
+        if let Some(p) = self.password(secrets)? {
+            other.set_password(secrets, Some(&p))?;
         }
+        if let Some(p) = self.ssh_secret(secrets)? {
+            other.set_ssh_secret(secrets, Some(&p))?;
+        }
+        Ok(())
+    }
+
+    pub fn forget_secrets(&self, secrets: &dyn Secrets) -> Result<(), SecretError> {
+        self.set_password(secrets, None)?;
+        self.set_ssh_secret(secrets, None)
     }
 
     pub fn connect_config(&self, secrets: &dyn Secrets) -> Result<ConnectConfig, SecretError> {
@@ -136,6 +182,18 @@ impl SavedConnection {
             database: self.database.clone(),
             read_only: self.read_only,
             tls: self.tls.clone(),
+            ssh: match &self.ssh {
+                Some(ssh) => Some(SshConfig {
+                    host: ssh.host.clone(),
+                    port: ssh.port,
+                    user: Some(ssh.user.clone()).filter(|u| !u.is_empty()),
+                    auth: ssh.auth,
+                    key_file: ssh.key_file.clone(),
+                    secret: self.ssh_secret(secrets)?,
+                    ..Default::default()
+                }),
+                None => None,
+            },
             options: self.options.clone(),
             ..Default::default()
         })

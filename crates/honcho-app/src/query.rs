@@ -710,6 +710,11 @@ impl QueryTab {
             Some(c) => chip("tab-connection")
                 .child(color_dot(c.saved.color))
                 .child(c.saved.name.clone())
+                .children(c.saved.ssh.as_ref().map(|ssh| {
+                    div()
+                        .text_color(Theme::muted())
+                        .child(format!("via {}", ssh.host))
+                }))
                 .when(c.saved.read_only, |d| {
                     d.child(div().text_color(Theme::muted()).child("read-only"))
                 }),
@@ -751,17 +756,23 @@ impl QueryTab {
         } else if let Some(reason) = &self.lost {
             div()
                 .flex()
+                .flex_1()
+                .min_w_0()
+                .justify_end()
                 .items_center()
                 .gap_2()
                 .child(
                     div()
+                        .min_w_0()
                         .text_color(Theme::error())
                         .overflow_hidden()
+                        .text_ellipsis()
                         .whitespace_nowrap()
                         .child(format!("Connection lost: {reason}")),
                 )
                 .child(
                     chip("tab-reconnect")
+                        .flex_none()
                         .border_1()
                         .border_color(Theme::border())
                         .child(if self.reconnecting {

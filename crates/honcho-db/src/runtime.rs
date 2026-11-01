@@ -7,6 +7,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::tunnel::Tunnel;
 use crate::types::{
     Capabilities, ColumnInfo, ConnectConfig, ObjectKind, ObjectRef, QueryEvent, QueryStats, Scope,
 };
@@ -53,8 +54,11 @@ impl DbRuntime {
         let handle = self.handle().clone();
         self.handle().spawn(async move {
             let timeout = config.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
-            let result = match tokio::time::timeout(timeout, driver.connect(&config)).await {
-                Ok(Ok(conn)) => Ok(Session::spawn(&handle, conn, config.read_only, options)),
+            let read_only = config.read_only;
+            let result = match tokio::time::timeout(timeout, open(&*driver, config)).await {
+                Ok(Ok((conn, tunnel))) => {
+                    Ok(Session::spawn(&handle, conn, tunnel, read_only, options))
+                }
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(DbError::Connect(format!(
                     "timed out after {}s",
@@ -73,6 +77,35 @@ impl Drop for DbRuntime {
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
+    }
+}
+
+/// Opens the tunnel if there is one, then the driver's connection
+/// through it.
+async fn open(
+    driver: &dyn Driver,
+    mut config: ConnectConfig,
+) -> Result<(Box<dyn Connection>, Option<Tunnel>)> {
+    let Some(ssh) = config.ssh.take() else {
+        return Ok((driver.connect(&config).await?, None));
+    };
+    // the SSH server resolves the database host, so localhost means it
+    let target = match config.host.as_str() {
+        "" => "localhost".to_string(),
+        h => h.to_string(),
+    };
+    let port = config
+        .port
+        .or(driver.default_port())
+        .ok_or_else(|| DbError::Connect("no port to tunnel to".into()))?;
+    let tunnel = crate::tunnel::open(&ssh, &target, port).await?;
+    // certificates name the real host, not the local end of the tunnel
+    config.tls.server_name.get_or_insert(target);
+    config.host = "127.0.0.1".into();
+    config.port = Some(tunnel.local_port);
+    match driver.connect(&config).await {
+        Ok(conn) => Ok((conn, Some(tunnel))),
+        Err(e) => Err(tunnel.take_failure().map_or(e, DbError::Tunnel)),
     }
 }
 
@@ -120,12 +153,18 @@ impl Session {
     fn spawn(
         handle: &Handle,
         conn: Box<dyn Connection>,
+        tunnel: Option<Tunnel>,
         read_only: bool,
         options: SessionOptions,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let capabilities = conn.capabilities();
-        handle.spawn(run_session(conn, rx, read_only, options));
+        let via = tunnel.as_ref().map(|t| t.ssh_host.clone());
+        handle.spawn(async move {
+            run_session(conn, rx, read_only, via, options).await;
+            // the tunnel outlives every query, cancels included
+            drop(tunnel);
+        });
         Self { tx, capabilities }
     }
 
@@ -235,6 +274,7 @@ async fn run_session(
     mut conn: Box<dyn Connection>,
     mut rx: mpsc::UnboundedReceiver<Command>,
     read_only: bool,
+    via: Option<String>,
     options: SessionOptions,
 ) {
     let mut broken: Option<String> = None;
@@ -288,6 +328,13 @@ async fn run_session(
                         elapsed: started.elapsed(),
                     }),
                     Outcome::Done(Err(e)) => {
+                        // with a tunnel either hop may have gone; say there is one
+                        let e = match (e, &via) {
+                            (DbError::ConnectionLost(r), Some(host)) => {
+                                DbError::ConnectionLost(format!("{r} (through SSH {host})"))
+                            }
+                            (e, _) => e,
+                        };
                         if e.is_fatal() {
                             broken = Some(e.to_string());
                         }

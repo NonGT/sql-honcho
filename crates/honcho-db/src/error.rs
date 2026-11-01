@@ -8,6 +8,9 @@ pub enum DbError {
     Tls(String),
     #[error("SSH tunnel error: {0}")]
     Tunnel(String),
+    /// Needs the user's say before connecting; see `tunnel::trust_host_key`.
+    #[error("{0}")]
+    HostKey(Box<crate::tunnel::HostKeyProblem>),
     #[error("{message}")]
     Query {
         message: String,

@@ -789,3 +789,48 @@ fn tls_settings_are_saved(cx: &mut TestAppContext) {
         Some(std::path::Path::new("/home/me/client-key.pem"))
     );
 }
+
+#[gpui::test]
+fn ssh_settings_are_saved_with_the_secret_in_the_keyring(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    fill(
+        cx,
+        ["behind bastion", "db.internal", "", "app", "db pw", ""],
+    );
+    d.update_in(cx, |d, window, cx| {
+        d.show_ssh(honcho_db::tunnel::SshAuth::Password, window, cx)
+    });
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        status(&d, cx).as_deref(),
+        Some("Give the SSH host, or turn SSH off.")
+    );
+
+    // host, port, user, password: the key file field is hidden for passwords
+    cx.simulate_input("bastion");
+    press(cx, "tab");
+    cx.simulate_input("2222");
+    press(cx, "tab");
+    cx.simulate_input("ops");
+    press(cx, "tab");
+    cx.simulate_input("ssh pw");
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    assert_eq!(status(&d, cx).as_deref(), Some("Saved."));
+
+    let (saved, ssh_secret) = cx.update(|_, cx| {
+        let state = cx.global::<Connections>();
+        let c = state.store.connections()[0].clone();
+        let secret = c.ssh_secret(state.secrets.as_ref()).unwrap();
+        (c, secret)
+    });
+    let ssh = saved.ssh.unwrap();
+    assert_eq!(
+        (ssh.host.as_str(), ssh.port, ssh.user.as_str()),
+        ("bastion", Some(2222), "ops")
+    );
+    assert_eq!(ssh_secret.as_deref(), Some("ssh pw"));
+}

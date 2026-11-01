@@ -14,6 +14,7 @@ pub mod mysql;
 mod runtime;
 pub mod script;
 mod sink;
+pub mod tunnel;
 mod types;
 mod value;
 
