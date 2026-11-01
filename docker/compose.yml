@@ -7,7 +7,9 @@ x-password: &password Honcho_test1
 services:
   mysql:
     image: mysql:8.4
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    command: >-
+      --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+      --ssl-ca=/tls/ca.pem --ssl-cert=/tls/server-cert.pem --ssl-key=/tls/server-key.pem
     environment:
       MYSQL_ROOT_PASSWORD: *password
       MYSQL_DATABASE: app
@@ -17,6 +19,7 @@ services:
     volumes:
       - ./seed/mysql.sql:/docker-entrypoint-initdb.d/1-seed.sql:ro
       - ./seed/mysql-grants.sql:/docker-entrypoint-initdb.d/2-grants.sql:ro
+      - ./tls:/tls:ro
     healthcheck:
       # TCP so the temporary init server (sockets only) doesn't count
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uhoncho", "-pHoncho_test1"]
@@ -25,14 +28,18 @@ services:
 
   mariadb:
     image: mariadb:11.4
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    command: >-
+      --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+      --ssl-ca=/tls/ca.pem --ssl-cert=/tls/server-cert.pem --ssl-key=/tls/server-key.pem
     environment:
       MARIADB_ROOT_PASSWORD: *password
       MARIADB_DATABASE: app
       MARIADB_USER: honcho
       MARIADB_PASSWORD: *password
     ports: ["33307:3306"]
-    volumes: ["./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    volumes:
+      - ./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+      - ./tls:/tls:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 2s

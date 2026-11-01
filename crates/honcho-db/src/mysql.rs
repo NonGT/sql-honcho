@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mysql_async::prelude::*;
-use mysql_async::{Conn, DriverError, Opts, OptsBuilder, Row};
+use mysql_async::{ClientIdentity, Conn, DriverError, Opts, OptsBuilder, Row, SslOpts};
 
 use crate::types::*;
 use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink};
@@ -37,7 +37,7 @@ impl Driver for MySqlDriver {
             "" => "localhost",
             h => h,
         };
-        let opts: Opts = OptsBuilder::default()
+        let builder = OptsBuilder::default()
             .ip_or_hostname(host)
             .tcp_port(config.port.unwrap_or(DEFAULT_PORT))
             .user(Some(&config.user))
@@ -45,9 +45,21 @@ impl Driver for MySqlDriver {
             .db_name(config.database.clone())
             // by default it switches to the server's unix socket when the
             // host is local, which isn't there when the server is in Docker
-            .prefer_socket(false)
-            .into();
-        let mut conn = Conn::new(opts.clone()).await.map_err(connect_error)?;
+            .prefer_socket(false);
+        let tls = ssl_opts(&config.tls)?;
+        let opts: Opts = builder.clone().ssl_opts(tls.clone()).into();
+        let (mut conn, opts) = match Conn::new(opts.clone()).await {
+            Ok(conn) => (conn, opts),
+            // prefer settles for plain TCP when the server has no TLS
+            Err(mysql_async::Error::Driver(DriverError::NoClientSslFlagFromServer))
+                if config.tls.mode == TlsMode::Prefer =>
+            {
+                let opts: Opts = builder.ssl_opts(None::<SslOpts>).into();
+                let conn = Conn::new(opts.clone()).await.map_err(connect_error)?;
+                (conn, opts)
+            }
+            Err(e) => return Err(connect_error(e)),
+        };
         if config.read_only {
             conn.query_drop("SET SESSION TRANSACTION READ ONLY")
                 .await
@@ -357,10 +369,57 @@ fn quote(ident: &str) -> String {
     format!("`{}`", ident.replace('`', "``"))
 }
 
+fn ssl_opts(tls: &TlsConfig) -> Result<Option<SslOpts>> {
+    if tls.mode == TlsMode::Disable {
+        return Ok(None);
+    }
+    for path in [&tls.ca_file, &tls.cert_file, &tls.key_file]
+        .into_iter()
+        .flatten()
+    {
+        if !path.is_file() {
+            return Err(DbError::Tls(format!("{} not found", path.display())));
+        }
+    }
+    let verify = matches!(tls.mode, TlsMode::VerifyCa | TlsMode::VerifyFull);
+    let mut opts = SslOpts::default()
+        .with_danger_accept_invalid_certs(!verify)
+        .with_danger_skip_domain_validation(tls.mode != TlsMode::VerifyFull);
+    if let Some(ca) = &tls.ca_file {
+        opts = opts.with_root_certs(vec![ca.clone().into()]);
+    }
+    match (&tls.cert_file, &tls.key_file) {
+        (Some(cert), Some(key)) => {
+            opts = opts.with_client_identity(Some(ClientIdentity::new(
+                cert.clone().into(),
+                key.clone().into(),
+            )));
+        }
+        (None, None) => {}
+        _ => {
+            return Err(DbError::Tls(
+                "a client certificate needs both the certificate and its key".into(),
+            ))
+        }
+    }
+    if let Some(name) = &tls.server_name {
+        opts = opts.with_danger_tls_hostname_override(Some(name.clone()));
+    }
+    Ok(Some(opts))
+}
+
 fn connect_error(e: mysql_async::Error) -> DbError {
     match e {
         mysql_async::Error::Server(s) if AUTH_ERRORS.contains(&s.code) => DbError::Auth(s.message),
         mysql_async::Error::Server(s) => DbError::Connect(s.message),
+        mysql_async::Error::Io(mysql_async::IoError::Tls(e)) => DbError::Tls(e.to_string()),
+        mysql_async::Error::Driver(DriverError::NoClientSslFlagFromServer) => {
+            DbError::Tls("the server doesn't offer TLS".into())
+        }
+        // rustls reports certificate problems as I/O errors
+        mysql_async::Error::Io(e) if e.to_string().contains("certificate") => {
+            DbError::Tls(e.to_string())
+        }
         other => DbError::Connect(other.to_string()),
     }
 }

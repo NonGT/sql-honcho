@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::{DbError, Value};
@@ -16,8 +17,50 @@ pub enum DriverKind {
     Fake,
 }
 
-/// What a driver needs to open a connection. TLS and SSH settings are
-/// added with #3.
+/// How much TLS to insist on, from none to a checked chain and host name.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum TlsMode {
+    Disable,
+    /// TLS when the server offers it, without checking its certificate.
+    #[default]
+    Prefer,
+    /// TLS or fail, without checking the certificate.
+    Require,
+    /// The certificate must chain to a trusted CA.
+    VerifyCa,
+    /// As `VerifyCa`, and it must name the host.
+    VerifyFull,
+}
+
+impl TlsMode {
+    pub const ALL: [TlsMode; 5] = [
+        TlsMode::Disable,
+        TlsMode::Prefer,
+        TlsMode::Require,
+        TlsMode::VerifyCa,
+        TlsMode::VerifyFull,
+    ];
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TlsConfig {
+    pub mode: TlsMode,
+    /// Trusted CA, on top of the built-in roots.
+    pub ca_file: Option<PathBuf>,
+    /// Client certificate and key, for servers that ask for one.
+    pub cert_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
+    /// Name to check the certificate against instead of the host, for when
+    /// the host is a tunnel's local end.
+    #[serde(skip)]
+    pub server_name: Option<String>,
+}
+
+/// What a driver needs to open a connection.
 #[derive(Clone, Default, PartialEq)]
 pub struct ConnectConfig {
     pub host: String,
@@ -29,6 +72,7 @@ pub struct ConnectConfig {
     /// Refuse anything but reads, in the session and on the server where
     /// the driver can.
     pub read_only: bool,
+    pub tls: TlsConfig,
     /// Driver-specific options, passed through as-is.
     pub options: BTreeMap<String, String>,
 }
@@ -43,6 +87,7 @@ impl fmt::Debug for ConnectConfig {
             .field("database", &self.database)
             .field("connect_timeout", &self.connect_timeout)
             .field("read_only", &self.read_only)
+            .field("tls", &self.tls)
             .field("options", &self.options)
             .finish()
     }

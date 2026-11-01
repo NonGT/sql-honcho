@@ -5,6 +5,10 @@ SET NAMES utf8mb4;
 CREATE DATABASE IF NOT EXISTS analytics;
 GRANT ALL PRIVILEGES ON analytics.* TO 'honcho'@'%';
 
+-- for the TLS tests: can only log in with a client cert from docker/tls
+CREATE USER 'honcho_x509'@'%' IDENTIFIED BY 'Honcho_test1' REQUIRE X509;
+GRANT SELECT ON app.* TO 'honcho_x509'@'%';
+
 USE app;
 
 CREATE TABLE users (
