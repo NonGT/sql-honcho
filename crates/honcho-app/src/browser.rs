@@ -436,19 +436,30 @@ impl ObjectBrowser {
         if !self.reconnected.insert(id.to_string()) {
             return false;
         }
-        self.open_connection(saved, cx);
+        // what's loaded is still right; only the session is new
+        self.open_session(saved, true, cx);
         true
     }
 
+    /// Opens (or reopens) a connection and loads its databases and every
+    /// open node under it.
     fn open_connection(&mut self, saved: SavedConnection, cx: &mut Context<Self>) {
+        self.open_session(saved, false, cx);
+    }
+
+    /// With `keep`, the tree stays as it is and only the nodes that were
+    /// loading when the session dropped load again; otherwise everything
+    /// under the connection is fetched afresh.
+    fn open_session(&mut self, saved: SavedConnection, keep: bool, cx: &mut Context<Self>) {
         let id = saved.id.clone();
         if let Some(Conn::Open(old)) = self.conns.remove(&id) {
             cx.background_spawn(async move { old.close().await })
                 .detach();
         }
         self.conns.insert(id.clone(), Conn::Opening);
-        // forget what was loaded through the old session
-        self.children.retain(|p, _| p[0] != format!("c:{id}"));
+        if !keep {
+            self.children.retain(|p, _| p[0] != format!("c:{id}"));
+        }
         let opening = connections::open_session(saved.clone(), None, cx);
         cx.spawn(async move |this, cx| {
             let result = opening.await;
@@ -456,10 +467,17 @@ impl ObjectBrowser {
                 match result {
                     Ok(session) => {
                         this.conns.insert(id.clone(), Conn::Open(session));
-                        // the databases, then whatever was open under them
-                        let root = vec![format!("c:{id}")];
-                        if let Some(item) = this.item_at(&root, cx) {
-                            this.load(root, item, false, cx);
+                        if keep {
+                            for (path, item) in this.cut_off(&id, cx) {
+                                this.children.remove(&path);
+                                this.load(path, item, false, cx);
+                            }
+                        } else {
+                            // the databases, then whatever was open under them
+                            let root = vec![format!("c:{id}")];
+                            if let Some(item) = this.item_at(&root, cx) {
+                                this.load(root, item, false, cx);
+                            }
                         }
                         if let Some(search) = &this.search {
                             let term = search.term.clone();
@@ -481,6 +499,11 @@ impl ObjectBrowser {
                         } else {
                             e.to_string()
                         };
+                        // the tree stays; the nodes that were waiting say why
+                        for (path, _) in this.cut_off(&id, cx) {
+                            this.children
+                                .insert(path, Children::Failed(message.clone()));
+                        }
                         this.conns.insert(id, Conn::Failed(message));
                     }
                 }
@@ -489,6 +512,16 @@ impl ObjectBrowser {
             .ok();
         })
         .detach();
+    }
+
+    /// Nodes of a connection left loading when its session dropped.
+    fn cut_off(&self, id: &str, cx: &App) -> Vec<(Path, Item)> {
+        let root = format!("c:{id}");
+        self.children
+            .iter()
+            .filter(|(p, c)| p[0] == root && matches!(c, Children::Loading))
+            .filter_map(|(p, _)| Some((p.clone(), self.item_at(p, cx)?)))
+            .collect()
     }
 
     /// The item at a path, if the tree has loaded down to it.
