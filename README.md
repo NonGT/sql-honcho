@@ -55,9 +55,16 @@ Bindings follow VS Code's defaults on each platform; the full tables are in
     Cmd+/ / Ctrl+/               toggle -- comment
     Cmd+F / Ctrl+F               find; Cmd+Alt+F / Ctrl+H replace
     Cmd+Shift+C / Ctrl+Shift+C   connections
+    Cmd+B / Ctrl+B               show or hide the object browser
     Cmd+Enter / Ctrl+Enter       run the selection, or the statement at the cursor
     Cmd+Shift+Enter              run the whole tab (Ctrl+Shift+Enter)
     Cmd+. / Ctrl+.               cancel the running query
+
+The object browser on the left lists every saved connection down to
+columns and indexes, loading each level as it opens. Its filter searches the
+server, so it finds tables that were never expanded. Right-click for select
+top 1000, the definition, or SELECT/INSERT/UPDATE templates; double-click a
+table to see its rows.
 
 In the results grid: drag to select, click a header or row number for the
 whole column or row, Cmd/Ctrl+C copies as TSV for spreadsheets, Enter or a
