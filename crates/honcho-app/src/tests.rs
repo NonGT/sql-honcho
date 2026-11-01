@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{App, ClipboardItem, Entity, Focusable, TestAppContext, VisualTestContext};
+use gpui::{App, AppContext, ClipboardItem, Entity, Focusable, TestAppContext, VisualTestContext};
 use honcho_config::{ColorTag, ConnectionStore, MemorySecrets};
 use honcho_db::{DbRuntime, DriverKind};
 
@@ -934,4 +934,30 @@ fn filter_searches_nodes_that_were_never_opened(cx: &mut TestAppContext) {
 
     b.update(cx, |b, cx| b.set_filter("", cx));
     assert_eq!(browser_labels(&ws, cx), ["fake db", "  app", "  analytics"]);
+}
+
+#[gpui::test]
+fn expanded_nodes_come_back_next_time(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    browse(&ws, cx, "Views (1)");
+    let before = browser_labels(&ws, cx);
+    cx.run_until_parked();
+
+    // a fresh browser, as after a restart: opening the connection brings
+    // the rest back
+    let fresh = cx.update(|_, cx| {
+        cx.new(|cx| {
+            let mut b = crate::browser::ObjectBrowser::new(cx);
+            b.restore_expanded(cx);
+            b
+        })
+    });
+    assert_eq!(fresh.read_with(cx, |b, _| b.labels()), ["fake db"]);
+    fresh.update(cx, |b, cx| b.click("fake db", false, cx));
+    wait_until(cx, |cx| {
+        fresh.read_with(cx, |b, _| b.is_idle() && b.labels() == before)
+    });
 }

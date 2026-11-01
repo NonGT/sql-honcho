@@ -351,7 +351,7 @@ impl ObjectBrowser {
             this.update(cx, |this, cx| {
                 match loaded {
                     Ok(Fetched::Items(items)) => {
-                        this.children.insert(path, Children::Loaded(items));
+                        this.children.insert(path.clone(), Children::Loaded(items));
                     }
                     Ok(Fetched::Database(groups)) => {
                         // one query fills the database and every group under it
@@ -366,14 +366,41 @@ impl ObjectBrowser {
                         this.children.insert(db, Children::Loaded(items));
                     }
                     Err(e) => {
-                        this.children.insert(path, Children::Failed(e.to_string()));
+                        this.children
+                            .insert(path.clone(), Children::Failed(e.to_string()));
                     }
                 }
+                this.load_open_children(&path, cx);
                 this.rebuild(cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Children that were left expanded load as soon as their parent has,
+    /// which brings a remembered subtree back one level at a time.
+    fn load_open_children(&mut self, parent: &Path, cx: &mut Context<Self>) {
+        let Some(Children::Loaded(items)) = self.children.get(parent) else {
+            return;
+        };
+        let open: Vec<(Path, Item)> = items
+            .iter()
+            .map(|item| {
+                let mut p = parent.clone();
+                p.push(item.segment());
+                (p, item.clone())
+            })
+            .filter(|(p, _)| self.expanded.contains(p))
+            .collect();
+        for (path, item) in open {
+            if self.children.contains_key(&path) {
+                // a database fills its groups itself; go one further
+                self.load_open_children(&path, cx);
+            } else {
+                self.load(path, item, false, cx);
+            }
+        }
     }
 
     fn open_connection(&mut self, saved: SavedConnection, cx: &mut Context<Self>) {
@@ -392,17 +419,10 @@ impl ObjectBrowser {
                 match result {
                     Ok(session) => {
                         this.conns.insert(id.clone(), Conn::Open(session));
-                        // reload whatever was open under this connection
-                        let open: Vec<Path> = this
-                            .expanded
-                            .iter()
-                            .filter(|p| p[0] == format!("c:{id}"))
-                            .cloned()
-                            .collect();
-                        for path in open {
-                            if let Some(item) = this.item_at(&path, cx) {
-                                this.load(path, item, false, cx);
-                            }
+                        // the databases, then whatever was open under them
+                        let root = vec![format!("c:{id}")];
+                        if let Some(item) = this.item_at(&root, cx) {
+                            this.load(root, item, false, cx);
                         }
                         if let Some(search) = &this.search {
                             let term = search.term.clone();
