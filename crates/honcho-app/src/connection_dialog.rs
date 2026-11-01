@@ -832,7 +832,7 @@ impl Render for ConnectionDialog {
             .key_context("ConnectionDialog")
             .track_focus(&self.focus)
             .occlude()
-            .w(px(720.))
+            .w(px(780.))
             .h(px(440.))
             .flex()
             .bg(Theme::panel())
