@@ -1,12 +1,7 @@
 //! Splits a script into statements the way the `mysql` client does,
 //! including `DELIMITER` lines, which the server doesn't understand.
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Statement<'a> {
-    pub text: &'a str,
-    /// 1-based line the statement starts on.
-    pub line: u32,
-}
+use crate::script::Statement;
 
 pub fn split(sql: &str) -> Vec<Statement<'_>> {
     let b = sql.as_bytes();

@@ -54,7 +54,7 @@ impl DbRuntime {
         self.handle().spawn(async move {
             let timeout = config.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
             let result = match tokio::time::timeout(timeout, driver.connect(&config)).await {
-                Ok(Ok(conn)) => Ok(Session::spawn(&handle, conn, options)),
+                Ok(Ok(conn)) => Ok(Session::spawn(&handle, conn, config.read_only, options)),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(DbError::Connect(format!(
                     "timed out after {}s",
@@ -117,10 +117,15 @@ pub struct Session {
 }
 
 impl Session {
-    fn spawn(handle: &Handle, conn: Box<dyn Connection>, options: SessionOptions) -> Self {
+    fn spawn(
+        handle: &Handle,
+        conn: Box<dyn Connection>,
+        read_only: bool,
+        options: SessionOptions,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let capabilities = conn.capabilities();
-        handle.spawn(run_session(conn, rx, options));
+        handle.spawn(run_session(conn, rx, read_only, options));
         Self { tx, capabilities }
     }
 
@@ -229,6 +234,7 @@ enum Outcome {
 async fn run_session(
     mut conn: Box<dyn Connection>,
     mut rx: mpsc::UnboundedReceiver<Command>,
+    read_only: bool,
     options: SessionOptions,
 ) {
     let mut broken: Option<String> = None;
@@ -249,6 +255,12 @@ async fn run_session(
                 if cancel.is_cancelled() {
                     sink.finish(Err(DbError::Cancelled)).await;
                     continue;
+                }
+                if read_only {
+                    if let Some(e) = refuse_writes(conn.as_ref(), &sql) {
+                        sink.finish(Err(e)).await;
+                        continue;
+                    }
                 }
 
                 let canceller = conn.canceller();
@@ -305,6 +317,15 @@ async fn run_session(
         }
     }
     let _ = conn.close().await;
+}
+
+// The whole script is refused before anything runs, so a write at the end
+// doesn't leave the reads before it half done.
+fn refuse_writes(conn: &dyn Connection, sql: &str) -> Option<DbError> {
+    conn.statements(sql).into_iter().find_map(|s| {
+        crate::script::write_reason(s.text)
+            .map(|why| DbError::ReadOnly(format!("line {}: {why}", s.line)))
+    })
 }
 
 // Stop taking work first, then answer whatever was already queued, so a

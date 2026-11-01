@@ -72,4 +72,6 @@ Desktop's emulation and takes a while to start.
 `crates/honcho-core` holds the text buffer, selections and SQL lexer with no UI
 dependency. `crates/honcho-db` is the database layer: the driver interface, a
 background runtime for sessions, the conformance suite every driver must
-pass, and the drivers themselves (MySQL/MariaDB so far). `crates/honcho-app` is the gpui app. `docker/` has the test databases.
+pass, and the drivers themselves (MySQL/MariaDB so far). `crates/honcho-config`
+keeps saved connections in the platform config dir and their passwords in the
+OS keyring (on Linux that means a Secret Service such as GNOME Keyring). `crates/honcho-app` is the gpui app. `docker/` has the test databases.

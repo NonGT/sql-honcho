@@ -456,3 +456,31 @@ fn pollster_block_on<F: Future>(fut: F) -> F::Output {
         *woken = false;
     }
 }
+
+#[tokio::test]
+async fn read_only_sessions_refuse_scripts_with_writes() {
+    let rt = DbRuntime::new().unwrap();
+    let config = ConnectConfig {
+        read_only: true,
+        ..config("dev")
+    };
+    let s = rt
+        .connect(
+            Arc::new(FakeDriver::default()),
+            config,
+            SessionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    let events = collect(s.execute("select 2; update 3")).await;
+    assert_eq!(events.len(), 1, "nothing ran: {events:?}");
+    assert_eq!(
+        finished(&events),
+        &Err(DbError::ReadOnly("line 1: UPDATE isn't a read".into()))
+    );
+
+    let events = collect(s.execute("select 2")).await;
+    assert!(finished(&events).is_ok());
+    assert_eq!(rows_of(&events), [0, 1]);
+}

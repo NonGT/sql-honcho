@@ -12,6 +12,7 @@ mod error;
 pub mod fake;
 pub mod mysql;
 mod runtime;
+pub mod script;
 mod sink;
 mod types;
 mod value;
