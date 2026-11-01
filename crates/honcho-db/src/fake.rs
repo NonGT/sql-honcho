@@ -246,6 +246,38 @@ impl Connection for FakeConnection {
         }
     }
 
+    async fn indexes(&mut self, table: &ObjectRef) -> Result<Vec<IndexInfo>> {
+        let primary = IndexInfo {
+            name: "PRIMARY".into(),
+            columns: vec!["id".into()],
+            unique: true,
+            primary: true,
+        };
+        match table.name.as_str() {
+            "users" => Ok(vec![primary]),
+            "orders" => Ok(vec![
+                primary,
+                IndexInfo {
+                    name: "user_id".into(),
+                    columns: vec!["user_id".into()],
+                    unique: false,
+                    primary: false,
+                },
+            ]),
+            other => Err(DbError::query(format!("no such table: {other}"))),
+        }
+    }
+
+    async fn search(&mut self, term: &str, limit: usize) -> Result<Vec<ObjectRef>> {
+        let term = term.to_lowercase();
+        Ok(DATABASES
+            .iter()
+            .flat_map(|db| objects_in(db))
+            .filter(|o| o.name.to_lowercase().contains(&term))
+            .take(limit)
+            .collect())
+    }
+
     async fn definition(&mut self, object: &ObjectRef) -> Result<String> {
         match (object.kind, object.name.as_str()) {
             (ObjectKind::Procedure, "refresh_stats") => {

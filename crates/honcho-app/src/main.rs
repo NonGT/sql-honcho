@@ -1,3 +1,4 @@
+mod browser;
 mod connection_dialog;
 mod connections;
 mod editor_view;
@@ -96,6 +97,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Zoom Out", workspace::ZoomOut),
                 MenuItem::action("Reset Zoom", workspace::ZoomReset),
                 MenuItem::separator(),
+                MenuItem::action("Toggle Object Browser", browser::ToggleBrowser),
                 MenuItem::action("Next Tab", workspace::NextTab),
                 MenuItem::action("Previous Tab", workspace::PrevTab),
             ],

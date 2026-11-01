@@ -284,6 +284,47 @@ pub async fn lists_metadata(f: Fixture) {
     assert!(def.to_lowercase().contains("refresh_stats"), "{def}");
 }
 
+pub async fn lists_indexes(f: Fixture) {
+    check!(f);
+    let rt = DbRuntime::new().unwrap();
+    let s = connect(&f, &rt).await;
+    let orders = s
+        .objects(f.seed_scope.clone(), vec![ObjectKind::Table])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.name.eq_ignore_ascii_case("orders"))
+        .expect("orders");
+    let indexes = s.indexes(orders).await.unwrap();
+    let primary = &indexes[0];
+    assert!(primary.primary && primary.unique, "{indexes:?}");
+    assert_eq!(primary.columns.len(), 1);
+    assert!(primary.columns[0].eq_ignore_ascii_case("id"));
+}
+
+pub async fn searches_objects(f: Fixture) {
+    check!(f);
+    let rt = DbRuntime::new().unwrap();
+    let s = connect(&f, &rt).await;
+    let found = s.search("ORDER", 100).await.unwrap();
+    let in_seed = |kind: ObjectKind, name: &str| {
+        found.iter().any(|o| {
+            o.kind == kind
+                && o.name.eq_ignore_ascii_case(name)
+                && o.database == f.seed_scope.database
+        })
+    };
+    assert!(in_seed(ObjectKind::Table, "orders"), "{found:?}");
+    assert!(in_seed(ObjectKind::Function, "order_total"), "{found:?}");
+    // the term is matched literally, not as a pattern
+    let none = s.search("ord_rs", 100).await.unwrap();
+    assert!(
+        none.iter().all(|o| !o.name.eq_ignore_ascii_case("orders")),
+        "{none:?}"
+    );
+    assert!(s.search("e", 1).await.unwrap().len() <= 1);
+}
+
 pub async fn switches_database(f: Fixture) {
     check!(f);
     if !f.can_switch_database {
@@ -325,6 +366,8 @@ macro_rules! conformance_tests {
                 reports_warnings,
                 cancels_long_queries,
                 lists_metadata,
+                lists_indexes,
+                searches_objects,
                 switches_database,
             );
         }

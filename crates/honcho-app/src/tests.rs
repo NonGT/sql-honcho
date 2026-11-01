@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{App, ClipboardItem, Entity, Focusable, TestAppContext, VisualTestContext};
+use gpui::{App, AppContext, ClipboardItem, Entity, Focusable, TestAppContext, VisualTestContext};
 use honcho_config::{ColorTag, ConnectionStore, MemorySecrets};
 use honcho_db::{DbRuntime, DriverKind};
 
@@ -833,4 +833,131 @@ fn ssh_settings_are_saved_with_the_secret_in_the_keyring(cx: &mut TestAppContext
         ("bastion", Some(2222), "ops")
     );
     assert_eq!(ssh_secret.as_deref(), Some("ssh pw"));
+}
+
+fn browser_labels(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.read_with(cx, |b, _| b.labels())
+}
+
+/// Clicks a row and waits for whatever it loads.
+fn browse(ws: &Entity<Workspace>, cx: &mut VisualTestContext, label: &str) {
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.click(label, false, cx));
+    wait_until(cx, |cx| b.read_with(cx, |b, _| b.is_idle()));
+}
+
+#[gpui::test]
+fn object_browser_loads_as_nodes_open(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    assert_eq!(browser_labels(&ws, cx), ["fake db"]);
+
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    browse(&ws, cx, "Tables (2)");
+    browse(&ws, cx, "orders");
+    browse(&ws, cx, "Columns");
+    browse(&ws, cx, "Indexes");
+    assert_eq!(
+        browser_labels(&ws, cx),
+        [
+            "fake db",
+            "  app",
+            "    Tables (2)",
+            "      orders",
+            "        Columns",
+            "          id",
+            "          user_id",
+            "          amount",
+            "        Indexes",
+            "          PRIMARY",
+            "          user_id",
+            "      users",
+            "    Views (1)",
+            "    Procedures (1)",
+            "    Functions (1)",
+            "  analytics",
+        ]
+    );
+
+    // a template goes into the current editor
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| {
+        b.template_for("users", crate::browser::Template::Select, cx)
+    });
+    wait_until(cx, |cx| text(&ws, cx).contains("FROM `app`.`users`"));
+    assert_eq!(
+        text(&ws, cx),
+        "SELECT `id`, `email`\nFROM `app`.`users`\nLIMIT 100;\n"
+    );
+}
+
+#[gpui::test]
+fn double_click_opens_a_connected_tab(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    browse(&ws, cx, "Tables (2)");
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.click("users", true, cx));
+    wait_until(cx, |cx| {
+        ws.read_with(cx, |ws, cx| {
+            ws.tab_count() == 2 && ws.active_connection(cx).is_some()
+        })
+    });
+    assert_eq!(text(&ws, cx), "SELECT * FROM `app`.`users` LIMIT 1000;");
+}
+
+#[gpui::test]
+fn filter_searches_nodes_that_were_never_opened(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "fake db");
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.set_filter("total", cx));
+    // the search waits for a pause in typing
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    wait_until(cx, |cx| {
+        b.read_with(cx, |b, _| {
+            b.labels().iter().any(|l| l.trim() == "order_total")
+        })
+    });
+    let labels = browser_labels(&ws, cx);
+    assert!(
+        labels.contains(&"    Functions (1)".to_string()),
+        "{labels:?}"
+    );
+    assert!(!labels.iter().any(|l| l.trim() == "orders"), "{labels:?}");
+
+    b.update(cx, |b, cx| b.set_filter("", cx));
+    assert_eq!(browser_labels(&ws, cx), ["fake db", "  app", "  analytics"]);
+}
+
+#[gpui::test]
+fn expanded_nodes_come_back_next_time(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    browse(&ws, cx, "Views (1)");
+    let before = browser_labels(&ws, cx);
+    cx.run_until_parked();
+
+    // a fresh browser, as after a restart: opening the connection brings
+    // the rest back
+    let fresh = cx.update(|_, cx| {
+        cx.new(|cx| {
+            let mut b = crate::browser::ObjectBrowser::new(cx);
+            b.restore_expanded(cx);
+            b
+        })
+    });
+    assert_eq!(fresh.read_with(cx, |b, _| b.labels()), ["fake db"]);
+    fresh.update(cx, |b, cx| b.click("fake db", false, cx));
+    wait_until(cx, |cx| {
+        fresh.read_with(cx, |b, _| b.is_idle() && b.labels() == before)
+    });
 }

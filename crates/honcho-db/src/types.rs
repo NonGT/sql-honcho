@@ -229,6 +229,15 @@ pub struct ColumnInfo {
     pub comment: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexInfo {
+    pub name: String,
+    /// In index order.
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary: bool,
+}
+
 /// Where to list objects. Unset fields mean the connection's current one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Scope {

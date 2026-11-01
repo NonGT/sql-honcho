@@ -7,6 +7,7 @@ use gpui::{
     Point, PromptLevel, ResizeEdge, SharedString, Size, Subscription, Task, Window,
 };
 
+use crate::browser::{self, BrowserEvent, ObjectBrowser};
 use crate::connection_dialog::{ConnectionDialog, DialogEvent};
 use crate::connections;
 use crate::editor_view::EditorView;
@@ -42,6 +43,8 @@ pub struct Workspace {
     /// The user already agreed to lose unsaved changes on close.
     discard_confirmed: bool,
     connection_dialog: Option<Entity<ConnectionDialog>>,
+    browser: Entity<ObjectBrowser>,
+    show_browser: bool,
     /// Keyed by the tab's editor.
     query_tabs: HashMap<EntityId, Entity<QueryTab>>,
 }
@@ -49,6 +52,11 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let find = cx.new(FindBar::new);
+        let browser = cx.new(|cx| {
+            let mut b = ObjectBrowser::new(cx);
+            b.restore_expanded(cx);
+            b
+        });
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
@@ -57,9 +65,12 @@ impl Workspace {
             subscriptions: vec![cx.observe(&find, |_, _, cx| cx.notify())],
             discard_confirmed: false,
             connection_dialog: None,
+            show_browser: true,
+            browser,
             query_tabs: HashMap::new(),
             find,
         };
+        this.subscribe_browser(window, cx);
         this.new_tab(String::new(), None, window, cx);
         this.open_paths(paths, window, cx);
 
@@ -144,6 +155,41 @@ impl Workspace {
         self.connection_dialog.as_ref()
     }
 
+    fn subscribe_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let browser = self.browser.clone();
+        self.subscriptions.push(cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, event: &BrowserEvent, window, cx| match event {
+                BrowserEvent::Open {
+                    saved,
+                    database,
+                    text,
+                    run,
+                } => {
+                    this.new_tab(text.clone(), None, window, cx);
+                    let (saved, database, run) = ((**saved).clone(), database.clone(), *run);
+                    this.active_query_tab()
+                        .clone()
+                        .update(cx, |q, cx| q.open_saved(saved, database, run, cx));
+                }
+                BrowserEvent::Insert(text) => {
+                    let editor = this.active_editor().clone();
+                    editor.update(cx, |e, cx| {
+                        e.editor.insert(text);
+                        e.request_autoscroll(cx);
+                    });
+                    window.focus(&editor.focus_handle(cx));
+                }
+            },
+        ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser(&self) -> &Entity<ObjectBrowser> {
+        &self.browser
+    }
+
     pub(crate) fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(dialog) = &self.connection_dialog {
             window.focus(&dialog.focus_handle(cx));
@@ -161,6 +207,8 @@ impl Workspace {
                         .update(cx, |q, cx| q.set_connection(conn, cx));
                 }
                 this.connection_dialog = None;
+                // names, colors and the list itself may have changed
+                this.browser.update(cx, |b, cx| b.connections_changed(cx));
                 let editor = this.active_editor().clone();
                 window.focus(&editor.focus_handle(cx));
                 cx.notify();
@@ -667,6 +715,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &find::FindPrev, window, cx| {
                 this.find.update(cx, |f, cx| f.next(false, window, cx))
             }))
+            .on_action(cx.listener(|this, _: &browser::ToggleBrowser, _, cx| {
+                this.show_browser = !this.show_browser;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ManageConnections, window, cx| {
                 this.open_connections(window, cx)
             }))
@@ -676,23 +728,46 @@ impl Render for Workspace {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_paths(paths.paths().to_vec(), window, cx)
             }))
-            .child(self.render_tabs(cx))
             .child(
                 div()
+                    .flex()
                     .flex_1()
                     .min_h_0()
-                    .relative()
-                    .child(self.active_query_tab().clone())
-                    .when(self.find.read(cx).open, |d| {
+                    .when(self.show_browser, |d| {
                         d.child(
                             div()
-                                .absolute()
-                                // below the tab's toolbar
-                                .top(px(36.))
-                                .right(px(22.))
-                                .child(self.find.clone()),
+                                .w(px(260.))
+                                .flex_none()
+                                .border_r_1()
+                                .border_color(Theme::border())
+                                .child(self.browser.clone()),
                         )
-                    }),
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.render_tabs(cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .relative()
+                                    .child(self.active_query_tab().clone())
+                                    .when(self.find.read(cx).open, |d| {
+                                        d.child(
+                                            div()
+                                                .absolute()
+                                                // below the tab's toolbar
+                                                .top(px(36.))
+                                                .right(px(22.))
+                                                .child(self.find.clone()),
+                                        )
+                                    }),
+                            ),
+                    ),
             )
             .child(self.render_status(cx))
             .children(self.connection_dialog.clone())

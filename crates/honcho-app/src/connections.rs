@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use gpui::{App, Global, Hsla};
+use gpui::{App, Global, Hsla, Task};
 use honcho_config::{ColorTag, ConnectionStore, Keyring, SavedConnection, Secrets};
-use honcho_db::{DbRuntime, Driver, DriverKind, Session};
+use honcho_db::{ConnectConfig, DbError, DbRuntime, Driver, DriverKind, Session, SessionOptions};
 
 use crate::theme::c;
 
@@ -34,6 +34,32 @@ impl Connections {
             load_error,
         });
     }
+}
+
+/// Opens a session for a saved connection, on `database` if given. The
+/// keyring read happens off the UI thread, since it can wait on a prompt.
+pub fn open_session(
+    saved: SavedConnection,
+    database: Option<String>,
+    cx: &App,
+) -> Task<Result<Session, DbError>> {
+    let Some(driver) = driver(saved.driver) else {
+        return Task::ready(Err(DbError::Unsupported("this driver")));
+    };
+    let state = cx.global::<Connections>();
+    let (secrets, runtime) = (state.secrets.clone(), state.runtime.clone());
+    cx.background_executor().spawn(async move {
+        let config = saved
+            .connect_config(secrets.as_ref())
+            .map_err(|e| DbError::Other(e.to_string()))?;
+        let config = ConnectConfig {
+            database: database.or(config.database.clone()),
+            ..config
+        };
+        runtime
+            .connect(driver, config, SessionOptions::default())
+            .await
+    })
 }
 
 /// A tab's open connection.

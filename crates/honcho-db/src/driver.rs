@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::script::Statement;
 use crate::types::{
-    Capabilities, ColumnInfo, ConnectConfig, DriverKind, ObjectKind, ObjectRef, Scope,
+    Capabilities, ColumnInfo, ConnectConfig, DriverKind, IndexInfo, ObjectKind, ObjectRef, Scope,
 };
 use crate::{Result, ResultSink};
 
@@ -55,6 +55,18 @@ pub trait Connection: Send {
     async fn objects(&mut self, scope: &Scope, kinds: &[ObjectKind]) -> Result<Vec<ObjectRef>>;
 
     async fn columns(&mut self, object: &ObjectRef) -> Result<Vec<ColumnInfo>>;
+
+    /// Indexes of a table, the primary key first.
+    async fn indexes(&mut self, _table: &ObjectRef) -> Result<Vec<IndexInfo>> {
+        Err(crate::DbError::Unsupported("indexes"))
+    }
+
+    /// Objects in any database whose name contains `term`, case-insensitive,
+    /// at most `limit` of them. For finding things in parts of the tree that
+    /// haven't been loaded.
+    async fn search(&mut self, _term: &str, _limit: usize) -> Result<Vec<ObjectRef>> {
+        Err(crate::DbError::Unsupported("search"))
+    }
 
     /// Source of a view or routine, as a script that recreates it.
     async fn definition(&mut self, object: &ObjectRef) -> Result<String>;
