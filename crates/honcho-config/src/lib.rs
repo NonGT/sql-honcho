@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use honcho_db::{ConnectConfig, DriverKind};
+use honcho_db::{ConnectConfig, DriverKind, TlsConfig};
 use serde::{Deserialize, Serialize};
 
 pub use secrets::{Keyring, MemorySecrets, SecretError, Secrets};
@@ -73,6 +73,8 @@ pub struct SavedConnection {
     #[serde(default)]
     pub auto_reconnect: bool,
     #[serde(default)]
+    pub tls: TlsConfig,
+    #[serde(default)]
     pub options: BTreeMap<String, String>,
 }
 
@@ -89,6 +91,7 @@ impl SavedConnection {
             color: None,
             read_only: false,
             auto_reconnect: false,
+            tls: TlsConfig::default(),
             options: BTreeMap::new(),
         }
     }
@@ -132,6 +135,7 @@ impl SavedConnection {
             password: self.password(secrets)?,
             database: self.database.clone(),
             read_only: self.read_only,
+            tls: self.tls.clone(),
             options: self.options.clone(),
             ..Default::default()
         })

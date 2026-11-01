@@ -81,6 +81,10 @@ Drivers also run the conformance suite against real databases in Docker
     HONCHO_IT=1 cargo test -p honcho-db
     docker compose -f docker/compose.yml down -v
 
+MySQL and MariaDB serve TLS with a test CA from `docker/tls` (regenerate
+with `docker/tls/gen.sh`); its certificate names 127.0.0.1 and
+db.honcho.test, not localhost, so the tests can see a name check fail.
+
 SQL Server's image is amd64 only, so on Apple Silicon it runs under Docker
 Desktop's emulation and takes a while to start.
 

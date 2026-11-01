@@ -5,7 +5,7 @@ use gpui::{
     PromptLevel, SharedString, Task, Window,
 };
 use honcho_config::{ColorTag, SavedConnection};
-use honcho_db::{ConnectConfig, DriverKind, SessionOptions};
+use honcho_db::{ConnectConfig, DriverKind, SessionOptions, TlsConfig, TlsMode};
 
 use crate::connections::{self, ActiveConnection, Connections};
 use crate::editor_view::{self, EditorView};
@@ -22,7 +22,7 @@ const DRIVERS: [DriverKind; 4] = [
 ];
 
 pub enum DialogEvent {
-    Connected(ActiveConnection),
+    Connected(Box<ActiveConnection>),
     Closed,
 }
 
@@ -33,10 +33,13 @@ struct Fields {
     user: Entity<EditorView>,
     password: Entity<EditorView>,
     database: Entity<EditorView>,
+    ca: Entity<EditorView>,
+    cert: Entity<EditorView>,
+    key: Entity<EditorView>,
 }
 
 impl Fields {
-    fn in_order(&self) -> [&Entity<EditorView>; 6] {
+    fn in_order(&self) -> [&Entity<EditorView>; 9] {
         [
             &self.name,
             &self.host,
@@ -44,7 +47,46 @@ impl Fields {
             &self.user,
             &self.password,
             &self.database,
+            &self.ca,
+            &self.cert,
+            &self.key,
         ]
+    }
+
+    /// The fields on a tab, in Tab order.
+    fn on(&self, section: Section) -> Vec<&Entity<EditorView>> {
+        match section {
+            Section::General => self.in_order()[..6].to_vec(),
+            Section::Tls => vec![&self.ca, &self.cert, &self.key],
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    General,
+    Tls,
+}
+
+fn mode_label(mode: TlsMode) -> &'static str {
+    match mode {
+        TlsMode::Disable => "Disable",
+        TlsMode::Prefer => "Prefer",
+        TlsMode::Require => "Require",
+        TlsMode::VerifyCa => "Verify CA",
+        TlsMode::VerifyFull => "Verify full",
+    }
+}
+
+fn mode_hint(mode: TlsMode) -> &'static str {
+    match mode {
+        TlsMode::Disable => "Never encrypt.",
+        TlsMode::Prefer => "Encrypt when the server can, without checking its certificate.",
+        TlsMode::Require => "Always encrypt, without checking the certificate.",
+        TlsMode::VerifyCa => "Encrypt, and the certificate must come from a trusted CA.",
+        TlsMode::VerifyFull => {
+            "Encrypt, the certificate must come from a trusted CA and name the host."
+        }
     }
 }
 
@@ -62,6 +104,7 @@ pub struct ConnectionDialog {
     is_new: bool,
     fields: Fields,
     status: Option<Status>,
+    section: Section,
     busy: bool,
     /// The saved password is still being read from the keyring.
     password_load: Option<Task<()>>,
@@ -88,6 +131,9 @@ impl ConnectionDialog {
             user: field("", cx),
             password: field("", cx),
             database: field("optional", cx),
+            ca: field("system roots", cx),
+            cert: field("none", cx),
+            key: field("none", cx),
         };
         fields.password.update(cx, |p, _| p.masked = true);
         for f in fields.in_order() {
@@ -99,6 +145,7 @@ impl ConnectionDialog {
             is_new: true,
             fields,
             status: None,
+            section: Section::General,
             busy: false,
             password_load: None,
         };
@@ -146,6 +193,16 @@ impl ConnectionDialog {
     ) {
         self.status = None;
         let port = saved.port.map(|p| p.to_string()).unwrap_or_default();
+        let path = |p: &Option<std::path::PathBuf>| {
+            p.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        };
+        let (ca, cert, key) = (
+            path(&saved.tls.ca_file),
+            path(&saved.tls.cert_file),
+            path(&saved.tls.key_file),
+        );
         let values = [
             saved.name.as_str(),
             saved.host.as_str(),
@@ -153,6 +210,9 @@ impl ConnectionDialog {
             saved.user.as_str(),
             "",
             saved.database.as_deref().unwrap_or(""),
+            &ca,
+            &cert,
+            &key,
         ];
         for (field, value) in self.fields.in_order().into_iter().zip(values) {
             Self::set_field(field, value, cx);
@@ -231,12 +291,28 @@ impl ConnectionDialog {
             ),
         };
         let database = Some(text(&self.fields.database)).filter(|d| !d.is_empty());
+        let path = |f: &Entity<EditorView>| {
+            Some(text(f))
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from)
+        };
+        let tls = TlsConfig {
+            mode: self.draft.tls.mode,
+            ca_file: path(&self.fields.ca),
+            cert_file: path(&self.fields.cert),
+            key_file: path(&self.fields.key),
+            server_name: None,
+        };
+        if tls.cert_file.is_some() != tls.key_file.is_some() {
+            return Err("A client certificate needs both the certificate and its key.".into());
+        }
         Ok(SavedConnection {
             name,
             host: text(&self.fields.host),
             port,
             user: text(&self.fields.user),
             database,
+            tls,
             ..self.draft.clone()
         })
     }
@@ -429,6 +505,7 @@ impl ConnectionDialog {
             password: self.password(cx),
             database: saved.database.clone(),
             read_only: saved.read_only,
+            tls: saved.tls.clone(),
             options: saved.options.clone(),
             connect_timeout: Some(TEST_TIMEOUT),
         }
@@ -499,7 +576,10 @@ impl ConnectionDialog {
                     Ok(_) => this.set_status("Connected.", false),
                 }
                 if let Some(session) = session {
-                    cx.emit(DialogEvent::Connected(ActiveConnection { saved, session }));
+                    cx.emit(DialogEvent::Connected(Box::new(ActiveConnection {
+                        saved,
+                        session,
+                    })));
                 }
                 cx.notify();
             })
@@ -508,8 +588,35 @@ impl ConnectionDialog {
         .detach();
     }
 
+    fn show_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        self.section = section;
+        let first = self.fields.on(section)[0].clone();
+        window.focus(&first.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn browse(&mut self, field: Entity<EditorView>, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(path) = paths.first() {
+                    this.update(cx, |_, cx| {
+                        Self::set_field(&field, &path.display().to_string(), cx)
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
     fn focus_field(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let fields = self.fields.in_order();
+        let fields = self.fields.on(self.section);
         let current = fields
             .iter()
             .position(|f| f.focus_handle(cx).is_focused(window))
@@ -540,6 +647,12 @@ impl ConnectionDialog {
     }
 
     #[cfg(test)]
+    pub fn show_tls(&mut self, mode: TlsMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.draft.tls.mode = mode;
+        self.show_section(Section::Tls, window, cx);
+    }
+
+    #[cfg(test)]
     pub fn set_auto_reconnect(&mut self, on: bool) {
         self.draft.auto_reconnect = on;
     }
@@ -552,8 +665,17 @@ impl Focusable for ConnectionDialog {
 }
 
 fn button(label: &'static str, primary: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
+    button_with_id(label, label, primary, enabled)
+}
+
+fn button_with_id(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
-        .id(label)
+        .id(id)
         .px_2p5()
         .py_1()
         .rounded_md()
@@ -683,7 +805,8 @@ impl Render for ConnectionDialog {
                 .gap_2()
                 .child(
                     div()
-                        .when(width.is_none(), |d| d.w(px(72.)).flex_none())
+                        .when(width.is_none(), |d| d.w(px(84.)).flex_none())
+                        .whitespace_nowrap()
                         .text_color(Theme::muted())
                         .child(label),
                 )
@@ -789,7 +912,7 @@ impl Render for ConnectionDialog {
 
         let label = |text: &'static str| {
             div()
-                .w(px(72.))
+                .w(px(84.))
                 .flex_none()
                 .text_color(Theme::muted())
                 .child(text)
@@ -807,6 +930,67 @@ impl Render for ConnectionDialog {
         });
 
         let busy = self.busy;
+        let section_tab = |id: &'static str, text: SharedString, section: Section| {
+            let active = self.section == section;
+            div()
+                .id(id)
+                .px_3()
+                .pb_1()
+                .cursor_pointer()
+                .border_b_2()
+                .border_color(if active {
+                    Theme::accent()
+                } else {
+                    Theme::panel()
+                })
+                .text_color(if active {
+                    Theme::text()
+                } else {
+                    Theme::muted()
+                })
+                .child(text)
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.show_section(section, window, cx)),
+                )
+        };
+        let tls_mode = self.draft.tls.mode;
+        // the mode shows on the tab so a stricter setting isn't hidden
+        let tls_label: SharedString = if tls_mode == TlsMode::Prefer {
+            "TLS".into()
+        } else {
+            format!("TLS · {}", mode_label(tls_mode)).into()
+        };
+        let sections = div()
+            .flex()
+            .border_b_1()
+            .border_color(Theme::border())
+            .mb_1()
+            .child(section_tab(
+                "section-general",
+                "General".into(),
+                Section::General,
+            ))
+            .child(section_tab("section-tls", tls_label, Section::Tls));
+
+        let browse = |id: &'static str, target: &Entity<EditorView>| {
+            let target = target.clone();
+            button_with_id(id, "Browse…", false, true)
+                .on_click(cx.listener(move |this, _, _, cx| this.browse(target.clone(), cx)))
+        };
+        let path_row = |text: &'static str, input: &Entity<EditorView>, id: &'static str| {
+            row()
+                .child(field(text, input, None).flex_1())
+                .child(browse(id, input))
+        };
+        let modes = div().flex().gap_1().children(TlsMode::ALL.map(|mode| {
+            button(mode_label(mode), mode == tls_mode, true).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.draft.tls.mode = mode;
+                    cx.notify();
+                },
+            ))
+        }));
+
         let form = div()
             .flex_1()
             .min_w_0()
@@ -814,19 +998,37 @@ impl Render for ConnectionDialog {
             .flex()
             .flex_col()
             .gap_2()
-            .child(field("Name", &self.fields.name, None))
-            .child(row().child(label("Driver")).child(drivers))
-            .child(
-                row()
-                    .child(field("Host", &self.fields.host, None).flex_1())
-                    .child(field("Port", &self.fields.port, Some(84.))),
-            )
-            .child(field("User", &self.fields.user, None))
-            .child(field("Password", &self.fields.password, None))
-            .child(field("Database", &self.fields.database, None))
-            .child(row().child(label("Color")).child(colors))
-            .child(row().child(label("")).child(read_only))
-            .child(row().child(label("")).child(auto_reconnect))
+            .child(sections)
+            .map(|d| match self.section {
+                Section::General => d
+                    .child(field("Name", &self.fields.name, None))
+                    .child(row().child(label("Driver")).child(drivers))
+                    .child(
+                        row()
+                            .child(field("Host", &self.fields.host, None).flex_1())
+                            .child(field("Port", &self.fields.port, Some(84.))),
+                    )
+                    .child(field("User", &self.fields.user, None))
+                    .child(field("Password", &self.fields.password, None))
+                    .child(field("Database", &self.fields.database, None))
+                    .child(row().child(label("Color")).child(colors))
+                    .child(row().child(label("")).child(read_only))
+                    .child(row().child(label("")).child(auto_reconnect)),
+                Section::Tls => d
+                    .child(row().child(label("Mode")).child(modes))
+                    .child(
+                        row().child(label("")).child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(Theme::muted())
+                                .child(mode_hint(tls_mode)),
+                        ),
+                    )
+                    .child(path_row("CA file", &self.fields.ca, "browse-ca"))
+                    .child(path_row("Client cert", &self.fields.cert, "browse-cert"))
+                    .child(path_row("Client key", &self.fields.key, "browse-key")),
+            })
             .child(div().flex_1())
             .child(div().min_h(px(18.)).children(status))
             .child(

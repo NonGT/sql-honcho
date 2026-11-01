@@ -748,3 +748,44 @@ fn database_list_reconnects_when_set_to(cx: &mut TestAppContext) {
     open_database_list(&ws, cx);
     assert!(q.read_with(cx, |q, _| q.lost.is_none()));
 }
+
+#[gpui::test]
+fn tls_settings_are_saved(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    fill(cx, ["secure", "db.example.com", "", "app", "", ""]);
+    d.update_in(cx, |d, window, cx| {
+        d.show_tls(honcho_db::TlsMode::VerifyFull, window, cx)
+    });
+    // the TLS tab's fields: CA, client cert, client key
+    cx.simulate_input("/etc/ca.pem");
+    press(cx, "tab");
+    cx.simulate_input("/home/me/client.pem");
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        status(&d, cx).as_deref(),
+        Some("A client certificate needs both the certificate and its key.")
+    );
+
+    press(cx, "tab");
+    cx.simulate_input("/home/me/client-key.pem");
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    assert_eq!(status(&d, cx).as_deref(), Some("Saved."));
+    let tls = cx.update(|_, cx| {
+        cx.global::<Connections>().store.connections()[0]
+            .tls
+            .clone()
+    });
+    assert_eq!(tls.mode, honcho_db::TlsMode::VerifyFull);
+    assert_eq!(
+        tls.ca_file.as_deref(),
+        Some(std::path::Path::new("/etc/ca.pem"))
+    );
+    assert_eq!(
+        tls.key_file.as_deref(),
+        Some(std::path::Path::new("/home/me/client-key.pem"))
+    );
+}

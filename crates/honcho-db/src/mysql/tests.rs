@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::conformance::{Fixture, Sql};
-use crate::{DbRuntime, QueryEvent, Session, SessionOptions, Value};
+use crate::{DbRuntime, QueryEvent, Session, SessionOptions, TlsConfig, TlsMode, Value};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Server {
@@ -161,7 +161,135 @@ both_servers!(
     marks_a_killed_connection_lost,
     read_only_is_enforced_by_the_server_too,
     reads_thai_from_a_table,
+    tls_require_and_disable,
+    tls_verify_checks_the_ca_and_the_name,
+    tls_client_certificate,
 );
+
+fn cert(name: &str) -> Option<std::path::PathBuf> {
+    Some(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docker/tls")
+            .join(name),
+    )
+}
+
+fn with_tls(server: Server, mode: TlsMode, ca: bool) -> ConnectConfig {
+    ConnectConfig {
+        tls: TlsConfig {
+            mode,
+            ca_file: if ca { cert("ca.pem") } else { None },
+            ..Default::default()
+        },
+        ..config(server)
+    }
+}
+
+async fn try_connect(rt: &DbRuntime, config: ConnectConfig) -> Result<Session> {
+    rt.connect(Arc::new(MySqlDriver), config, SessionOptions::default())
+        .await
+}
+
+/// The cipher in use, empty on a plain connection.
+async fn cipher(s: &Session) -> String {
+    let events = run(s, "SHOW SESSION STATUS LIKE 'Ssl_cipher'").await;
+    match &rows_of(&events)[..] {
+        [row] => row[1].display(100).into_owned(),
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn tls_require_and_disable(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let s = try_connect(&rt, with_tls(server, TlsMode::Require, false))
+        .await
+        .unwrap();
+    assert!(!cipher(&s).await.is_empty());
+    let s = try_connect(&rt, with_tls(server, TlsMode::Prefer, false))
+        .await
+        .unwrap();
+    assert!(!cipher(&s).await.is_empty());
+    let s = try_connect(&rt, with_tls(server, TlsMode::Disable, false))
+        .await
+        .unwrap();
+    assert_eq!(cipher(&s).await, "");
+}
+
+async fn tls_verify_checks_the_ca_and_the_name(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let s = try_connect(&rt, with_tls(server, TlsMode::VerifyFull, true))
+        .await
+        .unwrap();
+    assert!(!cipher(&s).await.is_empty());
+
+    // the test CA isn't trusted unless given
+    let err = try_connect(&rt, with_tls(server, TlsMode::VerifyCa, false))
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(err, DbError::Tls(_)), "{err:?}");
+
+    // the certificate names 127.0.0.1 but not localhost
+    let by_name = ConnectConfig {
+        host: "localhost".into(),
+        ..with_tls(server, TlsMode::VerifyFull, true)
+    };
+    let err = try_connect(&rt, by_name.clone()).await.err().unwrap();
+    assert!(matches!(err, DbError::Tls(_)), "{err:?}");
+    // verify-ca doesn't look at the name
+    let ca_only = ConnectConfig {
+        tls: TlsConfig {
+            mode: TlsMode::VerifyCa,
+            ..by_name.tls.clone()
+        },
+        ..by_name.clone()
+    };
+    try_connect(&rt, ca_only).await.unwrap();
+    // a tunnel checks the name the certificate was issued for
+    let mut tunnelled = by_name;
+    tunnelled.tls.server_name = Some("db.honcho.test".into());
+    try_connect(&rt, tunnelled).await.unwrap();
+
+    let missing = ConnectConfig {
+        tls: TlsConfig {
+            mode: TlsMode::VerifyCa,
+            ca_file: cert("nope.pem"),
+            ..Default::default()
+        },
+        ..config(server)
+    };
+    match try_connect(&rt, missing).await.err().unwrap() {
+        DbError::Tls(m) => assert!(m.contains("nope.pem"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn tls_client_certificate(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let x509 = |with_cert: bool| ConnectConfig {
+        user: "honcho_x509".into(),
+        tls: TlsConfig {
+            mode: TlsMode::VerifyFull,
+            ca_file: cert("ca.pem"),
+            cert_file: if with_cert {
+                cert("client-cert.pem")
+            } else {
+                None
+            },
+            key_file: if with_cert {
+                cert("client-key.pem")
+            } else {
+                None
+            },
+            server_name: None,
+        },
+        ..config(server)
+    };
+    let s = try_connect(&rt, x509(true)).await.unwrap();
+    finished_ok(&run(&s, "SELECT COUNT(*) FROM users").await);
+    let err = try_connect(&rt, x509(false)).await.err().unwrap();
+    assert!(matches!(err, DbError::Auth(_)), "{err:?}");
+}
 
 async fn reads_thai_from_a_table(server: Server) {
     let rt = DbRuntime::new().unwrap();
