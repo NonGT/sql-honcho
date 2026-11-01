@@ -7,14 +7,14 @@ use gpui::{
     actions, div, prelude::*, px, App, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
     Focusable, MouseButton, Pixels, PromptLevel, SharedString, Subscription, Task, Window,
 };
-use honcho_config::ColorTag;
+use honcho_config::{ColorTag, SavedConnection};
 use honcho_core::Editor;
 use honcho_db::script;
-use honcho_db::{DbError, DriverKind, MessageLevel, QueryEvent, SessionOptions};
+use honcho_db::{DbError, DriverKind, MessageLevel, QueryEvent};
 use tokio_util::sync::CancellationToken;
 
 use crate::connection_dialog::color_dot;
-use crate::connections::{self, ActiveConnection, Connections};
+use crate::connections::{self, ActiveConnection};
 use crate::editor_view::EditorView;
 use crate::grid::{Format, ResultGrid};
 use crate::theme::{self, Theme};
@@ -530,35 +530,18 @@ impl QueryTab {
             self.preparing = false;
             return;
         };
-        let Some(driver) = connections::driver(saved.driver) else {
+        if connections::driver(saved.driver).is_none() {
             self.preparing = false;
             return;
-        };
+        }
         if self.reconnecting {
             return;
         }
         self.reconnecting = true;
-        let state = cx.global::<Connections>();
-        let (secrets, runtime) = (state.secrets.clone(), state.runtime.clone());
-        let for_key = saved.clone();
         // come back to the database the user had moved to
-        let database = self.database.clone();
+        let opening = connections::open_session(saved.clone(), self.database.clone(), cx);
         cx.spawn(async move |this, cx| {
-            let config = cx
-                .background_spawn(async move { for_key.connect_config(secrets.as_ref()) })
-                .await
-                .map(|config| honcho_db::ConnectConfig {
-                    database: database.or(config.database.clone()),
-                    ..config
-                });
-            let result = match config {
-                Ok(config) => {
-                    runtime
-                        .connect(driver, config, SessionOptions::default())
-                        .await
-                }
-                Err(e) => Err(DbError::Other(e.to_string())),
-            };
+            let result = opening.await;
             this.update(cx, |this, cx| {
                 this.reconnecting = false;
                 this.preparing = false;
@@ -588,6 +571,42 @@ impl QueryTab {
                         &format!("Couldn't reconnect: {e}"),
                         None,
                     ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Connects a tab opened from somewhere else (the object browser), and
+    /// runs the whole buffer once connected when `run`.
+    pub fn open_saved(
+        &mut self,
+        saved: SavedConnection,
+        database: Option<String>,
+        run: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.reconnecting = true;
+        let opening = connections::open_session(saved.clone(), database, cx);
+        cx.spawn(async move |this, cx| {
+            let result = opening.await;
+            this.update(cx, |this, cx| {
+                this.reconnecting = false;
+                match result {
+                    Ok(session) => {
+                        this.set_connection(ActiveConnection { saved, session }, cx);
+                        if run {
+                            let kind = this.kind().unwrap_or(DriverKind::MySql);
+                            if let Ok(t) = target(&this.editor.read(cx).editor, kind, true) {
+                                this.run(t, cx);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        this.say(MessageLevel::Error, &format!("Couldn't connect: {e}"), None)
+                    }
                 }
                 cx.notify();
             })

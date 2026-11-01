@@ -7,6 +7,7 @@
 
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, PlatformKeyboardMapper};
 
+use crate::browser::*;
 use crate::connection_dialog::*;
 use crate::editor_view::*;
 use crate::find::*;
@@ -290,6 +291,7 @@ fn workspace(p: Platform) -> Vec<Binding> {
             ("P-shift-c", ManageConnections, None),
             ("P-.", CancelQuery, None),
             ("P-j", TogglePanel, None),
+            ("P-b", ToggleBrowser, None),
         ]
     );
     match p {
