@@ -720,7 +720,10 @@ fn database_list_closes_on_escape_or_a_click_outside(cx: &mut TestAppContext) {
     assert!(!q.read_with(cx, |q, _| q.databases_open()));
 
     open_database_list(&ws, cx);
-    cx.simulate_click(gpui::point(gpui::px(600.), gpui::px(400.)), Default::default());
+    cx.simulate_click(
+        gpui::point(gpui::px(600.), gpui::px(400.)),
+        Default::default(),
+    );
     assert!(!q.read_with(cx, |q, _| q.databases_open()));
 
     // keyboard: app is highlighted, the next one is analytics
