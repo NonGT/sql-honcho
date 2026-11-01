@@ -4,8 +4,42 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Statement<'a> {
     pub text: &'a str,
+    /// Byte offset of `text` in the script.
+    pub start: usize,
     /// 1-based line the statement starts on.
     pub line: u32,
+}
+
+impl<'a> Statement<'a> {
+    pub fn whole(sql: &'a str) -> Self {
+        Self {
+            text: sql,
+            start: 0,
+            line: 1,
+        }
+    }
+}
+
+/// Splits a script the way the driver for `kind` will when it runs it.
+pub fn split(kind: crate::DriverKind, sql: &str) -> Vec<Statement<'_>> {
+    use crate::DriverKind::*;
+    match kind {
+        MySql | Fake => crate::mysql::split(sql),
+        // each driver brings its own splitter when it lands
+        SqlServer | Postgres | Sqlite => vec![Statement::whole(sql)],
+    }
+}
+
+/// Names the statement kind when it changes every row of a table: UPDATE
+/// or DELETE without a WHERE.
+pub fn unfiltered_write(statement: &str) -> Option<&'static str> {
+    let words = words(statement);
+    let kind = match words.first()?.0.to_ascii_uppercase().as_str() {
+        "UPDATE" => "UPDATE",
+        "DELETE" => "DELETE",
+        _ => return None,
+    };
+    (!words.iter().any(|(w, _)| w.eq_ignore_ascii_case("WHERE"))).then_some(kind)
 }
 
 const READS: &[&str] = &[
@@ -112,6 +146,20 @@ mod tests {
         assert!(read("SELECT 'it\\'s DELETE' AS x"));
         assert!(read("SELECT \"ชื่อ\", ข้อมูล FROM t"));
         assert!(read(""));
+    }
+
+    #[test]
+    fn unfiltered_writes() {
+        assert_eq!(unfiltered_write("DELETE FROM users"), Some("DELETE"));
+        assert_eq!(unfiltered_write("update t set a = 'where'"), Some("UPDATE"));
+        assert_eq!(
+            unfiltered_write("UPDATE t SET a = 1 -- WHERE id = 1"),
+            Some("UPDATE")
+        );
+        assert_eq!(unfiltered_write("DELETE FROM t WHERE id = 1"), None);
+        assert_eq!(unfiltered_write("update t set a = 1\nwhere id = 2"), None);
+        assert_eq!(unfiltered_write("SELECT * FROM t"), None);
+        assert_eq!(unfiltered_write(""), None);
     }
 
     #[test]

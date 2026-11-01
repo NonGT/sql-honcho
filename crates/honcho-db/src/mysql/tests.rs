@@ -333,7 +333,10 @@ async fn read_only_is_enforced_by_the_server_too(server: Server) {
         .unwrap();
     let events = run(&s, "SELECT COUNT(*) FROM users;\nDELETE FROM orders").await;
     assert!(
-        matches!(events.last(), Some(QueryEvent::Finished(Err(DbError::ReadOnly(m)))) if m.starts_with("line 2:")),
+        matches!(
+            events.last(),
+            Some(QueryEvent::Finished(Err(DbError::ReadOnly { line: 2, .. })))
+        ),
         "{events:?}"
     );
     assert_eq!(rows_of(&events), Vec::<Vec<Value>>::new());

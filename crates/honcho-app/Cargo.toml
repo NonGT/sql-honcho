@@ -12,6 +12,7 @@ path = "src/main.rs"
 honcho-config = { path = "../honcho-config" }
 honcho-core = { path = "../honcho-core" }
 honcho-db = { path = "../honcho-db" }
+tokio-util = "0.7"
 
 # runtime_shaders avoids needing Xcode's Metal toolchain; Linux and Windows
 # use gpui's defaults (wayland + x11, DirectX)

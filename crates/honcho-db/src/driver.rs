@@ -27,7 +27,7 @@ pub trait Connection: Send {
     /// How `execute` would split the SQL, for checking read-only sessions.
     /// Drivers that send scripts whole needn't override it.
     fn statements<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
-        vec![Statement { text: sql, line: 1 }]
+        vec![Statement::whole(sql)]
     }
 
     /// Something that can interrupt the next `execute` from another task.

@@ -16,8 +16,12 @@ pub enum DbError {
         /// 1-based line in the submitted SQL, when the server reports one.
         line: Option<u32>,
     },
-    #[error("read-only connection: {0}")]
-    ReadOnly(String),
+    #[error("read-only connection: {reason}")]
+    ReadOnly {
+        reason: String,
+        /// 1-based line of the refused statement.
+        line: u32,
+    },
     #[error("query cancelled")]
     Cancelled,
     #[error("connection lost: {0}")]

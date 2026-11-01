@@ -533,6 +533,11 @@ impl ConnectionDialog {
     pub fn set_driver(&mut self, driver: DriverKind) {
         self.draft.driver = driver;
     }
+
+    #[cfg(test)]
+    pub fn set_color(&mut self, color: Option<ColorTag>) {
+        self.draft.color = color;
+    }
 }
 
 impl Focusable for ConnectionDialog {

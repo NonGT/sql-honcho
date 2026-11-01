@@ -19,6 +19,7 @@ pub fn split(sql: &str) -> Vec<Statement<'_>> {
             if *has_code {
                 out.push(Statement {
                     text: sql[s..end].trim_end(),
+                    start: s,
                     line: l,
                 });
             }
@@ -175,9 +176,13 @@ mod tests {
 
     #[test]
     fn records_start_lines() {
-        let s = split("SELECT 1;\n\n  SELECT\n'a\nb';\n-- c\nSELECT 3");
+        let sql = "SELECT 1;\n\n  SELECT\n'a\nb';\n-- c\nSELECT 3";
+        let s = split(sql);
         let lines: Vec<u32> = s.iter().map(|s| s.line).collect();
         assert_eq!(lines, [1, 3, 6]);
+        for st in &s {
+            assert_eq!(&sql[st.start..st.start + st.text.len()], st.text);
+        }
     }
 
     #[test]
