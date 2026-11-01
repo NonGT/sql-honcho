@@ -67,6 +67,15 @@ server, so it finds tables that were never expanded. Right-click for select
 top 1000, the definition, or SELECT/INSERT/UPDATE templates; double-click a
 table to see its rows.
 
+Opening a procedure, function, trigger or view from the browser gives a
+script that replaces it, and an Apply button. Apply first checks the server
+copy hasn't changed since the tab got it. For MySQL routines, which have to
+be dropped and created again, it creates the new version under a throwaway
+name first, so a script that won't create (a typo, a DEFINER you can't use)
+stops before anything is dropped. Run… asks for a routine's parameters and
+runs the CALL in a new tab. In the browser filter, `body:` searches routine
+code, e.g. `body:orders`.
+
 In the results grid: drag to select, click a header or row number for the
 whole column or row, Cmd/Ctrl+C copies as TSV for spreadsheets, Enter or a
 double-click opens the full value, and the arrow in a header sorts.

@@ -229,6 +229,21 @@ pub struct ColumnInfo {
     pub comment: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamMode {
+    In,
+    Out,
+    InOut,
+}
+
+/// A routine parameter, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutineParam {
+    pub name: String,
+    pub mode: ParamMode,
+    pub data_type: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexInfo {
     pub name: String,

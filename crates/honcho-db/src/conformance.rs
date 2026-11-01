@@ -333,6 +333,44 @@ pub async fn searches_objects(f: Fixture) {
     assert!(s.search("e", 1).await.unwrap().len() <= 1);
 }
 
+pub async fn describes_routines(f: Fixture) {
+    check!(f);
+    let rt = DbRuntime::new().unwrap();
+    let s = connect(&f, &rt).await;
+    let routines = s
+        .objects(
+            f.seed_scope.clone(),
+            vec![ObjectKind::Procedure, ObjectKind::Function],
+        )
+        .await
+        .unwrap();
+    let function = routines
+        .iter()
+        .find(|o| o.name.eq_ignore_ascii_case("order_total"))
+        .cloned()
+        .expect("order_total");
+    let params = s.parameters(function).await.unwrap();
+    assert_eq!(params.len(), 1, "{params:?}");
+    assert_eq!(params[0].mode, crate::ParamMode::In);
+    let procedure = routines
+        .iter()
+        .find(|o| o.name.eq_ignore_ascii_case("refresh_stats"))
+        .cloned()
+        .unwrap();
+    assert_eq!(s.parameters(procedure).await.unwrap(), vec![]);
+
+    // both seed routines read the orders table
+    let users_of_orders = s.search_bodies("ORDERS", 100).await.unwrap();
+    for name in ["refresh_stats", "order_total"] {
+        assert!(
+            users_of_orders
+                .iter()
+                .any(|o| o.name.eq_ignore_ascii_case(name)),
+            "{name} missing from {users_of_orders:?}"
+        );
+    }
+}
+
 pub async fn switches_database(f: Fixture) {
     check!(f);
     if !f.can_switch_database {
@@ -376,6 +414,7 @@ macro_rules! conformance_tests {
                 lists_metadata,
                 lists_indexes,
                 searches_objects,
+                describes_routines,
                 switches_database,
             );
         }

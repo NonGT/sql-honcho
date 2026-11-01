@@ -278,6 +278,35 @@ impl Connection for FakeConnection {
         }
     }
 
+    async fn search_bodies(&mut self, term: &str, limit: usize) -> Result<Vec<ObjectRef>> {
+        let term = term.to_lowercase();
+        let mut out = Vec::new();
+        for db in DATABASES {
+            for o in objects_in(db) {
+                let body = match self.definition(&o).await {
+                    Ok(b) if o.kind.is_routine() => b.to_lowercase(),
+                    _ => continue,
+                };
+                if body.contains(&term) {
+                    out.push(o);
+                }
+            }
+        }
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn parameters(&mut self, routine: &ObjectRef) -> Result<Vec<RoutineParam>> {
+        Ok(match routine.name.as_str() {
+            "order_total" => vec![RoutineParam {
+                name: "p_id".into(),
+                mode: ParamMode::In,
+                data_type: "int".into(),
+            }],
+            _ => vec![],
+        })
+    }
+
     async fn search(&mut self, term: &str, limit: usize) -> Result<Vec<ObjectRef>> {
         let term = term.to_lowercase();
         Ok(DATABASES
@@ -291,10 +320,10 @@ impl Connection for FakeConnection {
     async fn definition(&mut self, object: &ObjectRef) -> Result<String> {
         match (object.kind, object.name.as_str()) {
             (ObjectKind::Procedure, "refresh_stats") => {
-                Ok("CREATE PROCEDURE refresh_stats()\nBEGIN\n  SELECT 1;\nEND".into())
+                Ok("CREATE PROCEDURE refresh_stats()\nBEGIN\n  SELECT COUNT(*) FROM orders;\nEND".into())
             }
             (ObjectKind::Function, "order_total") => {
-                Ok("CREATE FUNCTION order_total(p_id INT) RETURNS DECIMAL(12,2)\nRETURN 0".into())
+                Ok("CREATE FUNCTION order_total(p_id INT) RETURNS DECIMAL(12,2)\nRETURN (SELECT SUM(amount) FROM orders WHERE user_id = p_id)".into())
             }
             _ => Err(DbError::Unsupported("definition for this object")),
         }

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::tunnel::Tunnel;
 use crate::types::{
     Capabilities, ColumnInfo, ConnectConfig, IndexInfo, ObjectKind, ObjectRef, QueryEvent,
-    QueryStats, Scope,
+    QueryStats, RoutineParam, Scope,
 };
 use crate::{Connection, DbError, Driver, Result, ResultSink};
 
@@ -252,6 +252,21 @@ impl Session {
 
     pub async fn indexes(&self, table: ObjectRef) -> Result<Vec<IndexInfo>> {
         self.call(move |c| Box::pin(async move { c.indexes(&table).await }))
+            .await
+    }
+
+    pub async fn search_bodies(
+        &self,
+        term: impl Into<String>,
+        limit: usize,
+    ) -> Result<Vec<ObjectRef>> {
+        let term = term.into();
+        self.call(move |c| Box::pin(async move { c.search_bodies(&term, limit).await }))
+            .await
+    }
+
+    pub async fn parameters(&self, routine: ObjectRef) -> Result<Vec<RoutineParam>> {
+        self.call(move |c| Box::pin(async move { c.parameters(&routine).await }))
             .await
     }
 
