@@ -126,7 +126,7 @@ impl Item {
         match self {
             Item::Connection(_) => "",
             Item::Database(_) => "▤",
-            Item::Group(..) | Item::Columns(_) | Item::Indexes(_) => "▸",
+            Item::Group(..) | Item::Columns(_) | Item::Indexes(_) => "≡",
             Item::Object(o) => match o.kind {
                 ObjectKind::Table => "▦",
                 ObjectKind::View | ObjectKind::MaterializedView => "◫",
@@ -1015,6 +1015,7 @@ impl Render for ObjectBrowser {
                         };
                         div()
                             .id(("row", ix))
+                            .w_full()
                             .h(ROW_HEIGHT)
                             .flex()
                             .items_center()
