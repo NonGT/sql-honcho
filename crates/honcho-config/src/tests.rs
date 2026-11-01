@@ -66,7 +66,7 @@ fn upsert_replaces_by_id() {
 }
 
 #[test]
-fn duplicate_and_remove_carry_the_password() {
+fn duplicate_and_remove() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecrets::default();
     let mut store = ConnectionStore::load(dir.path().join("c.json")).unwrap();
@@ -75,23 +75,24 @@ fn duplicate_and_remove_carry_the_password() {
     store.upsert(a.clone());
     store.upsert(mysql("b"));
 
-    let copy = store.duplicate(&a.id, &secrets).unwrap().unwrap().clone();
+    let copy = store.duplicate(&a.id).unwrap().clone();
     assert_ne!(copy.id, a.id);
     assert_eq!(copy.name, "a copy");
     assert_eq!(copy.host, a.host);
-    assert_eq!(copy.password(&secrets).unwrap().as_deref(), Some("pw"));
     let names: Vec<&str> = store
         .connections()
         .iter()
         .map(|c| c.name.as_str())
         .collect();
     assert_eq!(names, ["a", "a copy", "b"]);
-
-    store.remove(&a.id, &secrets).unwrap().unwrap();
-    assert_eq!(a.password(&secrets).unwrap(), None);
+    assert_eq!(copy.password(&secrets).unwrap(), None);
+    a.copy_password_to(&copy, &secrets).unwrap();
     assert_eq!(copy.password(&secrets).unwrap().as_deref(), Some("pw"));
-    assert!(store.remove("missing", &secrets).unwrap().is_none());
-    assert!(store.duplicate("missing", &secrets).unwrap().is_none());
+
+    assert_eq!(store.remove(&a.id).unwrap().id, a.id);
+    assert_eq!(store.connections().len(), 2);
+    assert!(store.remove("missing").is_none());
+    assert!(store.duplicate("missing").is_none());
 }
 
 #[test]

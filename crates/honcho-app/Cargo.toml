@@ -9,7 +9,9 @@ name = "sql-honcho"
 path = "src/main.rs"
 
 [dependencies]
+honcho-config = { path = "../honcho-config" }
 honcho-core = { path = "../honcho-core" }
+honcho-db = { path = "../honcho-db" }
 
 # runtime_shaders avoids needing Xcode's Metal toolchain; Linux and Windows
 # use gpui's defaults (wayland + x11, DirectX)
@@ -21,4 +23,5 @@ gpui = "0.2.2"
 
 [dev-dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["test-support"] }
+honcho-db = { path = "../honcho-db", features = ["fake"] }
 tempfile = "3"
