@@ -12,8 +12,11 @@ use crate::connection_dialog::{ConnectionDialog, DialogEvent};
 use crate::connections;
 use crate::editor_view::EditorView;
 use crate::find::{self, FindBar};
-use crate::query::{QueryTab, TabEvent};
+use crate::query::{Origin, QueryTab, TabEvent};
+use crate::routine_form::{FormEvent, RoutineForm};
 use crate::theme::{self, EditorFont, Theme, FONT_SIZE};
+use honcho_config::SavedConnection;
+use honcho_db::{ObjectRef, RoutineParam};
 
 actions!(
     workspace,
@@ -43,6 +46,7 @@ pub struct Workspace {
     /// The user already agreed to lose unsaved changes on close.
     discard_confirmed: bool,
     connection_dialog: Option<Entity<ConnectionDialog>>,
+    routine_form: Option<Entity<RoutineForm>>,
     browser: Entity<ObjectBrowser>,
     show_browser: bool,
     /// Pointer x and pane width when dragging the browser's edge began.
@@ -67,6 +71,7 @@ impl Workspace {
             subscriptions: vec![cx.observe(&find, |_, _, cx| cx.notify())],
             discard_confirmed: false,
             connection_dialog: None,
+            routine_form: None,
             show_browser: true,
             browser_drag: None,
             browser,
@@ -169,13 +174,30 @@ impl Workspace {
                     database,
                     text,
                     run,
+                    origin,
                 } => {
                     this.new_tab(text.clone(), None, window, cx);
                     let (saved, database, run) = ((**saved).clone(), database.clone(), *run);
-                    this.active_query_tab()
-                        .clone()
-                        .update(cx, |q, cx| q.open_saved(saved, database, run, cx));
+                    let origin = origin.as_ref().map(|o| Origin {
+                        object: o.0.clone(),
+                        definition: o.1.clone(),
+                    });
+                    this.active_query_tab().clone().update(cx, |q, cx| {
+                        q.origin = origin;
+                        q.open_saved(saved, database, run, cx)
+                    });
                 }
+                BrowserEvent::RunRoutine {
+                    saved,
+                    object,
+                    params,
+                } => this.ask_routine(
+                    (**saved).clone(),
+                    object.clone(),
+                    params.clone(),
+                    window,
+                    cx,
+                ),
                 BrowserEvent::Insert(text) => {
                     let editor = this.active_editor().clone();
                     editor.update(cx, |e, cx| {
@@ -186,6 +208,46 @@ impl Workspace {
                 }
             },
         ));
+    }
+
+    fn ask_routine(
+        &mut self,
+        saved: SavedConnection,
+        object: ObjectRef,
+        params: Vec<RoutineParam>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let form = cx.new(|cx| RoutineForm::new(saved, object, params, window, cx));
+        self.subscriptions.push(cx.subscribe_in(
+            &form,
+            window,
+            |this, _, event: &FormEvent, window, cx| {
+                if let FormEvent::Run {
+                    saved,
+                    database,
+                    sql,
+                } = event
+                {
+                    this.new_tab(sql.clone(), None, window, cx);
+                    let (saved, database) = ((**saved).clone(), database.clone());
+                    this.active_query_tab()
+                        .clone()
+                        .update(cx, |q, cx| q.open_saved(saved, database, true, cx));
+                }
+                this.routine_form = None;
+                let editor = this.active_editor().clone();
+                window.focus(&editor.focus_handle(cx));
+                cx.notify();
+            },
+        ));
+        self.routine_form = Some(form);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn routine_form(&self) -> Option<&Entity<RoutineForm>> {
+        self.routine_form.as_ref()
     }
 
     #[cfg(test)]
@@ -245,6 +307,24 @@ impl Workspace {
             window,
             |this, _, event: &TabEvent, window, cx| match event {
                 TabEvent::NeedConnection => this.open_connections(window, cx),
+                TabEvent::Applied { conn_id, database } => {
+                    if let Some(db) = database {
+                        this.browser
+                            .update(cx, |b, cx| b.reload_database(conn_id, db, cx));
+                    }
+                }
+                TabEvent::RunRoutine {
+                    saved,
+                    object,
+                    params,
+                } => this.ask_routine(
+                    (**saved).clone(),
+                    object.clone(),
+                    params.clone(),
+                    window,
+                    cx,
+                ),
+                TabEvent::OpenScript(text) => this.new_tab(text.clone(), None, window, cx),
             },
         ));
         self.query_tabs.insert(editor.entity_id(), query);
@@ -822,6 +902,7 @@ impl Render for Workspace {
             )
             .child(self.render_status(cx))
             .children(self.connection_dialog.clone())
+            .children(self.routine_form.clone())
     }
 }
 

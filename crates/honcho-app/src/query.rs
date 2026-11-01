@@ -10,7 +10,7 @@ use gpui::{
 use honcho_config::{ColorTag, SavedConnection};
 use honcho_core::{complete, Editor};
 use honcho_db::script;
-use honcho_db::{DbError, DriverKind, MessageLevel, QueryEvent};
+use honcho_db::{DbError, DriverKind, MessageLevel, ObjectRef, QueryEvent, RoutineParam};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{self, Catalog, Catalogs};
@@ -18,6 +18,7 @@ use crate::connection_dialog::color_dot;
 use crate::connections::{self, ActiveConnection};
 use crate::editor_view::{self, CompletionMenu, EditorView};
 use crate::grid::{Format, ResultGrid};
+use crate::routine;
 use crate::theme::{self, Theme};
 
 actions!(
@@ -107,6 +108,27 @@ pub fn target(ed: &Editor, kind: DriverKind, whole: bool) -> Result<Target, &'st
 pub enum TabEvent {
     /// Run was asked for without a connection.
     NeedConnection,
+    /// An Apply went through: the database's objects changed.
+    Applied {
+        conn_id: String,
+        database: Option<String>,
+    },
+    /// Open a new tab with this text.
+    OpenScript(String),
+    /// Ask for a routine's parameter values and run it.
+    RunRoutine {
+        saved: Box<SavedConnection>,
+        object: ObjectRef,
+        params: Vec<RoutineParam>,
+    },
+}
+
+/// The server object a tab's script recreates, and its definition when the
+/// tab got it, to notice someone else changing it meanwhile.
+#[derive(Clone)]
+pub struct Origin {
+    pub object: ObjectRef,
+    pub definition: String,
 }
 
 pub struct OutputMessage {
@@ -190,6 +212,9 @@ pub struct QueryTab {
     catalog: Option<(Entity<Catalog>, Subscription)>,
     /// The run changes the schema; forget the catalog when it's done.
     ddl_running: bool,
+    pub origin: Option<Origin>,
+    /// The current run is an Apply of `origin`.
+    applying: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -224,6 +249,8 @@ impl QueryTab {
             completing: false,
             catalog: None,
             ddl_running: false,
+            origin: None,
+            applying: false,
             _subs: subs,
         }
     }
@@ -356,6 +383,176 @@ impl QueryTab {
             });
             cx.notify();
         });
+    }
+
+    /// Runs the script that replaces `origin`, after checking nobody
+    /// changed it on the server since the tab got it.
+    fn apply_origin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(conn), Some(origin)) = (self.connection.clone(), self.origin.clone()) else {
+            cx.emit(TabEvent::NeedConnection);
+            return;
+        };
+        if self.running.is_some() || self.preparing {
+            return;
+        }
+        let name = routine::qualified(conn.saved.driver, &origin.object);
+        cx.spawn_in(window, async move |this, cx| {
+            let now = conn.session.definition(origin.object.clone()).await;
+            let worry = match &now {
+                Ok(d) if routine::same_definition(d, &origin.definition) => None,
+                Ok(_) => Some(format!("{name} changed on the server since you opened it.")),
+                Err(_) => Some(format!(
+                    "{name} is no longer on the server, or can't be read."
+                )),
+            };
+            if let Some(message) = worry {
+                let Ok(answer) = this.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &message,
+                        Some("Applying replaces whatever is there now with this script."),
+                        // Cancel first so Enter doesn't confirm by reflex
+                        &["Cancel", "Apply anyway"],
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                if answer.await != Ok(1) {
+                    return;
+                }
+            }
+            // where the script has to drop first, make sure its CREATE
+            // works before anything is dropped
+            let Ok(script) = this.update(cx, |this, cx| this.editor.read(cx).editor.text()) else {
+                return;
+            };
+            if let Some((create, drop)) = routine::trial(conn.saved.driver, &origin.object, &script)
+            {
+                if let Err(e) = run_to_end(&conn.session, create).await {
+                    this.update(cx, |this, cx| {
+                        this.say(
+                            MessageLevel::Error,
+                            &format!(
+                                "This script wouldn't create {name}, so nothing was dropped: {e}"
+                            ),
+                            None,
+                        );
+                        if definer_refused(&e) {
+                            this.note(DEFINER_HINT);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                let _ = run_to_end(&conn.session, drop).await;
+            }
+            this.update(cx, |this, cx| {
+                let kind = this.kind().unwrap_or(DriverKind::MySql);
+                if let Ok(t) = target(&this.editor.read(cx).editor, kind, true) {
+                    this.applying = true;
+                    this.run(t, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After an Apply: remember the new definition as the one opened, and
+    /// let the browser refresh.
+    fn applied(&mut self, cx: &mut Context<Self>) {
+        let (Some(conn), Some(origin)) = (self.connection.clone(), self.origin.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let now = conn.session.definition(origin.object.clone()).await;
+            this.update(cx, |this, cx| {
+                if let (Ok(def), Some(o)) = (now, &mut this.origin) {
+                    o.definition = def;
+                }
+                this.say(MessageLevel::Info, "Applied.", None);
+                cx.emit(TabEvent::Applied {
+                    conn_id: conn.saved.id.clone(),
+                    database: origin.object.database.clone(),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// MySQL can't roll back DDL: when an Apply dropped the object and then
+    /// failed to create it, put the original back.
+    fn apply_failed(&mut self, error: &DbError, cx: &mut Context<Self>) {
+        let (Some(conn), Some(origin)) = (self.connection.clone(), self.origin.clone()) else {
+            return;
+        };
+        if definer_refused(error) {
+            self.note(DEFINER_HINT);
+        }
+        let kind = conn.saved.driver;
+        let name = routine::qualified(kind, &origin.object);
+        let restore = routine::restore_script(kind, &origin.object, &origin.definition);
+        cx.spawn(async move |this, cx| {
+            if conn.session.definition(origin.object.clone()).await.is_ok() {
+                // still there: nothing was lost
+                return;
+            }
+            let mut handle = conn.session.execute(restore.clone());
+            let mut put_back = false;
+            while let Some(event) = handle.next().await {
+                if let QueryEvent::Finished(r) = event {
+                    put_back = r.is_ok();
+                }
+            }
+            this.update(cx, |this, cx| {
+                if put_back {
+                    this.say(
+                        MessageLevel::Warning,
+                        &format!("Apply failed, so the original {name} was put back."),
+                        None,
+                    );
+                } else {
+                    this.say(
+                        MessageLevel::Error,
+                        &format!(
+                            "Apply failed and {name} couldn't be put back. \
+                             Its original definition is in a new tab."
+                        ),
+                        None,
+                    );
+                    cx.emit(TabEvent::OpenScript(restore));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn ask_to_run(&mut self, cx: &mut Context<Self>) {
+        let (Some(conn), Some(origin)) = (self.connection.clone(), self.origin.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let params = conn
+                .session
+                .parameters(origin.object.clone())
+                .await
+                .unwrap_or_default();
+            this.update(cx, |_, cx| {
+                cx.emit(TabEvent::RunRoutine {
+                    saved: Box::new(conn.saved.clone()),
+                    object: origin.object,
+                    params,
+                })
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn set_connection(&mut self, conn: ActiveConnection, cx: &mut Context<Self>) {
@@ -620,8 +817,14 @@ impl QueryTab {
                 if std::mem::take(&mut self.ddl_running) {
                     self.forget_schema(cx);
                 }
+                if std::mem::take(&mut self.applying) {
+                    self.applied(cx);
+                }
             }
             QueryEvent::Finished(Err(e)) => {
+                if std::mem::take(&mut self.applying) {
+                    self.apply_failed(&e, cx);
+                }
                 let line = match &e {
                     DbError::Query { line: Some(l), .. } | DbError::ReadOnly { line: l, .. } => {
                         Some(first_line + l - 1)
@@ -936,15 +1139,43 @@ impl QueryTab {
                         .on_click(cx.listener(|this, _, _, cx| this.reconnect(cx))),
                 )
         } else {
-            div().flex().items_center().gap_1().child(
-                chip("tab-run")
-                    .border_1()
-                    .border_color(Theme::border())
-                    .child("▶ Run")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.run_action(false, window, cx)),
-                    ),
-            )
+            let routine = self
+                .origin
+                .as_ref()
+                .is_some_and(|o| o.object.kind.is_routine());
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .when(self.origin.is_some(), |d| {
+                    d.child(
+                        chip("tab-apply")
+                            .border_1()
+                            .border_color(Theme::accent())
+                            .child("Apply")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.apply_origin(window, cx)),
+                            ),
+                    )
+                })
+                .when(routine, |d| {
+                    d.child(
+                        chip("tab-call")
+                            .border_1()
+                            .border_color(Theme::border())
+                            .child("Run…")
+                            .on_click(cx.listener(|this, _, _, cx| this.ask_to_run(cx))),
+                    )
+                })
+                .child(
+                    chip("tab-run")
+                        .border_1()
+                        .border_color(Theme::border())
+                        .child("▶ Run")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.run_action(false, window, cx)),
+                        ),
+                )
         };
 
         div()
@@ -965,7 +1196,14 @@ impl QueryTab {
                     .items_center()
                     .gap_1()
                     .child(connection)
-                    .children(database),
+                    .children(database)
+                    .children(self.origin.as_ref().map(|o| {
+                        let kind = self.kind().unwrap_or(DriverKind::MySql);
+                        div()
+                            .pl_2()
+                            .text_color(Theme::muted())
+                            .child(format!("editing {}", routine::qualified(kind, &o.object)))
+                    })),
             )
             .child(right)
     }
@@ -1247,6 +1485,11 @@ impl QueryTab {
     }
 
     #[cfg(test)]
+    pub fn apply_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_origin(window, cx);
+    }
+
+    #[cfg(test)]
     pub fn catalog_for_test(&self) -> Option<Entity<Catalog>> {
         self.catalog.as_ref().map(|(c, _)| c.clone())
     }
@@ -1311,6 +1554,25 @@ impl QueryTab {
                     )
             }))
     }
+}
+
+const DEFINER_HINT: &str = "The DEFINER clause names another user, which takes extra \
+                            privileges. Remove it to create the routine as yourself.";
+
+/// MySQL's "you need SUPER or SET_USER_ID" for a DEFINER naming someone else.
+fn definer_refused(e: &DbError) -> bool {
+    matches!(e, DbError::Query { code: Some(c), .. } if c == "1227")
+}
+
+async fn run_to_end(session: &honcho_db::Session, sql: String) -> Result<(), DbError> {
+    let mut handle = session.execute(sql);
+    let mut result = Ok(());
+    while let Some(event) = handle.next().await {
+        if let QueryEvent::Finished(r) = event {
+            result = r.map(|_| ());
+        }
+    }
+    result
 }
 
 /// Statements after which the catalog is out of date.

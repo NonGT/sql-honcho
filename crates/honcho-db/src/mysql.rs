@@ -346,6 +346,66 @@ impl Connection for MySqlConnection {
             .collect())
     }
 
+    async fn search_bodies(&mut self, term: &str, limit: usize) -> Result<Vec<ObjectRef>> {
+        let pattern = format!("%{}%", like_escape(term));
+        let rows: Vec<(String, String, String)> = self
+            .conn()?
+            .exec(
+                "SELECT routine_schema, routine_name, routine_type \
+                 FROM information_schema.routines \
+                 WHERE LOWER(routine_definition) LIKE LOWER(?) \
+                 ORDER BY 1, 2 LIMIT ?",
+                (&pattern, limit as u64),
+            )
+            .await
+            .map_err(query_error)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(db, name, ty)| {
+                let kind = match ty.as_str() {
+                    "PROCEDURE" => ObjectKind::Procedure,
+                    "FUNCTION" => ObjectKind::Function,
+                    _ => return None,
+                };
+                Some(ObjectRef::new(kind, name).in_database(db))
+            })
+            .collect())
+    }
+
+    async fn parameters(&mut self, routine: &ObjectRef) -> Result<Vec<RoutineParam>> {
+        let db = self.database_or_current(&routine.database).await?;
+        let routine_type = match routine.kind {
+            ObjectKind::Procedure => "PROCEDURE",
+            ObjectKind::Function => "FUNCTION",
+            _ => return Err(DbError::Unsupported("parameters of this object")),
+        };
+        let rows: Vec<(Option<String>, Option<String>, String)> = self
+            .conn()?
+            .exec(
+                // position 0 is a function's return value
+                "SELECT parameter_name, parameter_mode, dtd_identifier \
+                 FROM information_schema.parameters \
+                 WHERE specific_schema = ? AND specific_name = ? AND routine_type = ? \
+                   AND ordinal_position > 0 \
+                 ORDER BY ordinal_position",
+                (&db, &routine.name, routine_type),
+            )
+            .await
+            .map_err(query_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, mode, data_type)| RoutineParam {
+                name: name.unwrap_or_default(),
+                mode: match mode.as_deref() {
+                    Some("OUT") => ParamMode::Out,
+                    Some("INOUT") => ParamMode::InOut,
+                    _ => ParamMode::In,
+                },
+                data_type,
+            })
+            .collect())
+    }
+
     async fn definition(&mut self, object: &ObjectRef) -> Result<String> {
         let (show, column) = match object.kind {
             ObjectKind::Table => ("TABLE", 1),

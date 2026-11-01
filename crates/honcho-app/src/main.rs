@@ -8,6 +8,8 @@ mod grid;
 mod keymap;
 mod prompt;
 mod query;
+mod routine;
+mod routine_form;
 #[cfg(test)]
 mod tests;
 mod theme;

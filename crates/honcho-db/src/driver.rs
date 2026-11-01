@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use crate::script::Statement;
 use crate::types::{
-    Capabilities, ColumnInfo, ConnectConfig, DriverKind, IndexInfo, ObjectKind, ObjectRef, Scope,
+    Capabilities, ColumnInfo, ConnectConfig, DriverKind, IndexInfo, ObjectKind, ObjectRef,
+    RoutineParam, Scope,
 };
 use crate::{Result, ResultSink};
 
@@ -66,6 +67,17 @@ pub trait Connection: Send {
     /// haven't been loaded.
     async fn search(&mut self, _term: &str, _limit: usize) -> Result<Vec<ObjectRef>> {
         Err(crate::DbError::Unsupported("search"))
+    }
+
+    /// Routines whose code contains `term`, case-insensitive: which
+    /// procedures touch a table, say.
+    async fn search_bodies(&mut self, _term: &str, _limit: usize) -> Result<Vec<ObjectRef>> {
+        Err(crate::DbError::Unsupported("searching routine bodies"))
+    }
+
+    /// A routine's parameters in order; a function's return value isn't one.
+    async fn parameters(&mut self, _routine: &ObjectRef) -> Result<Vec<RoutineParam>> {
+        Err(crate::DbError::Unsupported("routine parameters"))
     }
 
     /// Source of a view or routine, as a script that recreates it.

@@ -13,6 +13,7 @@ use crate::editor_view::*;
 use crate::find::*;
 use crate::grid::*;
 use crate::query::*;
+use crate::routine_form::*;
 use crate::workspace::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +87,9 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
             ("enter", EnterInCompletion, COMPLETING),
             ("tab", AcceptCompletion, COMPLETING),
             ("escape", DismissCompletion, COMPLETING),
+            ("enter", RunRoutineNow, Some("RoutineParam")),
+            ("tab", NextParam, Some("RoutineParam")),
+            ("shift-tab", PrevParam, Some("RoutineParam")),
             ("tab", NextField, CONNECTION_FIELD),
             ("shift-tab", PrevField, CONNECTION_FIELD),
             ("up", CellUp, RESULT_GRID),

@@ -1204,3 +1204,108 @@ fn browser_edge_drags_to_resize(cx: &mut TestAppContext) {
     });
     assert_eq!(width(cx), crate::browser::DEFAULT_WIDTH);
 }
+
+fn open_routine(ws: &Entity<Workspace>, cx: &mut VisualTestContext, name: &str, group: &str) {
+    connect_fake(ws, cx, None);
+    browse(ws, cx, "fake db");
+    browse(ws, cx, "app");
+    browse(ws, cx, group);
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.act(name, "definition", cx));
+    wait_until(cx, |cx| {
+        ws.read_with(cx, |ws, cx| {
+            ws.tab_count() == 2 && ws.active_connection(cx).is_some()
+        })
+    });
+}
+
+#[gpui::test]
+fn routines_open_as_scripts_that_replace_them(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    open_routine(&ws, cx, "refresh_stats", "Procedures (1)");
+    let t = text(&ws, cx);
+    assert!(
+        t.starts_with(
+            "DROP PROCEDURE IF EXISTS `app`.`refresh_stats`;\nDELIMITER //\nCREATE PROCEDURE"
+        ),
+        "{t}"
+    );
+    let q = query_tab(&ws, cx);
+    assert!(q.read_with(cx, |q, _| q.origin.is_some()));
+
+    // the fake can't run this CREATE, which stands in for a script that
+    // would fail: Apply stops before dropping anything
+    q.update_in(cx, |q, window, cx| q.apply_for_test(window, cx));
+    wait_until(cx, |cx| {
+        q.read_with(cx, |q, _| {
+            q.output_text()
+                .iter()
+                .any(|m| m.contains("so nothing was dropped"))
+        })
+    });
+    assert!(!q.read_with(cx, |q, _| q.is_running()));
+}
+
+#[gpui::test]
+fn apply_warns_when_the_server_copy_changed(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    open_routine(&ws, cx, "refresh_stats", "Procedures (1)");
+    let q = query_tab(&ws, cx);
+    // as if someone changed it after this tab opened it
+    q.update(cx, |q, _| {
+        q.origin.as_mut().unwrap().definition = "CREATE PROCEDURE refresh_stats() SELECT 2".into()
+    });
+    q.update_in(cx, |q, window, cx| q.apply_for_test(window, cx));
+    wait_until(cx, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert_eq!(
+        q.read_with(cx, |q, _| q.output_text()),
+        Vec::<String>::new()
+    );
+}
+
+#[gpui::test]
+fn run_form_builds_the_call(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    browse(&ws, cx, "Functions (1)");
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.act("order_total", "run", cx));
+    wait_until(cx, |cx| {
+        ws.read_with(cx, |ws, _| ws.routine_form().is_some())
+    });
+    let form = ws.read_with(cx, |ws, _| ws.routine_form().unwrap().clone());
+    form.update(cx, |f, cx| f.set_value(0, "7", cx));
+    assert_eq!(
+        form.read_with(cx, |f, cx| f.sql(cx)),
+        "SELECT `app`.`order_total`(7) AS `order_total`;\n"
+    );
+    press(cx, "enter");
+    wait_until(cx, |cx| ws.read_with(cx, |ws, _| ws.tab_count() == 2));
+    assert_eq!(
+        text(&ws, cx),
+        "SELECT `app`.`order_total`(7) AS `order_total`;\n"
+    );
+    assert!(ws.read_with(cx, |ws, _| ws.routine_form().is_none()));
+}
+
+#[gpui::test]
+fn filter_searches_routine_bodies(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "fake db");
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.set_filter("body:orders", cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    wait_until(cx, |cx| {
+        b.read_with(cx, |b, _| {
+            let l = b.labels();
+            l.iter().any(|x| x.trim() == "refresh_stats")
+                && l.iter().any(|x| x.trim() == "order_total")
+        })
+    });
+}

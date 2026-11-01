@@ -12,12 +12,13 @@ use gpui::{
 };
 use honcho_config::SavedConnection;
 use honcho_db::{
-    ColumnInfo, DbError, DriverKind, IndexInfo, ObjectKind, ObjectRef, Scope, Session,
+    ColumnInfo, DbError, DriverKind, IndexInfo, ObjectKind, ObjectRef, RoutineParam, Scope, Session,
 };
 
 use crate::connection_dialog::color_dot;
 use crate::connections::{self, Connections};
 use crate::editor_view::{self, EditorView};
+use crate::routine::{self, ident, qualified};
 use crate::theme::{self, Theme};
 
 actions!(browser, [ToggleBrowser]);
@@ -43,11 +44,19 @@ type Path = Vec<String>;
 
 pub enum BrowserEvent {
     /// Open a tab with `text` on this connection, and run it when `run`.
+    /// `origin` is the object the text recreates, with its definition then.
     Open {
         saved: Box<SavedConnection>,
         database: Option<String>,
         text: String,
         run: bool,
+        origin: Option<Box<(ObjectRef, String)>>,
+    },
+    /// Ask for a routine's parameter values and run it.
+    RunRoutine {
+        saved: Box<SavedConnection>,
+        object: ObjectRef,
+        params: Vec<RoutineParam>,
     },
     /// Put text into the current editor.
     Insert(String),
@@ -573,7 +582,12 @@ impl ObjectBrowser {
             let mut results = HashMap::new();
             let mut dropped = Vec::new();
             for (id, session) in sessions {
-                match session.search(query.clone(), SEARCH_LIMIT).await {
+                // `body:term` looks inside routine code instead of at names
+                let found = match query.strip_prefix("body:") {
+                    Some(term) => session.search_bodies(term.trim(), SEARCH_LIMIT).await,
+                    None => session.search(query.clone(), SEARCH_LIMIT).await,
+                };
+                match found {
                     Ok(found) => {
                         results.insert(id, found);
                     }
@@ -668,7 +682,62 @@ impl ObjectBrowser {
             database: object.database.clone(),
             text,
             run: true,
+            origin: None,
         });
+    }
+
+    /// Asks for the routine's parameters, then for their values.
+    fn run_routine(&mut self, path: &Path, object: &ObjectRef, cx: &mut Context<Self>) {
+        let (Some(saved), Some(session)) = (
+            self.conn_of(path, cx),
+            path.first()
+                .and_then(|c| self.session(c.trim_start_matches("c:"))),
+        ) else {
+            return;
+        };
+        let object = object.clone();
+        cx.spawn(async move |this, cx| {
+            let params = session.parameters(object.clone()).await.unwrap_or_default();
+            this.update(cx, |_, cx| {
+                cx.emit(BrowserEvent::RunRoutine {
+                    saved: Box::new(saved),
+                    object,
+                    params,
+                })
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Fetches a database's objects again after something was applied,
+    /// leaving the tree as it is until the new list arrives.
+    pub fn reload_database(&mut self, conn_id: &str, database: &str, cx: &mut Context<Self>) {
+        let path = vec![format!("c:{conn_id}"), format!("d:{database}")];
+        let (Some(session), Some(Children::Loaded(_))) =
+            (self.session(conn_id), self.children.get(&path))
+        else {
+            return;
+        };
+        let item = Item::Database(database.to_string());
+        cx.spawn(async move |this, cx| {
+            let Ok(Fetched::Database(groups)) = fetch(&session, &item).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                let mut items = Vec::new();
+                for (group, objects) in groups {
+                    let mut p = path.clone();
+                    p.push(group.segment());
+                    items.push(group);
+                    this.children.insert(p, Children::Loaded(objects));
+                }
+                this.children.insert(path, Children::Loaded(items));
+                this.rebuild(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn open_definition(&mut self, path: &Path, object: &ObjectRef, cx: &mut Context<Self>) {
@@ -683,15 +752,22 @@ impl ObjectBrowser {
         cx.spawn(async move |this, cx| {
             let result = session.definition(object.clone()).await;
             this.update(cx, |_, cx| {
-                let text = match result {
-                    Ok(def) => script_for(saved.driver, &object, &def),
-                    Err(e) => format!("-- couldn't read the definition of {}: {e}\n", object.name),
+                let (text, origin) = match result {
+                    Ok(def) => (
+                        routine::script(saved.driver, &object, &def),
+                        routine::editable(&object).then(|| Box::new((object.clone(), def))),
+                    ),
+                    Err(e) => (
+                        format!("-- couldn't read the definition of {}: {e}\n", object.name),
+                        None,
+                    ),
                 };
                 cx.emit(BrowserEvent::Open {
                     saved: Box::new(saved),
                     database: object.database.clone(),
                     text,
                     run: false,
+                    origin,
                 });
             })
             .ok();
@@ -757,6 +833,7 @@ impl ObjectBrowser {
             (MenuAction::Refresh, _) => self.refresh(path, item.clone(), cx),
             (MenuAction::SelectTop, Item::Object(o)) => self.select_top(&path, o, cx),
             (MenuAction::Definition, Item::Object(o)) => self.open_definition(&path, o, cx),
+            (MenuAction::Run, Item::Object(o)) => self.run_routine(&path, o, cx),
             (MenuAction::Template(t), Item::Object(o)) => self.template(&path, o, t, cx),
             (MenuAction::CopyName, Item::Object(o)) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(qualified(kind, o)))
@@ -775,6 +852,7 @@ impl ObjectBrowser {
                         database,
                         text: String::new(),
                         run: false,
+                        origin: None,
                     });
                 }
             }
@@ -851,6 +929,25 @@ impl ObjectBrowser {
             self.default_action(&row.path, &row.item, cx);
         } else {
             self.toggle(row.path, row.item, cx);
+        }
+    }
+
+    /// A right-click action on the row with this label: "definition" or "run".
+    #[cfg(test)]
+    pub fn act(&mut self, label: &str, what: &str, cx: &mut Context<Self>) {
+        let row = self
+            .rows
+            .iter()
+            .find(|r| r.item.label() == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("no row {label}"));
+        let Item::Object(o) = &row.item else {
+            panic!("{label} isn't an object");
+        };
+        match what {
+            "definition" => self.open_definition(&row.path, o, cx),
+            "run" => self.run_routine(&row.path, o, cx),
+            other => panic!("no action {other}"),
         }
     }
 
@@ -994,6 +1091,7 @@ enum MenuAction {
     CopyName,
     Template(Template),
     NewQuery,
+    Run,
 }
 
 fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
@@ -1011,46 +1109,14 @@ fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
             ("UPDATE template", Template(self::Template::Update)),
             ("Refresh", Refresh),
         ],
+        Item::Object(o) if o.kind.is_routine() => vec![
+            ("Open definition", Definition),
+            ("Run…", Run),
+            ("Copy name", CopyName),
+        ],
         Item::Object(_) => vec![("Open definition", Definition), ("Copy name", CopyName)],
         Item::Column(_) | Item::Index(_) => vec![("Copy name", CopyName)],
         _ => vec![("Refresh", Refresh)],
-    }
-}
-
-fn ident(kind: DriverKind, name: &str) -> String {
-    match kind {
-        DriverKind::SqlServer => format!("[{}]", name.replace(']', "]]")),
-        DriverKind::Postgres | DriverKind::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
-        _ => format!("`{}`", name.replace('`', "``")),
-    }
-}
-
-fn qualified(kind: DriverKind, o: &ObjectRef) -> String {
-    [
-        o.database.as_deref(),
-        o.schema.as_deref(),
-        Some(o.name.as_str()),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|part| ident(kind, part))
-    .collect::<Vec<_>>()
-    .join(".")
-}
-
-/// A definition as a script that runs: routines and triggers have
-/// semicolons inside, so they go between DELIMITER lines.
-fn script_for(kind: DriverKind, o: &ObjectRef, definition: &str) -> String {
-    let body = definition.trim_end().trim_end_matches(';');
-    let needs_delimiter = kind == DriverKind::MySql
-        && matches!(
-            o.kind,
-            ObjectKind::Procedure | ObjectKind::Function | ObjectKind::Trigger
-        );
-    if needs_delimiter {
-        format!("DELIMITER //\n{body} //\nDELIMITER ;\n")
-    } else {
-        format!("{body};\n")
     }
 }
 
@@ -1382,34 +1448,6 @@ mod tests {
         assert_eq!(
             update,
             "UPDATE `app`.`users`\nSET `email` = NULL -- varchar(255)\nWHERE `id` = NULL;\n"
-        );
-    }
-
-    #[test]
-    fn definitions_become_scripts() {
-        let p = ObjectRef::new(ObjectKind::Procedure, "p").in_database("app");
-        assert_eq!(
-            script_for(
-                DriverKind::MySql,
-                &p,
-                "CREATE PROCEDURE p() BEGIN SELECT 1; END"
-            ),
-            "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; END //\nDELIMITER ;\n"
-        );
-        let v = ObjectRef::new(ObjectKind::View, "v");
-        assert_eq!(
-            script_for(DriverKind::MySql, &v, "CREATE VIEW v AS SELECT 1"),
-            "CREATE VIEW v AS SELECT 1;\n"
-        );
-    }
-
-    #[test]
-    fn quoting() {
-        let o = ObjectRef::new(ObjectKind::Table, "we`ird").in_database("app");
-        assert_eq!(qualified(DriverKind::MySql, &o), "`app`.`we``ird`");
-        assert_eq!(
-            qualified(DriverKind::Postgres, &o.clone().in_schema("s")),
-            "\"app\".\"s\".\"we`ird\""
         );
     }
 }
