@@ -1053,14 +1053,19 @@ fn tree_reconnects_when_its_session_drops(cx: &mut TestAppContext) {
     browse(&ws, cx, "app");
     browse(&ws, cx, "Tables (2)");
     browse(&ws, cx, "orders");
+    let before = browser_labels(&ws, cx);
     drop_browser_session(&ws, cx);
 
-    browse(&ws, cx, "Columns");
     let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.click("Columns", false, cx));
+    // the tree doesn't fold up and reload while the session reopens: every
+    // row that was there stays there throughout
     wait_until(cx, |cx| {
-        b.read_with(cx, |b, _| {
-            b.is_idle() && b.labels().iter().any(|l| l.trim() == "amount")
-        })
+        let labels = b.read_with(cx, |b, _| b.labels());
+        for row in &before {
+            assert!(labels.contains(row), "{row} went away: {labels:?}");
+        }
+        b.read_with(cx, |b, _| b.is_idle()) && labels.iter().any(|l| l.trim() == "amount")
     });
     assert!(
         browser_notes(&ws, cx).is_empty(),
