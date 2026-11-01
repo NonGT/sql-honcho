@@ -35,6 +35,7 @@ actions!(
         SelectAllCells,
         CopyCells,
         OpenCell,
+        CloseViewer,
     ]
 );
 
@@ -640,7 +641,9 @@ impl ResultGrid {
             v => v.display(usize::MAX).into_owned(),
         };
         let viewer = cx.new(|cx| EditorView::new(&text, None, 0, cx));
-        window.focus(&viewer.focus_handle(cx));
+        // after this click is done, or the grid takes focus back
+        let handle = viewer.focus_handle(cx);
+        window.defer(cx, move |window, _| window.focus(&handle));
         self.viewer = Some(viewer);
         cx.notify();
     }
@@ -775,6 +778,9 @@ impl Render for ResultGrid {
             .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all(cx)))
             .on_action(cx.listener(|this, _: &CopyCells, _, cx| this.copy_as(Format::Tsv, cx)))
             .on_action(cx.listener(|this, _: &OpenCell, window, cx| this.open_cell(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &CloseViewer, window, cx| this.close_viewer(window, cx)),
+            )
             .child(GridElement { grid: cx.entity() })
             .children(viewer)
     }
