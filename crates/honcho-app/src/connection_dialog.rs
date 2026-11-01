@@ -1152,7 +1152,7 @@ impl Render for ConnectionDialog {
         let ssh_toggle = checkbox(
             "ssh-on",
             "Connect through SSH",
-            "the database host is as the SSH server sees it",
+            "Host on General is as the SSH server sees it",
             ssh_on,
         )
         .on_click(cx.listener(move |this, _, _, cx| this.set_ssh(!ssh_on, cx)));
@@ -1233,7 +1233,7 @@ impl Render for ConnectionDialog {
                         d.child(
                             row()
                                 .child(field("SSH host", &self.fields.ssh_host, None).flex_1())
-                                .child(field("Port", &self.fields.ssh_port, Some(70.))),
+                                .child(field("Port", &self.fields.ssh_port, Some(84.))),
                         )
                         .child(field("SSH user", &self.fields.ssh_user, None))
                         .child(row().child(label("Auth")).child(auths))
