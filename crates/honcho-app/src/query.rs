@@ -19,7 +19,19 @@ use crate::editor_view::EditorView;
 use crate::grid::{Format, ResultGrid};
 use crate::theme::{self, Theme};
 
-actions!(query, [RunStatement, RunAll, CancelQuery, TogglePanel]);
+actions!(
+    query,
+    [
+        RunStatement,
+        RunAll,
+        CancelQuery,
+        TogglePanel,
+        CloseDatabases,
+        PrevDatabase,
+        NextDatabase,
+        PickDatabase,
+    ]
+);
 
 const PANEL_HEIGHT: Pixels = px(260.);
 const PANEL_MIN: Pixels = px(80.);
@@ -120,6 +132,23 @@ impl Output {
     }
 }
 
+/// What to do once a reconnect succeeds.
+enum After {
+    /// Pressed Reconnect.
+    Manual,
+    /// The connection dropped mid-query, which isn't run again.
+    CutOff,
+    /// A run that was never sent.
+    Run(Target),
+    /// The database list that failed to load.
+    Databases,
+    /// Switching databases; the new session opens on it already.
+    UseDatabase,
+}
+
+const RECONNECTED: &str = "The server had closed the connection. Reconnected; \
+                           session variables and temporary tables start fresh.";
+
 struct Running {
     started: Instant,
     cancel: CancellationToken,
@@ -133,6 +162,11 @@ pub struct QueryTab {
     pub connection: Option<ActiveConnection>,
     pub database: Option<String>,
     databases: Option<Vec<String>>,
+    /// Highlighted row in the open database list.
+    database_ix: usize,
+    database_focus: FocusHandle,
+    /// Focus the database list on the next render; it opens after an await.
+    focus_databases: bool,
     running: Option<Running>,
     pub output: Option<Output>,
     /// Why the connection is gone, when it is.
@@ -163,6 +197,9 @@ impl QueryTab {
             connection: None,
             database: None,
             databases: None,
+            database_ix: 0,
+            database_focus: cx.focus_handle(),
+            focus_databases: false,
             running: None,
             output: None,
             lost: None,
@@ -323,7 +360,7 @@ impl QueryTab {
             if self.lost.is_some() {
                 self.output = Some(Output::default());
                 self.preparing = true;
-                self.reconnect_then(Some(target), cx);
+                self.reconnect_then(After::Run(target), cx);
                 return;
             }
             // The server drops idle connections (wait_timeout and the like).
@@ -337,7 +374,7 @@ impl QueryTab {
                     Err(DbError::ConnectionLost(reason)) => {
                         this.lost = Some(reason);
                         this.output = Some(Output::default());
-                        this.reconnect_then(Some(target), cx);
+                        this.reconnect_then(After::Run(target), cx);
                     }
                     _ => {
                         this.preparing = false;
@@ -468,7 +505,7 @@ impl QueryTab {
                     self.lost = Some(reason.clone());
                     if self.auto_reconnect() {
                         // not run again: it may have done part of its work
-                        self.reconnect_then(None, cx);
+                        self.reconnect_then(After::CutOff, cx);
                     }
                 }
             }
@@ -483,12 +520,12 @@ impl QueryTab {
     }
 
     fn reconnect(&mut self, cx: &mut Context<Self>) {
-        self.reconnect_then(None, cx);
+        self.reconnect_then(After::Manual, cx);
     }
 
     /// Opens a new session, then runs `then` if given. Runs that waited on
     /// this were never sent, so running them now can't repeat anything.
-    fn reconnect_then(&mut self, then: Option<Target>, cx: &mut Context<Self>) {
+    fn reconnect_then(&mut self, then: After, cx: &mut Context<Self>) {
         let Some(saved) = self.connection.as_ref().map(|c| c.saved.clone()) else {
             self.preparing = false;
             return;
@@ -529,18 +566,21 @@ impl QueryTab {
                     Ok(session) => {
                         this.set_connection(ActiveConnection { saved, session }, cx);
                         match then {
-                            Some(target) => {
+                            After::Run(target) => {
                                 this.start(target, cx);
-                                this.note(
-                                    "The server had closed the connection. Reconnected; \
-                                     session variables and temporary tables start fresh.",
-                                );
+                                this.note(RECONNECTED);
                             }
-                            None => this.say(
+                            After::CutOff => this.say(
                                 MessageLevel::Info,
                                 "Reconnected. The query that was cut off wasn't run again.",
                                 None,
                             ),
+                            After::Manual => this.say(MessageLevel::Info, "Reconnected.", None),
+                            After::Databases => {
+                                this.note(RECONNECTED);
+                                this.load_databases(cx);
+                            }
+                            After::UseDatabase => this.note(RECONNECTED),
                         }
                     }
                     Err(e) => this.say(
@@ -556,11 +596,15 @@ impl QueryTab {
         .detach();
     }
 
-    fn toggle_databases(&mut self, cx: &mut Context<Self>) {
-        if self.databases.take().is_some() {
-            cx.notify();
-            return;
+    fn toggle_databases(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.databases.is_some() {
+            self.close_databases(window, cx);
+        } else {
+            self.load_databases(cx);
         }
+    }
+
+    fn load_databases(&mut self, cx: &mut Context<Self>) {
         let Some(conn) = &self.connection else {
             return;
         };
@@ -569,7 +613,20 @@ impl QueryTab {
             let result = session.databases().await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(dbs) => this.databases = Some(dbs),
+                    Ok(dbs) => {
+                        this.database_ix = this
+                            .database
+                            .as_ref()
+                            .and_then(|d| dbs.iter().position(|x| x == d))
+                            .unwrap_or(0);
+                        this.databases = Some(dbs);
+                        this.focus_databases = true;
+                    }
+                    // listing is a read, so asking again on a new session is safe
+                    Err(DbError::ConnectionLost(reason)) if this.auto_reconnect() => {
+                        this.lost = Some(reason);
+                        this.reconnect_then(After::Databases, cx);
+                    }
                     Err(e) => this.say(MessageLevel::Error, &e.to_string(), None),
                 }
                 cx.notify();
@@ -579,8 +636,22 @@ impl QueryTab {
         .detach();
     }
 
-    fn use_database(&mut self, name: String, cx: &mut Context<Self>) {
+    fn close_databases(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.databases = None;
+        window.focus(&self.editor.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn move_database(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(dbs) = &self.databases {
+            let last = dbs.len().saturating_sub(1) as isize;
+            self.database_ix = (self.database_ix as isize + delta).clamp(0, last) as usize;
+            cx.notify();
+        }
+    }
+
+    fn pick_database(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_databases(window, cx);
         let Some(conn) = &self.connection else {
             return;
         };
@@ -590,6 +661,12 @@ impl QueryTab {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(()) => this.database = Some(name),
+                    Err(DbError::ConnectionLost(reason)) if this.auto_reconnect() => {
+                        // the new session opens on the chosen database
+                        this.database = Some(name);
+                        this.lost = Some(reason);
+                        this.reconnect_then(After::UseDatabase, cx);
+                    }
                     Err(e) => this.say(MessageLevel::Error, &e.to_string(), None),
                 }
                 cx.notify();
@@ -597,7 +674,6 @@ impl QueryTab {
             .ok();
         })
         .detach();
-        cx.notify();
     }
 
     fn jump_to_line(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
@@ -652,7 +728,7 @@ impl QueryTab {
                         .unwrap_or_else(|| "no database".into()),
                 )
                 .child("▾")
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_databases(cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_databases(window, cx)))
         });
 
         let right = if let Some(r) = &self.running {
@@ -732,9 +808,11 @@ impl QueryTab {
 
     fn render_databases(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let dbs = self.databases.as_ref()?;
-        Some(
+        let list =
             div()
                 .id("database-list")
+                .key_context("DatabaseList")
+                .track_focus(&self.database_focus)
                 .absolute()
                 .top(px(30.))
                 .left(px(120.))
@@ -748,21 +826,46 @@ impl QueryTab {
                 .rounded_md()
                 .shadow_lg()
                 .occlude()
-                .children(dbs.iter().cloned().map(|db| {
+                .on_action(cx.listener(|this, _: &CloseDatabases, window, cx| {
+                    this.close_databases(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &PrevDatabase, _, cx| this.move_database(-1, cx)))
+                .on_action(cx.listener(|this, _: &NextDatabase, _, cx| this.move_database(1, cx)))
+                .on_action(cx.listener(|this, _: &PickDatabase, window, cx| {
+                    let name = this
+                        .databases
+                        .as_ref()
+                        .and_then(|d| d.get(this.database_ix).cloned());
+                    if let Some(name) = name {
+                        this.pick_database(name, window, cx);
+                    }
+                }))
+                .children(dbs.iter().cloned().enumerate().map(|(ix, db)| {
                     let current = self.database.as_deref() == Some(db.as_str());
                     div()
                         .id(SharedString::from(format!("db-{db}")))
                         .px_3()
                         .py_0p5()
                         .cursor_pointer()
+                        .when(ix == self.database_ix, |d| d.bg(Theme::accent_dim()))
                         .when(current, |d| d.text_color(Theme::accent()))
                         .hover(|d| d.bg(Theme::border()))
                         .child(db.clone())
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.use_database(db.clone(), cx)),
-                        )
-                })),
-        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.pick_database(db.clone(), window, cx)
+                        }))
+                }));
+        // a click anywhere outside the list closes it
+        let backdrop = div()
+            .id("database-backdrop")
+            .absolute()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.close_databases(window, cx)),
+            );
+        Some(div().absolute().size_full().child(backdrop).child(list))
     }
 
     fn shown_grid(&self) -> Option<Entity<ResultGrid>> {
@@ -980,6 +1083,23 @@ impl QueryTab {
     }
 
     #[cfg(test)]
+    pub fn databases_open(&self) -> bool {
+        self.databases.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn set_auto_reconnect(&mut self, on: bool) {
+        if let Some(c) = &mut self.connection {
+            c.saved.auto_reconnect = on;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn open_databases(&mut self, cx: &mut Context<Self>) {
+        self.load_databases(cx);
+    }
+
+    #[cfg(test)]
     pub fn panel_collapsed(&self) -> bool {
         self.panel_collapsed
     }
@@ -1045,6 +1165,9 @@ impl Focusable for QueryTab {
 
 impl Render for QueryTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.focus_databases) {
+            window.focus(&self.database_focus);
+        }
         let max_panel = window.viewport_size().height - px(200.);
         div()
             .key_context("QueryTab")
