@@ -323,8 +323,10 @@ async fn run_session(
 // doesn't leave the reads before it half done.
 fn refuse_writes(conn: &dyn Connection, sql: &str) -> Option<DbError> {
     conn.statements(sql).into_iter().find_map(|s| {
-        crate::script::write_reason(s.text)
-            .map(|why| DbError::ReadOnly(format!("line {}: {why}", s.line)))
+        crate::script::write_reason(s.text).map(|reason| DbError::ReadOnly {
+            reason,
+            line: s.line,
+        })
     })
 }
 

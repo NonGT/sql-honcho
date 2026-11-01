@@ -276,11 +276,12 @@ impl QueryTab {
             PromptLevel::Warning,
             &msg,
             Some("It changes every row in the table."),
-            &["Run", "Cancel"],
+            // Cancel first so Enter doesn't confirm by reflex
+            &["Cancel", "Run"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
-            if answer.await == Ok(0) {
+            if answer.await == Ok(1) {
                 this.update(cx, |this, cx| this.run(target, cx)).ok();
             }
         })
@@ -388,7 +389,9 @@ impl QueryTab {
             }
             QueryEvent::Finished(Err(e)) => {
                 let line = match &e {
-                    DbError::Query { line: Some(l), .. } => Some(first_line + l - 1),
+                    DbError::Query { line: Some(l), .. } | DbError::ReadOnly { line: l, .. } => {
+                        Some(first_line + l - 1)
+                    }
                     _ => None,
                 };
                 let text = match line {

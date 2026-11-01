@@ -477,7 +477,10 @@ async fn read_only_sessions_refuse_scripts_with_writes() {
     assert_eq!(events.len(), 1, "nothing ran: {events:?}");
     assert_eq!(
         finished(&events),
-        &Err(DbError::ReadOnly("line 1: UPDATE isn't a read".into()))
+        &Err(DbError::ReadOnly {
+            reason: "UPDATE isn't a read".into(),
+            line: 1
+        })
     );
 
     let events = collect(s.execute("select 2")).await;
