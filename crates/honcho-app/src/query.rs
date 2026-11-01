@@ -398,8 +398,8 @@ impl QueryTab {
                     Some(l) => format!("Line {}: {e}", l + 1),
                     None => e.to_string(),
                 };
-                if e.is_fatal() {
-                    self.lost = Some(e.to_string());
+                if let DbError::ConnectionLost(reason) = &e {
+                    self.lost = Some(reason.clone());
                 }
                 let out = self.output.get_or_insert_with(Output::default);
                 out.message(MessageLevel::Error, text, line);
@@ -429,10 +429,16 @@ impl QueryTab {
         let state = cx.global::<Connections>();
         let (secrets, runtime) = (state.secrets.clone(), state.runtime.clone());
         let for_key = saved.clone();
+        // come back to the database the user had moved to
+        let database = self.database.clone();
         cx.spawn(async move |this, cx| {
             let config = cx
                 .background_spawn(async move { for_key.connect_config(secrets.as_ref()) })
-                .await;
+                .await
+                .map(|config| honcho_db::ConnectConfig {
+                    database: database.or(config.database.clone()),
+                    ..config
+                });
             let result = match config {
                 Ok(config) => {
                     runtime

@@ -77,6 +77,8 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
             ("tab", NextField, CONNECTION_FIELD),
             ("shift-tab", PrevField, CONNECTION_FIELD),
             ("enter", Submit, CONNECTION_FIELD),
+            // after clicking a swatch or checkbox focus sits on the dialog
+            ("enter", Submit, Some("ConnectionDialog")),
         ]
     ));
     b
