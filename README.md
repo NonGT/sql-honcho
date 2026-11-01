@@ -20,6 +20,12 @@ need the usual gpui packages, e.g. on Debian/Ubuntu:
       libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev \
       libfreetype-dev libvulkan-dev libssl-dev libzstd-dev
 
+Connections can go through an SSH server (password, key file or ssh-agent;
+`~/.ssh/config` aliases work) and use TLS from "prefer" up to full
+certificate and host name checks. The first time an SSH server is seen, the
+app shows its host key fingerprint and asks before adding it to
+`~/.ssh/known_hosts`.
+
 Passwords are kept in the OS keyring. On Linux that is the Secret Service,
 which GNOME Keyring or KeePassXC provide; without one, connections still
 work but their passwords can't be saved.
@@ -84,6 +90,10 @@ Drivers also run the conformance suite against real databases in Docker
 MySQL and MariaDB serve TLS with a test CA from `docker/tls` (regenerate
 with `docker/tls/gen.sh`); its certificate names 127.0.0.1 and
 db.honcho.test, not localhost, so the tests can see a name check fail.
+
+An `sshd` container (port 32222, user `tunnel`, password `Honcho_test1`, keys
+in `docker/ssh`) reaches the databases by their service names, for the
+tunnel tests.
 
 SQL Server's image is amd64 only, so on Apple Silicon it runs under Docker
 Desktop's emulation and takes a while to start.
