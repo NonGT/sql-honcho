@@ -514,6 +514,10 @@ impl Workspace {
                         None => Theme::panel(),
                     })
                     .when(active, |d| d.bg(Theme::tab_active()))
+                    // a tinted tab makes it hard to forget which server it's on
+                    .when_some(color, |d, c| {
+                        d.bg(c.opacity(if active { 0.18 } else { 0.1 }))
+                    })
                     .text_color(if active {
                         Theme::text()
                     } else {

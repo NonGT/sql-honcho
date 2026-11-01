@@ -149,7 +149,11 @@ impl ConnectionDialog {
             saved.database.as_deref().unwrap_or(""),
         ];
         for (field, value) in self.fields.in_order().into_iter().zip(values) {
-            field.update(cx, |f, cx| f.set_text(value, cx));
+            field.update(cx, |f, cx| {
+                f.set_text(value, cx);
+                // an unfocused field shouldn't show a selection
+                f.editor.set_cursor(f.editor.len_chars());
+            });
         }
         self.draft = saved;
         self.is_new = is_new;
@@ -426,7 +430,7 @@ impl Focusable for ConnectionDialog {
 fn button(label: &'static str, primary: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(label)
-        .px_3()
+        .px_2p5()
         .py_1()
         .rounded_md()
         .border_1()
@@ -448,7 +452,7 @@ impl Render for ConnectionDialog {
         let saved: Vec<SavedConnection> = state.store.connections().to_vec();
 
         let list = div()
-            .w(px(200.))
+            .w(px(230.))
             .flex_none()
             .flex()
             .flex_col()
@@ -555,8 +559,7 @@ impl Render for ConnectionDialog {
                 .gap_2()
                 .child(
                     div()
-                        .w(px(72.))
-                        .flex_none()
+                        .when(width.is_none(), |d| d.w(px(72.)).flex_none())
                         .text_color(Theme::muted())
                         .child(label),
                 )
@@ -678,7 +681,7 @@ impl Render for ConnectionDialog {
             .child(
                 row()
                     .child(field("Host", &self.fields.host, None).flex_1())
-                    .child(field("Port", &self.fields.port, Some(70.))),
+                    .child(field("Port", &self.fields.port, Some(84.))),
             )
             .child(field("User", &self.fields.user, None))
             .child(field("Password", &self.fields.password, None))
