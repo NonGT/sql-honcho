@@ -1309,3 +1309,53 @@ fn filter_searches_routine_bodies(cx: &mut TestAppContext) {
         })
     });
 }
+
+#[gpui::test]
+fn browser_actions_reconnect_first(cx: &mut TestAppContext) {
+    let _flaky = FLAKY.lock().unwrap_or_else(|e| e.into_inner());
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake_as(&ws, cx, "flaky", None, false);
+    browse(&ws, cx, "fake db");
+    browse(&ws, cx, "app");
+    browse(&ws, cx, "Procedures (1)");
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    let tabs = |cx: &mut VisualTestContext| ws.read_with(cx, |ws, _| ws.tab_count());
+    let open_def = |cx: &mut VisualTestContext| {
+        let before = ws.read_with(cx, |ws, _| ws.tab_count());
+        b.update(cx, |b, cx| b.act("refresh_stats", "definition", cx));
+        wait_until(cx, |cx| ws.read_with(cx, |ws, _| ws.tab_count() > before));
+    };
+
+    // the session dropped while idle: opening reconnects and carries on
+    let task = b.read_with(cx, |b, cx| b.drop_session(cx));
+    cx.background_executor.block_test(task);
+    open_def(cx);
+    assert_eq!(tabs(cx), 2);
+    assert!(
+        text(&ws, cx).starts_with("DROP PROCEDURE"),
+        "{}",
+        text(&ws, cx)
+    );
+
+    // the server is unreachable: say so instead of doing nothing
+    let task = b.read_with(cx, |b, cx| b.drop_session(cx));
+    cx.background_executor.block_test(task);
+    honcho_db::fake::REFUSE_FLAKY.store(true, std::sync::atomic::Ordering::SeqCst);
+    open_def(cx);
+    honcho_db::fake::REFUSE_FLAKY.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(tabs(cx), 3);
+    assert!(
+        text(&ws, cx).starts_with("-- couldn't connect"),
+        "{}",
+        text(&ws, cx)
+    );
+
+    // and once it's back, the next try reconnects from the failed state
+    open_def(cx);
+    assert_eq!(tabs(cx), 4);
+    assert!(
+        text(&ws, cx).starts_with("DROP PROCEDURE"),
+        "{}",
+        text(&ws, cx)
+    );
+}

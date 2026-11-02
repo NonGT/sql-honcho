@@ -213,6 +213,8 @@ pub struct ObjectBrowser {
     /// Connections reopened after dropping and not loaded anything since;
     /// a second drop is reported instead of retried.
     reconnected: HashSet<String>,
+    /// Actions waiting for a connection's session to (re)open.
+    pending: HashMap<String, Vec<(Path, Action)>>,
     /// The pane's width, set by dragging its edge.
     pub width: Pixels,
 }
@@ -236,6 +238,7 @@ impl ObjectBrowser {
             search: None,
             scroll: UniformListScrollHandle::new(),
             reconnected: HashSet::new(),
+            pending: HashMap::new(),
             width: DEFAULT_WIDTH,
         };
         this.rebuild(cx);
@@ -480,6 +483,9 @@ impl ObjectBrowser {
                 match result {
                     Ok(session) => {
                         this.conns.insert(id.clone(), Conn::Open(session));
+                        for (path, action) in this.pending.remove(&id).unwrap_or_default() {
+                            this.perform(path, action, true, cx);
+                        }
                         if keep {
                             for (path, item) in this.cut_off(&id, cx) {
                                 this.children.remove(&path);
@@ -498,6 +504,7 @@ impl ObjectBrowser {
                         }
                     }
                     Err(DbError::HostKey(_)) => {
+                        this.pending.remove(&id);
                         this.conns.insert(
                             id,
                             Conn::Failed(
@@ -512,6 +519,19 @@ impl ObjectBrowser {
                         } else {
                             e.to_string()
                         };
+                        for (path, action) in this.pending.remove(&id).unwrap_or_default() {
+                            if let (Action::Definition(o), Some(saved)) =
+                                (action, this.conn_of(&path, cx))
+                            {
+                                cx.emit(BrowserEvent::Open {
+                                    saved: Box::new(saved),
+                                    database: o.database.clone(),
+                                    text: format!("-- couldn't connect to open {}: {message}\n", o.name),
+                                    run: false,
+                                    origin: None,
+                                });
+                            }
+                        }
                         // the tree stays; the nodes that were waiting say why
                         for (path, _) in this.cut_off(&id, cx) {
                             this.children
@@ -688,26 +708,7 @@ impl ObjectBrowser {
 
     /// Asks for the routine's parameters, then for their values.
     fn run_routine(&mut self, path: &Path, object: &ObjectRef, cx: &mut Context<Self>) {
-        let (Some(saved), Some(session)) = (
-            self.conn_of(path, cx),
-            path.first()
-                .and_then(|c| self.session(c.trim_start_matches("c:"))),
-        ) else {
-            return;
-        };
-        let object = object.clone();
-        cx.spawn(async move |this, cx| {
-            let params = session.parameters(object.clone()).await.unwrap_or_default();
-            this.update(cx, |_, cx| {
-                cx.emit(BrowserEvent::RunRoutine {
-                    saved: Box::new(saved),
-                    object,
-                    params,
-                })
-            })
-            .ok();
-        })
-        .detach();
+        self.perform(path.clone(), Action::Run(object.clone()), false, cx);
     }
 
     /// Fetches a database's objects again after something was applied,
@@ -741,34 +742,92 @@ impl ObjectBrowser {
     }
 
     fn open_definition(&mut self, path: &Path, object: &ObjectRef, cx: &mut Context<Self>) {
-        let (Some(saved), Some(session)) = (
-            self.conn_of(path, cx),
-            path.first()
-                .and_then(|c| self.session(c.trim_start_matches("c:"))),
-        ) else {
+        self.perform(path.clone(), Action::Definition(object.clone()), false, cx);
+    }
+
+    /// Runs an action with the connection's session, opening it first when
+    /// it isn't open (failed earlier, or not opened yet). A session that
+    /// turns out to have dropped is reopened and the action tried once more.
+    fn perform(&mut self, path: Path, action: Action, retried: bool, cx: &mut Context<Self>) {
+        let Some(saved) = self.conn_of(&path, cx) else {
             return;
         };
-        let object = object.clone();
+        let id = saved.id.clone();
+        let session = match self.conns.get(&id) {
+            Some(Conn::Open(s)) => s.clone(),
+            Some(Conn::Opening) => {
+                self.pending.entry(id).or_default().push((path, action));
+                return;
+            }
+            _ => {
+                self.pending.entry(id).or_default().push((path, action));
+                self.open_session(saved, true, cx);
+                self.rebuild(cx);
+                return;
+            }
+        };
         cx.spawn(async move |this, cx| {
-            let result = session.definition(object.clone()).await;
-            this.update(cx, |_, cx| {
-                let (text, origin) = match result {
-                    Ok(def) => (
-                        routine::script(saved.driver, &object, &def),
-                        routine::editable(&object).then(|| Box::new((object.clone(), def))),
-                    ),
-                    Err(e) => (
-                        format!("-- couldn't read the definition of {}: {e}\n", object.name),
-                        None,
-                    ),
-                };
-                cx.emit(BrowserEvent::Open {
-                    saved: Box::new(saved),
-                    database: object.database.clone(),
-                    text,
-                    run: false,
-                    origin,
-                });
+            let result = match &action {
+                Action::Definition(o) => session.definition(o.clone()).await.map(Done::Definition),
+                Action::Run(o) => session.parameters(o.clone()).await.map(Done::Params),
+                Action::Template(o, _) => session.columns(o.clone()).await.map(Done::Columns),
+            };
+            this.update(cx, |this, cx| {
+                if let Err(e) = &result {
+                    if e.is_fatal() && !retried {
+                        let saved = saved.clone();
+                        this.pending
+                            .entry(saved.id.clone())
+                            .or_default()
+                            .push((path, action));
+                        if !matches!(this.conns.get(&saved.id), Some(Conn::Opening)) {
+                            this.open_session(saved, true, cx);
+                        }
+                        return;
+                    }
+                }
+                match (action, result) {
+                    (Action::Definition(o), result) => {
+                        let (text, origin) = match result {
+                            Ok(Done::Definition(def)) => (
+                                routine::script(saved.driver, &o, &def),
+                                routine::editable(&o).then(|| Box::new((o.clone(), def))),
+                            ),
+                            Err(e) => (
+                                format!("-- couldn't read the definition of {}: {e}\n", o.name),
+                                None,
+                            ),
+                            Ok(_) => return,
+                        };
+                        cx.emit(BrowserEvent::Open {
+                            saved: Box::new(saved),
+                            database: o.database.clone(),
+                            text,
+                            run: false,
+                            origin,
+                        });
+                    }
+                    (Action::Run(object), result) => {
+                        let params = match result {
+                            Ok(Done::Params(p)) => p,
+                            _ => Vec::new(),
+                        };
+                        cx.emit(BrowserEvent::RunRoutine {
+                            saved: Box::new(saved),
+                            object,
+                            params,
+                        });
+                    }
+                    (Action::Template(o, which), Ok(Done::Columns(columns))) => {
+                        cx.emit(BrowserEvent::Insert(template(
+                            saved.driver,
+                            &o,
+                            &columns,
+                            which,
+                        )));
+                    }
+                    _ => {}
+                }
             })
             .ok();
         })
@@ -783,29 +842,12 @@ impl ObjectBrowser {
         which: Template,
         cx: &mut Context<Self>,
     ) {
-        let (Some(saved), Some(session)) = (
-            self.conn_of(path, cx),
-            path.first()
-                .and_then(|c| self.session(c.trim_start_matches("c:"))),
-        ) else {
-            return;
-        };
-        let object = object.clone();
-        cx.spawn(async move |this, cx| {
-            let Ok(columns) = session.columns(object.clone()).await else {
-                return;
-            };
-            this.update(cx, |_, cx| {
-                cx.emit(BrowserEvent::Insert(template(
-                    saved.driver,
-                    &object,
-                    &columns,
-                    which,
-                )))
-            })
-            .ok();
-        })
-        .detach();
+        self.perform(
+            path.clone(),
+            Action::Template(object.clone(), which),
+            false,
+            cx,
+        );
     }
 
     fn refresh(&mut self, path: Path, item: Item, cx: &mut Context<Self>) {
@@ -1074,6 +1116,20 @@ async fn fetch(session: &Session, item: &Item) -> Result<Fetched, DbError> {
         // groups are filled with their database
         Item::Group(..) | Item::Column(_) | Item::Index(_) => Fetched::Items(vec![]),
     })
+}
+
+enum Done {
+    Definition(String),
+    Params(Vec<honcho_db::RoutineParam>),
+    Columns(Vec<honcho_db::ColumnInfo>),
+}
+
+/// Something done to an object that needs the connection's session.
+#[derive(Clone)]
+enum Action {
+    Definition(ObjectRef),
+    Run(ObjectRef),
+    Template(ObjectRef, Template),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
