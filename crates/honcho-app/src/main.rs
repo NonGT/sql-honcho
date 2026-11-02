@@ -8,7 +8,9 @@ mod grid;
 mod keymap;
 mod prompt;
 mod query;
-mod routine;
+
+mod diff_view;
+mod project_pane;
 mod routine_form;
 #[cfg(test)]
 mod tests;

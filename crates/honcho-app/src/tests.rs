@@ -1375,3 +1375,141 @@ fn object_tabs_run_only_through_apply(cx: &mut TestAppContext) {
     assert!(out.iter().all(|m| m.contains("use Apply")), "{out:?}");
     assert!(!out.is_empty());
 }
+
+fn open_project(
+    ws: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    connection: &str,
+) -> (tempfile::TempDir, Entity<crate::project_pane::ProjectPane>) {
+    use honcho_db::project::{Manifest, Project};
+    let dir = tempfile::tempdir().unwrap();
+    let project = Project::init(
+        dir.path(),
+        Manifest {
+            connection: connection.into(),
+            database: "app".into(),
+        },
+    )
+    .unwrap();
+    ws.update_in(cx, |ws, window, cx| {
+        ws.show_project_for_test(project, window, cx)
+    });
+    let pane = ws.read_with(cx, |ws, _| ws.project().unwrap().clone());
+    wait_until(cx, |cx| pane.read_with(cx, |p, _| !p.is_busy()));
+    (dir, pane)
+}
+
+fn statuses(
+    pane: &Entity<crate::project_pane::ProjectPane>,
+    cx: &mut VisualTestContext,
+) -> Vec<(String, honcho_db::project::Status)> {
+    pane.read_with(cx, |p, _| {
+        p.entries
+            .iter()
+            .map(|e| (e.object.name.clone(), e.status))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn project_pulls_compares_and_opens_files(cx: &mut TestAppContext) {
+    use honcho_db::project::Status::*;
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let (dir, pane) = open_project(&ws, cx, "fake db");
+    // in apply order: functions, views, procedures
+    assert_eq!(
+        statuses(&pane, cx),
+        [
+            ("order_total".to_string(), ServerOnly),
+            ("active_users".to_string(), ServerOnly),
+            ("refresh_stats".to_string(), ServerOnly),
+        ]
+    );
+
+    pane.update_in(cx, |p, window, cx| p.pull_changes(window, cx));
+    wait_until(cx, |cx| {
+        pane.read_with(cx, |p, _| {
+            !p.is_busy() && p.entries.iter().all(|e| e.status == Same)
+        })
+    });
+    assert_eq!(
+        pane.read_with(cx, |p, _| p.outcome().map(str::to_string))
+            .as_deref(),
+        Some("Pulled 3 objects.")
+    );
+    let file = dir.path().join("procedures/refresh_stats.sql");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.starts_with("DROP PROCEDURE IF EXISTS `refresh_stats`;"),
+        "{text}"
+    );
+
+    // edited here: the diff shows the change on the folder side
+    std::fs::write(&file, text.replace("COUNT(*)", "COUNT(id)")).unwrap();
+    pane.update(cx, |p, cx| p.refresh(cx));
+    wait_until(cx, |cx| {
+        statuses(&pane, cx).contains(&("refresh_stats".to_string(), Edited))
+    });
+    pane.update(cx, |_, cx| {
+        cx.emit(crate::project_pane::ProjectEvent::Compare(2))
+    });
+    let diff = ws.read_with(cx, |ws, _| ws.diff().unwrap().clone());
+    let changed: Vec<_> = diff.read_with(cx, |d, _| {
+        d.lines
+            .iter()
+            .filter(|l| l.left != l.right)
+            .map(|l| (l.left.clone().unwrap().1, l.right.clone().unwrap().1))
+            .collect()
+    });
+    assert_eq!(
+        changed,
+        [(
+            "  SELECT COUNT(id) FROM orders;".to_string(),
+            "  SELECT COUNT(*) FROM orders;".to_string()
+        )]
+    );
+    press(cx, "escape");
+    assert!(ws.read_with(cx, |ws, _| ws.diff().is_none()));
+
+    // opening the file connects the tab to the project's database, and
+    // its run shortcuts go through Apply
+    pane.update(cx, |p, cx| p.open(2, cx));
+    wait_until(cx, |cx| {
+        ws.read_with(cx, |ws, cx| ws.active_connection(cx).is_some())
+    });
+    assert!(text_of_tab_is(&ws, cx, "COUNT(id)"));
+    let q = query_tab(&ws, cx);
+    assert!(q.read_with(cx, |q, _| q.origin.is_some()));
+    assert_eq!(
+        ws.read_with(cx, |ws, cx| ws.active_editor().read(cx).path.clone()),
+        Some(file.canonicalize().unwrap())
+    );
+
+    // the fake can't create anything, which stands in for a file that
+    // won't apply: it's reported and the status stays
+    pane.update(cx, |p, cx| p.apply(vec![2], cx));
+    wait_until(cx, |cx| {
+        pane.read_with(cx, |p, _| {
+            !p.is_busy() && p.outcome().is_some_and(|o| o.contains("failed"))
+        })
+    });
+    assert!(statuses(&pane, cx).contains(&("refresh_stats".to_string(), Edited)));
+}
+
+fn text_of_tab_is(ws: &Entity<Workspace>, cx: &mut VisualTestContext, needle: &str) -> bool {
+    text(ws, cx).contains(needle)
+}
+
+#[gpui::test]
+fn project_names_a_missing_connection(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    let (_dir, pane) = open_project(&ws, cx, "staging");
+    let failure = pane.read_with(cx, |p, _| p.failure().map(str::to_string));
+    assert!(
+        failure
+            .as_deref()
+            .is_some_and(|f| f.contains("no saved connection named \"staging\"")),
+        "{failure:?}"
+    );
+}

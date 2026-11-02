@@ -18,8 +18,8 @@ use crate::connection_dialog::color_dot;
 use crate::connections::{self, ActiveConnection};
 use crate::editor_view::{self, CompletionMenu, EditorView};
 use crate::grid::{Format, ResultGrid};
-use crate::routine;
 use crate::theme::{self, Theme};
+use honcho_db::routine;
 
 actions!(
     query,

@@ -18,8 +18,8 @@ use honcho_db::{
 use crate::connection_dialog::color_dot;
 use crate::connections::{self, Connections};
 use crate::editor_view::{self, EditorView};
-use crate::routine::{self, ident, qualified};
 use crate::theme::{self, Theme};
+use honcho_db::routine::{self, ident, qualified};
 
 actions!(browser, [ToggleBrowser]);
 
@@ -60,6 +60,11 @@ pub enum BrowserEvent {
     },
     /// Put text into the current editor.
     Insert(String),
+    /// Write this database's routines and views into a folder.
+    SaveProject {
+        saved: Box<SavedConnection>,
+        database: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -873,6 +878,14 @@ impl ObjectBrowser {
             .unwrap_or(DriverKind::MySql);
         match (action, &item) {
             (MenuAction::Refresh, _) => self.refresh(path, item.clone(), cx),
+            (MenuAction::SaveProject, Item::Database(d)) => {
+                if let Some(saved) = self.conn_of(&path, cx) {
+                    cx.emit(BrowserEvent::SaveProject {
+                        saved: Box::new(saved),
+                        database: d.clone(),
+                    });
+                }
+            }
             (MenuAction::SelectTop, Item::Object(o)) => self.select_top(&path, o, cx),
             (MenuAction::Definition, Item::Object(o)) => self.open_definition(&path, o, cx),
             (MenuAction::Run, Item::Object(o)) => self.run_routine(&path, o, cx),
@@ -1148,14 +1161,18 @@ enum MenuAction {
     Template(Template),
     NewQuery,
     Run,
+    SaveProject,
 }
 
 fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
     use MenuAction::*;
     match item {
-        Item::Connection(_) | Item::Database(_) => {
-            vec![("New query tab", NewQuery), ("Refresh", Refresh)]
-        }
+        Item::Connection(_) => vec![("New query tab", NewQuery), ("Refresh", Refresh)],
+        Item::Database(_) => vec![
+            ("New query tab", NewQuery),
+            ("Save to project folder…", SaveProject),
+            ("Refresh", Refresh),
+        ],
         Item::Object(o) if matches!(o.kind, ObjectKind::Table | ObjectKind::View) => vec![
             ("Select top 1000", SelectTop),
             ("Open definition", Definition),

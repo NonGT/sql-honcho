@@ -164,6 +164,7 @@ both_servers!(
     tls_require_and_disable,
     tls_verify_checks_the_ca_and_the_name,
     tls_client_certificate,
+    project_round_trip,
 );
 
 fn cert(name: &str) -> Option<std::path::PathBuf> {
@@ -488,4 +489,126 @@ async fn read_only_is_enforced_by_the_server_too(server: Server) {
         Err(DbError::Query { code, .. }) => assert_eq!(code.as_deref(), Some("1792")),
         other => panic!("expected the server to refuse, got {other:?}"),
     }
+}
+
+/// Pull, edit, apply and notice server changes, in `analytics`, which no
+/// other test puts routines in.
+async fn project_round_trip(server: Server) {
+    use crate::project::{self, Manifest, Project, Status};
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt, server).await;
+    finished_ok(
+        &run(
+            &s,
+            "USE analytics;
+             DROP VIEW IF EXISTS proj_top; DROP VIEW IF EXISTS proj_base;
+             DROP PROCEDURE IF EXISTS proj_double; DROP FUNCTION IF EXISTS proj_inc;
+             DELIMITER //
+             CREATE PROCEDURE proj_double(IN p INT, OUT doubled INT)
+             BEGIN
+                 -- a comment; with a semicolon
+                 SET doubled = p * 2;
+             END //
+             CREATE FUNCTION proj_inc(x INT) RETURNS INT DETERMINISTIC RETURN x + 1 //
+             DELIMITER ;
+             CREATE VIEW proj_base AS SELECT 1 AS n;
+             CREATE VIEW proj_top AS SELECT proj_inc(n) AS m FROM proj_base;",
+        )
+        .await,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let p = Project::init(
+        dir.path(),
+        Manifest {
+            connection: "docker".into(),
+            database: "analytics".into(),
+        },
+    )
+    .unwrap();
+    let status = |name: &str, entries: &[project::Entry]| {
+        entries
+            .iter()
+            .find(|e| e.object.name == name)
+            .map(|e| e.status)
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+
+    let entries = project::status(&s, &p).await.unwrap();
+    assert_eq!(status("proj_double", &entries), Status::ServerOnly);
+    for e in &entries {
+        project::pull(&p, DriverKind::MySql, e).unwrap();
+    }
+    // nothing differs straight after a pull
+    let entries = project::status(&s, &p).await.unwrap();
+    for e in &entries {
+        assert_eq!(e.status, Status::Same, "{}", e.object.name);
+    }
+    let names: Vec<&str> = entries.iter().map(|e| e.object.name.as_str()).collect();
+    let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
+    assert!(at("proj_inc") < at("proj_top") && at("proj_base") < at("proj_top"));
+
+    // edit the procedure and the view, apply both
+    let file = dir.path().join("procedures/proj_double.sql");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(!text.contains("DEFINER"), "{text}");
+    std::fs::write(&file, text.replace("p * 2", "p * 3")).unwrap();
+    let view = dir.path().join("views/proj_base.sql");
+    std::fs::write(
+        &view,
+        "CREATE OR REPLACE VIEW proj_base AS\n  SELECT 2 AS n;\n",
+    )
+    .unwrap();
+    let entries = project::status(&s, &p).await.unwrap();
+    assert_eq!(status("proj_double", &entries), Status::Edited);
+    assert_eq!(status("proj_base", &entries), Status::Edited);
+    for e in entries.iter().filter(|e| e.status == Status::Edited) {
+        project::apply(&s, &p, DriverKind::MySql, e).await.unwrap();
+    }
+    let entries = project::status(&s, &p).await.unwrap();
+    // the server reformats the view, which isn't a difference
+    assert_eq!(status("proj_base", &entries), Status::Same);
+    assert_eq!(status("proj_double", &entries), Status::Same);
+    finished_ok(&run(&s, "CALL proj_double(5, @d)").await);
+    let events = run(&s, "SELECT @d").await;
+    assert_eq!(rows_of(&events), vec![vec![Value::Int(15)]]);
+
+    // a file that won't create leaves the server's copy alone
+    std::fs::write(
+        &file,
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("SET doubled", "SET doubld"),
+    )
+    .unwrap();
+    let entries = project::status(&s, &p).await.unwrap();
+    let broken = entries
+        .iter()
+        .find(|e| e.object.name == "proj_double")
+        .unwrap();
+    assert!(project::apply(&s, &p, DriverKind::MySql, broken)
+        .await
+        .is_err());
+    finished_ok(&run(&s, "CALL proj_double(5, @d)").await);
+
+    // someone changes it on the server
+    finished_ok(
+        &run(
+            &s,
+            "DROP PROCEDURE proj_double;
+             CREATE PROCEDURE proj_double(IN p INT, OUT doubled INT) SET doubled = p * 4;",
+        )
+        .await,
+    );
+    let entries = project::status(&s, &p).await.unwrap();
+    assert_eq!(status("proj_double", &entries), Status::BothChanged);
+    assert_eq!(status("proj_inc", &entries), Status::Same);
+
+    finished_ok(
+        &run(
+            &s,
+            "DROP VIEW proj_top; DROP VIEW proj_base;
+             DROP PROCEDURE proj_double; DROP FUNCTION proj_inc;",
+        )
+        .await,
+    );
 }

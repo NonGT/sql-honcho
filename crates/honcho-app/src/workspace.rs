@@ -10,12 +10,15 @@ use gpui::{
 use crate::browser::{self, BrowserEvent, ObjectBrowser};
 use crate::connection_dialog::{ConnectionDialog, DialogEvent};
 use crate::connections;
+use crate::diff_view::{DiffEvent, DiffView};
 use crate::editor_view::EditorView;
 use crate::find::{self, FindBar};
+use crate::project_pane::{ProjectEvent, ProjectPane};
 use crate::query::{Origin, QueryTab, TabEvent};
 use crate::routine_form::{FormEvent, RoutineForm};
 use crate::theme::{self, EditorFont, Theme, FONT_SIZE};
 use honcho_config::SavedConnection;
+use honcho_db::project::{Manifest, Project};
 use honcho_db::{ObjectRef, RoutineParam};
 
 actions!(
@@ -33,8 +36,15 @@ actions!(
         ZoomReset,
         Quit,
         ManageConnections,
+        OpenProject,
     ]
 );
+
+#[derive(Clone, Copy, PartialEq)]
+enum Sidebar {
+    Database,
+    Project,
+}
 
 pub struct Workspace {
     focus_handle: FocusHandle,
@@ -48,6 +58,9 @@ pub struct Workspace {
     connection_dialog: Option<Entity<ConnectionDialog>>,
     routine_form: Option<Entity<RoutineForm>>,
     browser: Entity<ObjectBrowser>,
+    project: Option<Entity<ProjectPane>>,
+    diff: Option<Entity<DiffView>>,
+    sidebar: Sidebar,
     show_browser: bool,
     /// Pointer x and pane width when dragging the browser's edge began.
     browser_drag: Option<(Pixels, Pixels)>,
@@ -73,6 +86,9 @@ impl Workspace {
             connection_dialog: None,
             routine_form: None,
             show_browser: true,
+            project: None,
+            diff: None,
+            sidebar: Sidebar::Database,
             browser_drag: None,
             browser,
             query_tabs: HashMap::new(),
@@ -80,6 +96,11 @@ impl Workspace {
         };
         this.subscribe_browser(window, cx);
         this.new_tab(String::new(), None, window, cx);
+        if let Some(root) = last_project(cx) {
+            if let Ok(project) = Project::open(&root) {
+                this.show_project(project, false, window, cx);
+            }
+        }
         this.open_paths(paths, window, cx);
 
         let handle = cx.weak_entity();
@@ -206,8 +227,229 @@ impl Workspace {
                     });
                     window.focus(&editor.focus_handle(cx));
                 }
+                BrowserEvent::SaveProject { saved, database } => {
+                    this.save_project(saved.name.clone(), database.clone(), window, cx)
+                }
             },
         ));
+    }
+
+    fn open_project(&mut self, _: &OpenProject, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open project".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| match rx.await {
+            Ok(Ok(Some(paths))) => {
+                let Some(root) = paths.into_iter().next() else {
+                    return;
+                };
+                match Project::open(&root) {
+                    Ok(project) => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.show_project(project, true, window, cx)
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        let detail = format!(
+                            "{e}\n\nTo start one, right-click a database in the browser and pick Save to project folder…"
+                        );
+                        let answer = this.update_in(cx, |_, window, cx| {
+                            window.prompt(
+                                PromptLevel::Warning,
+                                "This folder isn't a sql-honcho project.",
+                                Some(&detail),
+                                &["OK"],
+                                cx,
+                            )
+                        });
+                        if let Ok(answer) = answer {
+                            answer.await.ok();
+                        }
+                    }
+                }
+            }
+            Ok(Err(err)) => dialog_failed(err, cx).await,
+            _ => {}
+        })
+        .detach();
+    }
+
+    /// Makes a folder the project for this connection and database and
+    /// pulls everything into it.
+    fn save_project(
+        &mut self,
+        connection: String,
+        database: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Use folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let root = match rx.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(root) => root,
+                    None => return,
+                },
+                Ok(Err(err)) => return dialog_failed(err, cx).await,
+                _ => return,
+            };
+            let manifest = Manifest {
+                connection,
+                database,
+            };
+            // a folder that's already a project for something else is
+            // only repointed if the user says so
+            if let Ok(existing) = Project::open(&root) {
+                if existing.manifest != manifest {
+                    let message = format!(
+                        "This folder is the project for {} on {}.",
+                        existing.manifest.database, existing.manifest.connection
+                    );
+                    let Ok(answer) = this.update_in(cx, |_, window, cx| {
+                        window.prompt(
+                            PromptLevel::Warning,
+                            &message,
+                            Some("Pointing it at another database makes every file compare against that one."),
+                            &["Cancel", "Point it here"],
+                            cx,
+                        )
+                    }) else {
+                        return;
+                    };
+                    if answer.await != Ok(1) {
+                        return;
+                    }
+                }
+            }
+            match Project::init(&root, manifest) {
+                Ok(project) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.show_project(project, true, window, cx);
+                        if let Some(pane) = &this.project {
+                            // pull what isn't in the folder yet once compared
+                            let pane = pane.clone();
+                            this.subscriptions.push(cx.observe(&pane, {
+                                let mut pulled = false;
+                                move |_, pane, cx| {
+                                    if pulled || pane.read(cx).is_busy() {
+                                        return;
+                                    }
+                                    pulled = true;
+                                    pane.update(cx, |p, cx| {
+                                        let which = (0..p.entries.len())
+                                            .filter(|&i| {
+                                                p.entries[i].status
+                                                    == honcho_db::project::Status::ServerOnly
+                                            })
+                                            .collect();
+                                        p.pull(which, cx)
+                                    });
+                                }
+                            }));
+                        }
+                    })
+                    .ok();
+                }
+                Err(e) => dialog_failed(e, cx).await,
+            }
+        })
+        .detach();
+    }
+
+    fn show_project(
+        &mut self,
+        project: Project,
+        remember: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if remember {
+            remember_project(&project.root, cx);
+        }
+        let pane = cx.new(|cx| ProjectPane::new(project, cx));
+        self.subscriptions
+            .push(cx.observe(&pane, |_, _, cx| cx.notify()));
+        self.subscriptions.push(cx.subscribe_in(
+            &pane,
+            window,
+            |this, pane, event: &ProjectEvent, window, cx| match event {
+                ProjectEvent::OpenFile {
+                    path,
+                    saved,
+                    database,
+                    origin,
+                } => {
+                    this.open_paths(vec![path.clone()], window, cx);
+                    let q = this.active_query_tab().clone();
+                    let (saved, database) = ((**saved).clone(), database.clone());
+                    let origin = origin.as_ref().map(|o| Origin {
+                        object: o.0.clone(),
+                        definition: o.1.clone(),
+                    });
+                    q.update(cx, |q, cx| {
+                        q.origin = origin;
+                        if q.connection.is_none() {
+                            q.open_saved(saved, Some(database), false, cx);
+                        }
+                        cx.notify();
+                    });
+                }
+                ProjectEvent::Compare(ix) => {
+                    let diff = cx.new(|cx| DiffView::new(pane.clone(), *ix, window, cx));
+                    this.subscriptions.push(cx.subscribe_in(
+                        &diff,
+                        window,
+                        |this, _, _: &DiffEvent, window, cx| {
+                            this.diff = None;
+                            let editor = this.active_editor().clone();
+                            window.focus(&editor.focus_handle(cx));
+                            cx.notify();
+                        },
+                    ));
+                    this.diff = Some(diff);
+                    cx.notify();
+                }
+                ProjectEvent::Close => {
+                    this.project = None;
+                    this.sidebar = Sidebar::Database;
+                    forget_project(cx);
+                    cx.notify();
+                }
+            },
+        ));
+        self.project = Some(pane);
+        self.sidebar = Sidebar::Project;
+        self.show_browser = true;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project(&self) -> Option<&Entity<ProjectPane>> {
+        self.project.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diff(&self) -> Option<&Entity<DiffView>> {
+        self.diff.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn show_project_for_test(
+        &mut self,
+        project: Project,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_project(project, false, window, cx);
     }
 
     fn ask_routine(
@@ -794,6 +1036,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ManageConnections, window, cx| {
                 this.open_connections(window, cx)
             }))
+            .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
@@ -834,7 +1077,18 @@ impl Render for Workspace {
                                 .flex_none()
                                 .border_r_1()
                                 .border_color(Theme::border())
-                                .child(self.browser.clone())
+                                .flex()
+                                .flex_col()
+                                .child(self.render_sidebar_tabs(cx))
+                                .child(div().flex_1().min_h_0().child(
+                                    match (self.sidebar, &self.project) {
+                                        (Sidebar::Project, Some(p)) => p.clone().into_any_element(),
+                                        (Sidebar::Project, None) => {
+                                            self.render_no_project(cx).into_any_element()
+                                        }
+                                        _ => self.browser.clone().into_any_element(),
+                                    },
+                                ))
                                 // the right edge drags to resize; a double
                                 // click puts it back
                                 .child(
@@ -892,7 +1146,109 @@ impl Render for Workspace {
             .child(self.render_status(cx))
             .children(self.connection_dialog.clone())
             .children(self.routine_form.clone())
+            .children(self.diff.clone())
     }
+}
+
+impl Workspace {
+    fn render_sidebar_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = |id: &'static str, text: &'static str, which: Sidebar| {
+            let active = self.sidebar == which;
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .cursor_pointer()
+                .border_b_2()
+                .border_color(if active {
+                    Theme::accent()
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_color(if active {
+                    Theme::text()
+                } else {
+                    Theme::muted()
+                })
+                .hover(|d| d.text_color(Theme::text()))
+                .child(text)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.sidebar = which;
+                    cx.notify();
+                }))
+        };
+        div()
+            .flex_none()
+            .flex()
+            .gap_1()
+            .px_1()
+            .bg(Theme::panel())
+            .border_b_1()
+            .border_color(Theme::border())
+            .text_size(px(12.))
+            .child(tab("sidebar-database", "Database", Sidebar::Database))
+            .child(tab("sidebar-project", "Project", Sidebar::Project))
+    }
+
+    fn render_no_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .bg(Theme::panel())
+            .text_color(Theme::muted())
+            .text_size(px(12.))
+            .child("No project open. A project is a folder of SQL files, one per routine, trigger or view, kept in step with a database.")
+            .child(
+                div()
+                    .id("project-open")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(Theme::border())
+                    .text_color(Theme::text())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(Theme::border()))
+                    .child("Open project folder…")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_project(&OpenProject, window, cx)
+                    })),
+            )
+            .child("To start one, right-click a database in the Database tab and pick Save to project folder….")
+    }
+}
+
+fn project_state_path(cx: &App) -> PathBuf {
+    cx.global::<connections::Connections>()
+        .store
+        .path()
+        .with_file_name("project.json")
+}
+
+fn last_project(cx: &App) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(project_state_path(cx)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("root")?.as_str().map(PathBuf::from)
+}
+
+fn remember_project(root: &Path, cx: &App) {
+    let path = project_state_path(cx);
+    let text = serde_json::json!({ "root": root }).to_string();
+    cx.background_spawn(async move {
+        let _ = std::fs::write(path, text);
+    })
+    .detach();
+}
+
+fn forget_project(cx: &App) {
+    let path = project_state_path(cx);
+    cx.background_spawn(async move {
+        let _ = std::fs::remove_file(path);
+    })
+    .detach();
 }
 
 const RESIZE_BORDER: Pixels = px(5.);

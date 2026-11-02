@@ -9,8 +9,8 @@ use honcho_config::SavedConnection;
 use honcho_db::{ObjectKind, ObjectRef, ParamMode, RoutineParam};
 
 use crate::editor_view::{self, EditorView};
-use crate::routine;
 use crate::theme::{self, Theme};
+use honcho_db::routine;
 
 actions!(routine_form, [RunRoutineNow, NextParam, PrevParam]);
 

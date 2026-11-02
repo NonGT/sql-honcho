@@ -1,7 +1,7 @@
 //! Turning server objects into scripts that recreate them, and routines
 //! into calls.
 
-use honcho_db::{DriverKind, ObjectKind, ObjectRef, ParamMode, RoutineParam};
+use crate::{DriverKind, ObjectKind, ObjectRef, ParamMode, RoutineParam};
 
 /// MySQL's dialect; the test driver speaks it too.
 fn mysql_like(kind: DriverKind) -> bool {
@@ -80,6 +80,61 @@ pub fn restore_script(kind: DriverKind, o: &ObjectRef, definition: &str) -> Stri
     }
 }
 
+/// The word naming the object's kind in its CREATE statement.
+pub fn keyword(kind: ObjectKind) -> Option<&'static str> {
+    Some(match kind {
+        ObjectKind::Procedure => "PROCEDURE",
+        ObjectKind::Function => "FUNCTION",
+        ObjectKind::Trigger => "TRIGGER",
+        ObjectKind::View => "VIEW",
+        _ => return None,
+    })
+}
+
+/// Where `keyword` (say PROCEDURE) and the name after it are in a CREATE
+/// statement: the keyword's start, and the start and end of the name, which
+/// may be `quoted`, bare, or qualified with its database.
+pub fn name_span(text: &str, keyword: &str) -> Option<(usize, usize, usize)> {
+    let upper = text.to_ascii_uppercase();
+    let at = upper.match_indices(keyword).map(|(i, _)| i).find(|&i| {
+        let before = upper[..i].chars().next_back();
+        let after = upper[i + keyword.len()..].chars().next();
+        before.is_some_and(char::is_whitespace) && after.is_some_and(char::is_whitespace)
+    })?;
+    let after = &text[at + keyword.len()..];
+    let name_start = at + keyword.len() + after.len() - after.trim_start().len();
+    let bytes = &text.as_bytes()[name_start..];
+    let mut end = 0;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'`' => {
+                end += 1;
+                while end < bytes.len() && bytes[end] != b'`' {
+                    end += 1;
+                }
+                end += 1;
+            }
+            b'.' => end += 1,
+            c if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80 => end += 1,
+            _ => break,
+        }
+    }
+    (end > 0).then(|| (at, name_start, name_start + end.min(bytes.len())))
+}
+
+/// The first CREATE statement in a script.
+pub fn create_statement(kind: DriverKind, script: &str) -> Option<&str> {
+    crate::script::split(kind, script)
+        .into_iter()
+        .find(|s| {
+            s.text
+                .split_whitespace()
+                .next()
+                .is_some_and(|w| w.eq_ignore_ascii_case("CREATE"))
+        })
+        .map(|s| s.text)
+}
+
 /// Name the trial create uses; dropped again straight after.
 pub const TRIAL_NAME: &str = "__honcho_apply_check";
 
@@ -98,43 +153,8 @@ pub fn trial(kind: DriverKind, o: &ObjectRef, script: &str) -> Option<(String, S
         ObjectKind::Trigger => "TRIGGER",
         _ => return None,
     };
-    let statements = honcho_db::script::split(kind, script);
-    let create = statements.iter().find(|s| {
-        s.text
-            .split_whitespace()
-            .next()
-            .is_some_and(|w| w.eq_ignore_ascii_case("CREATE"))
-    })?;
-    let text = create.text;
-    // the name follows the keyword: `name`, name or `db`.`name`
-    let upper = text.to_ascii_uppercase();
-    let at = upper.match_indices(keyword).map(|(i, _)| i).find(|&i| {
-        let before = upper[..i].chars().next_back();
-        let after = upper[i + keyword.len()..].chars().next();
-        before.is_some_and(char::is_whitespace) && after.is_some_and(char::is_whitespace)
-    })?;
-    let name_start = at + keyword.len() + text[at + keyword.len()..].len()
-        - text[at + keyword.len()..].trim_start().len();
-    let rest = &text[name_start..];
-    let mut end = 0;
-    let bytes = rest.as_bytes();
-    while end < bytes.len() {
-        match bytes[end] {
-            b'`' => {
-                end += 1;
-                while end < bytes.len() && bytes[end] != b'`' {
-                    end += 1;
-                }
-                end += 1;
-            }
-            b'.' => end += 1,
-            c if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80 => end += 1,
-            _ => break,
-        }
-    }
-    if end == 0 {
-        return None;
-    }
+    let text = create_statement(kind, script)?;
+    let (_, name_start, name_end) = name_span(text, keyword)?;
     let temp = ObjectRef {
         name: TRIAL_NAME.into(),
         ..o.clone()
@@ -143,7 +163,7 @@ pub fn trial(kind: DriverKind, o: &ObjectRef, script: &str) -> Option<(String, S
         "{}{}{}",
         &text[..name_start],
         qualified(kind, &temp),
-        &rest[end.min(rest.len())..]
+        &text[name_end..]
     );
     Some((
         format!("DELIMITER //\n{renamed} //\nDELIMITER ;\n"),
