@@ -1359,3 +1359,19 @@ fn browser_actions_reconnect_first(cx: &mut TestAppContext) {
         text(&ws, cx)
     );
 }
+
+#[gpui::test]
+fn object_tabs_run_only_through_apply(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    open_routine(&ws, cx, "refresh_stats", "Procedures (1)");
+    let q = query_tab(&ws, cx);
+    // the cursor is on the DROP line: running it alone would lose the procedure
+    for keys in ["P-enter", "P-shift-enter"] {
+        press(cx, keys);
+        cx.run_until_parked();
+        assert!(!q.read_with(cx, |q, _| q.is_running()));
+    }
+    let out = q.read_with(cx, |q, _| q.output_text());
+    assert!(out.iter().all(|m| m.contains("use Apply")), "{out:?}");
+    assert!(!out.is_empty());
+}

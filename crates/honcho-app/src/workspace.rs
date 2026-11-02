@@ -313,17 +313,6 @@ impl Workspace {
                             .update(cx, |b, cx| b.reload_database(conn_id, db, cx));
                     }
                 }
-                TabEvent::RunRoutine {
-                    saved,
-                    object,
-                    params,
-                } => this.ask_routine(
-                    (**saved).clone(),
-                    object.clone(),
-                    params.clone(),
-                    window,
-                    cx,
-                ),
                 TabEvent::OpenScript(text) => this.new_tab(text.clone(), None, window, cx),
             },
         ));

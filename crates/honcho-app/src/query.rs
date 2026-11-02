@@ -10,7 +10,7 @@ use gpui::{
 use honcho_config::{ColorTag, SavedConnection};
 use honcho_core::{complete, Editor};
 use honcho_db::script;
-use honcho_db::{DbError, DriverKind, MessageLevel, ObjectRef, QueryEvent, RoutineParam};
+use honcho_db::{DbError, DriverKind, MessageLevel, ObjectRef, QueryEvent};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{self, Catalog, Catalogs};
@@ -115,12 +115,6 @@ pub enum TabEvent {
     },
     /// Open a new tab with this text.
     OpenScript(String),
-    /// Ask for a routine's parameter values and run it.
-    RunRoutine {
-        saved: Box<SavedConnection>,
-        object: ObjectRef,
-        params: Vec<RoutineParam>,
-    },
 }
 
 /// The server object a tab's script recreates, and its definition when the
@@ -533,28 +527,6 @@ impl QueryTab {
         .detach();
     }
 
-    fn ask_to_run(&mut self, cx: &mut Context<Self>) {
-        let (Some(conn), Some(origin)) = (self.connection.clone(), self.origin.clone()) else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let params = conn
-                .session
-                .parameters(origin.object.clone())
-                .await
-                .unwrap_or_default();
-            this.update(cx, |_, cx| {
-                cx.emit(TabEvent::RunRoutine {
-                    saved: Box::new(conn.saved.clone()),
-                    object: origin.object,
-                    params,
-                })
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     pub fn set_connection(&mut self, conn: ActiveConnection, cx: &mut Context<Self>) {
         if let Some(old) = self.connection.replace(conn) {
             close_session(old, cx);
@@ -624,6 +596,18 @@ impl QueryTab {
             return;
         };
         if self.running.is_some() {
+            return;
+        }
+        // running part of it could drop the object without creating it again
+        if let Some(o) = &self.origin {
+            let name = routine::qualified(conn.saved.driver, &o.object);
+            self.output.get_or_insert_with(Output::default);
+            self.say(
+                MessageLevel::Info,
+                &format!("This tab replaces {name} on the server: use Apply to run it."),
+                None,
+            );
+            cx.notify();
             return;
         }
         let target = match target(&self.editor.read(cx).editor, conn.saved.driver, whole) {
@@ -1139,10 +1123,6 @@ impl QueryTab {
                         .on_click(cx.listener(|this, _, _, cx| this.reconnect(cx))),
                 )
         } else {
-            let routine = self
-                .origin
-                .as_ref()
-                .is_some_and(|o| o.object.kind.is_routine());
             div()
                 .flex()
                 .items_center()
@@ -1158,24 +1138,17 @@ impl QueryTab {
                             ),
                     )
                 })
-                .when(routine, |d| {
+                .when(self.origin.is_none(), |d| {
                     d.child(
-                        chip("tab-call")
+                        chip("tab-run")
                             .border_1()
                             .border_color(Theme::border())
-                            .child("Run…")
-                            .on_click(cx.listener(|this, _, _, cx| this.ask_to_run(cx))),
+                            .child("▶ Run")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run_action(false, window, cx)
+                            })),
                     )
                 })
-                .child(
-                    chip("tab-run")
-                        .border_1()
-                        .border_color(Theme::border())
-                        .child("▶ Run")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.run_action(false, window, cx)),
-                        ),
-                )
         };
 
         div()
