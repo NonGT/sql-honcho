@@ -325,6 +325,9 @@ impl Connection for FakeConnection {
             (ObjectKind::Function, "order_total") => {
                 Ok("CREATE FUNCTION order_total(p_id INT) RETURNS DECIMAL(12,2)\nRETURN (SELECT SUM(amount) FROM orders WHERE user_id = p_id)".into())
             }
+            (ObjectKind::View, "active_users") => {
+                Ok("CREATE VIEW active_users AS SELECT * FROM users WHERE active = 1".into())
+            }
             _ => Err(DbError::Unsupported("definition for this object")),
         }
     }

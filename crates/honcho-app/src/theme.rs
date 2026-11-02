@@ -119,6 +119,15 @@ impl Theme {
     pub fn tab_active() -> Hsla {
         c(0x1e1f22)
     }
+    pub fn warning() -> Hsla {
+        c(0xd7ba7d)
+    }
+    pub fn added() -> Hsla {
+        ca(0x2ea04330)
+    }
+    pub fn removed() -> Hsla {
+        ca(0xf8514930)
+    }
 
     pub fn token(kind: TokenKind) -> Hsla {
         match kind {

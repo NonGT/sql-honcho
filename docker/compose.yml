@@ -7,9 +7,11 @@ x-password: &password Honcho_test1
 services:
   mysql:
     image: mysql:8.4
+    # binary logging is on, which otherwise needs SUPER to create functions
     command: >-
       --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
       --ssl-ca=/tls/ca.pem --ssl-cert=/tls/server-cert.pem --ssl-key=/tls/server-key.pem
+      --log-bin-trust-function-creators=1
     environment:
       MYSQL_ROOT_PASSWORD: *password
       MYSQL_DATABASE: app
