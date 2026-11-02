@@ -189,6 +189,7 @@ impl Render for DiffView {
                         let l = &lines[i];
                         let changed = l.changed();
                         div()
+                            .w_full()
                             .h(px(18.))
                             .flex()
                             .child(side(l.left.clone(), changed, Theme::removed()))
