@@ -78,6 +78,24 @@ would lose the object. To call a routine, right-click it in the browser and
 pick Run…, which asks for its parameters and runs the CALL in a new tab. In the browser filter, `body:` searches routine
 code, e.g. `body:orders`.
 
+A project keeps routines, triggers and views as files, one per object, so
+they can live in git. Right-click a database and pick Save to project
+folder… to start one: it writes `sql-honcho.json` (the connection's name and
+the database) and pulls every object into `procedures/`, `functions/`,
+`triggers/` and `views/`. Files leave out DEFINER and the database name, so
+the same folder works against dev and prod. Cmd/Ctrl+Shift+O opens an
+existing project.
+
+The Project tab in the sidebar lists each object with what differs: edited
+here, changed on the server, or both. Double-click one to see the file and
+the server side by side. Pull writes the server's version into files (it
+asks before replacing ones you edited), and Apply runs edited files against
+the server, functions first and views after the views they read from. Like
+Apply in a tab, it tries each CREATE under a throwaway name before dropping
+anything. What was last pulled or applied is kept in `.sql-honcho/`, which
+ignores itself in git; that's how the server reformatting a view doesn't
+show up as a change.
+
 In the results grid: drag to select, click a header or row number for the
 whole column or row, Cmd/Ctrl+C copies as TSV for spreadsheets, Enter or a
 double-click opens the full value, and the arrow in a header sorts.
