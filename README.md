@@ -72,8 +72,10 @@ script that replaces it, and an Apply button. Apply first checks the server
 copy hasn't changed since the tab got it. For MySQL routines, which have to
 be dropped and created again, it creates the new version under a throwaway
 name first, so a script that won't create (a typo, a DEFINER you can't use)
-stops before anything is dropped. Run… asks for a routine's parameters and
-runs the CALL in a new tab. In the browser filter, `body:` searches routine
+stops before anything is dropped. Those tabs have no Run button, and the
+run shortcuts point you to Apply, since running the DROP line on its own
+would lose the object. To call a routine, right-click it in the browser and
+pick Run…, which asks for its parameters and runs the CALL in a new tab. In the browser filter, `body:` searches routine
 code, e.g. `body:orders`.
 
 In the results grid: drag to select, click a header or row number for the
