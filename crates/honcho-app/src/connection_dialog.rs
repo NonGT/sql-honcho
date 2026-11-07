@@ -103,12 +103,8 @@ fn mode_label(mode: TlsMode) -> &'static str {
 /// SQL Server sign-in methods, as `options["auth"]` holds them.
 const SQL_SERVER_AUTHS: [(&str, &str, &str); 3] = [
     ("sql", "SQL login", ""),
-    ("aad", "Entra token", "Paste an access token into Password."),
-    (
-        "windows",
-        "Windows",
-        "Leave User empty to sign in as yourself, or give DOMAIN\\user.",
-    ),
+    ("aad", "Entra token", "Token goes in Password."),
+    ("windows", "Windows", "Empty User signs in as you."),
 ];
 
 fn mode_hint(mode: TlsMode) -> &'static str {
@@ -1250,12 +1246,16 @@ impl Render for ConnectionDialog {
                     .child(field("Name", &self.fields.name, None))
                     .child(row().child(label("Driver")).child(drivers))
                     .when(is_sql_server, |d| {
-                        d.child(row().child(label("Auth")).child(sql_auths))
-                            .children(sql_auth_hint.map(|hint| {
-                                row()
-                                    .child(label(""))
-                                    .child(div().text_color(Theme::muted()).child(hint))
-                            }))
+                        d.child(
+                            row().child(label("Auth")).child(sql_auths).children(
+                                sql_auth_hint.map(|hint| {
+                                    div()
+                                        .min_w_0()
+                                        .text_color(Theme::muted())
+                                        .child(hint)
+                                }),
+                            ),
+                        )
                     })
                     .child(
                         row()
@@ -1376,7 +1376,7 @@ impl Render for ConnectionDialog {
             .track_focus(&self.focus)
             .occlude()
             .w(px(780.))
-            .h(px(440.))
+            .h(px(480.))
             .flex()
             .bg(Theme::panel())
             .border_1()
