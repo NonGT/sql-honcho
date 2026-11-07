@@ -294,6 +294,7 @@ impl Schema for View<'_> {
         match self.catalog.map(|c| c.saved.driver) {
             Some(DriverKind::SqlServer) => Dialect::SqlServer,
             Some(DriverKind::Postgres) => Dialect::Postgres,
+            Some(DriverKind::Sqlite) => Dialect::Sqlite,
             _ => Dialect::MySql,
         }
     }

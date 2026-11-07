@@ -484,3 +484,35 @@ fn keywords_and_functions_follow_the_dialect() {
     assert!(offered(Dialect::Postgres, "SELECT DATE_TR|", "DATE_TRUNC"));
     assert!(offered(Dialect::Postgres, "SELECT COAL|", "COALESCE"));
 }
+
+#[test]
+fn sqlite_has_its_own_words() {
+    let s = TestSchema {
+        dialect: Dialect::Sqlite,
+        current: Some("main".into()),
+        databases: Some(vec!["main".into()]),
+        objects: HashMap::from([(
+            "main".into(),
+            vec![
+                obj("users", Kind::Table, None),
+                obj("Order Lines", Kind::Table, None),
+            ],
+        )]),
+        ..Default::default()
+    };
+    let offered = |sql: &str, word: &str| labels_in(sql, &s).iter().any(|l| l == word);
+    assert!(offered("PRAG|", "PRAGMA"));
+    assert!(offered("SELECT * FROM users LIM|", "LIMIT"));
+    assert!(offered("SELECT STRF|", "STRFTIME"));
+    assert!(offered("SELECT IFN|", "IFNULL"));
+    assert!(!offered("SELECT GREA|", "GREATEST"));
+    assert!(!offered("DECLA|", "DECLARE"));
+    assert!(!offered("SELECT * FROM users NONCL|", "NONCLUSTERED"));
+    let from = items("SELECT * FROM |", &s);
+    assert!(
+        from.contains(&pair("Order Lines", "\"Order Lines\"")),
+        "{from:?}"
+    );
+    // no # comments: a name after # still completes
+    assert!(!labels_in("SELECT 1 # x\nFROM us|", &s).is_empty());
+}

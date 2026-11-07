@@ -19,7 +19,7 @@ use crate::routine_form::{FormEvent, RoutineForm};
 use crate::theme::{self, EditorFont, Theme, FONT_SIZE};
 use honcho_config::SavedConnection;
 use honcho_db::project::{Manifest, Project};
-use honcho_db::{ObjectRef, RoutineParam};
+use honcho_db::{DriverKind, ObjectRef, RoutineParam};
 
 actions!(
     workspace,
@@ -593,6 +593,10 @@ impl Workspace {
     pub fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         for path in paths {
             let path = path.canonicalize().unwrap_or(path);
+            if is_sqlite(&path) {
+                self.open_database_file(path, window, cx);
+                continue;
+            }
             if let Some(ix) = self
                 .tabs
                 .iter()
@@ -632,6 +636,52 @@ impl Workspace {
                 self.new_tab(text, Some(path), window, cx);
             }
         }
+    }
+
+    /// Connects a tab to a SQLite file, through the saved connection for
+    /// it, which the first open makes.
+    fn open_database_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let file = path.display().to_string();
+        let state = cx.global_mut::<connections::Connections>();
+        let known = state
+            .store
+            .connections()
+            .iter()
+            .find(|c| c.driver == DriverKind::Sqlite && c.host == file)
+            .cloned();
+        let saved = match known {
+            Some(saved) => saved,
+            None => {
+                let name = path
+                    .file_name()
+                    .map_or_else(|| file.clone(), |n| n.to_string_lossy().into_owned());
+                let saved = SavedConnection {
+                    host: file,
+                    ..SavedConnection::new(name, DriverKind::Sqlite)
+                };
+                state.store.upsert(saved.clone());
+                // a list that failed to load isn't written over
+                if state.load_error.is_none() {
+                    if let Err(e) = state.store.save() {
+                        drop(window.prompt(
+                            PromptLevel::Warning,
+                            "Couldn't save the connection for this file.",
+                            Some(&e.to_string()),
+                            &["OK"],
+                            cx,
+                        ));
+                    }
+                }
+                saved
+            }
+        };
+        let q = self.active_query_tab().read(cx);
+        if q.connection.is_some() || !self.active_editor().read(cx).is_pristine() {
+            self.new_tab(String::new(), None, window, cx);
+        }
+        self.active_query_tab()
+            .clone()
+            .update(cx, |q, cx| q.open_saved(saved, None, false, cx));
     }
 
     /// Offers the connections open in the browser, each on the database
@@ -1368,6 +1418,16 @@ async fn dialog_failed(err: impl std::fmt::Display, cx: &mut gpui::AsyncWindowCo
     }) {
         rx.await.ok();
     }
+}
+
+/// Whether the file starts with SQLite's header, whatever it's called.
+fn is_sqlite(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && &head == b"SQLite format 3\0"
 }
 
 #[cfg(test)]

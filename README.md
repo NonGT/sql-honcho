@@ -6,8 +6,8 @@ A native SQL editor and database client written in Rust on top of
 The goal is a fast editor that behaves like VS Code (multi-cursor, line
 operations, the usual keybindings) plus a client for PostgreSQL, MySQL/MariaDB,
 SQL Server and SQLite. So far it has the editor, saved connections, a
-schema browser, and running queries against MySQL/MariaDB, PostgreSQL and
-SQL Server with results in a grid.
+schema browser, and running queries against all four with results in a
+grid.
 
 ## Build
 
@@ -26,6 +26,11 @@ Connections can go through an SSH server (password, key file or ssh-agent;
 certificate and host name checks. The first time an SSH server is seen, the
 app shows its host key fingerprint and asks before adding it to
 `~/.ssh/known_hosts`.
+
+A SQLite connection is just a file. Opening a SQLite database with File >
+Open (or on the command line) connects a tab to it and saves a connection
+for it. The file is never created, so a typo in the path is an error rather
+than a new empty database.
 
 Passwords are kept in the OS keyring. On Linux that is the Secret Service,
 which GNOME Keyring or KeePassXC provide; without one, connections still

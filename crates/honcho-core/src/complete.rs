@@ -45,6 +45,9 @@ pub enum Dialect {
     /// `schema.table`, "double quotes", and $$ quoted bodies. Unquoted
     /// names fold to lower case.
     Postgres,
+    /// `db.table` across attached files, "double quotes" (or [brackets]
+    /// or backticks), no schemas.
+    Sqlite,
 }
 
 impl Dialect {
@@ -54,6 +57,7 @@ impl Dialect {
             Dialect::MySql => None,
             Dialect::SqlServer => Some("dbo"),
             Dialect::Postgres => Some("public"),
+            Dialect::Sqlite => None,
         }
     }
 
@@ -127,6 +131,7 @@ const FUNCTIONS: &[&str] = &[
     "DATEADD",
     "DATEDIFF",
     "DATEPART",
+    "DATETIME",
     "DATE_ADD",
     "DATE_FORMAT",
     "DATE_SUB",
@@ -152,6 +157,7 @@ const FUNCTIONS: &[&str] = &[
     "JSON_OBJECT",
     "JSON_UNQUOTE",
     "JSON_VALUE",
+    "JULIANDAY",
     "LEAST",
     "LEFT",
     "LEN",
@@ -166,6 +172,7 @@ const FUNCTIONS: &[&str] = &[
     "NOW",
     "NULLIF",
     "POSITION",
+    "PRINTF",
     "RAND",
     "RANDOM",
     "REGEXP_REPLACE",
@@ -175,6 +182,7 @@ const FUNCTIONS: &[&str] = &[
     "RPAD",
     "RTRIM",
     "SPLIT_PART",
+    "STRFTIME",
     "STRING_AGG",
     "STR_TO_DATE",
     "SUBSTRING",
@@ -186,6 +194,7 @@ const FUNCTIONS: &[&str] = &[
     "TRIM",
     "TRUNCATE",
     "TRY_CAST",
+    "TYPEOF",
     "UPPER",
     "UUID",
     "YEAR",
@@ -196,17 +205,25 @@ const FUNCTIONS: &[&str] = &[
 fn function_in(f: &str, dialect: Dialect) -> bool {
     use Dialect::*;
     let only: &[Dialect] = match f {
-        "CURDATE" | "DATE" | "DATE_ADD" | "DATE_FORMAT" | "DATE_SUB" | "GROUP_CONCAT" | "IF"
-        | "IFNULL" | "INSTR" | "JSON_EXTRACT" | "JSON_UNQUOTE" | "STR_TO_DATE"
-        | "TIMESTAMPDIFF" | "TRUNCATE" | "UUID" => &[MySql],
-        "CEILING" | "DATEADD" | "DATEPART" | "EOMONTH" | "GETDATE" | "IIF" | "ISNULL" | "LEN"
-        | "NEWID" | "SYSDATETIME" | "TRY_CAST" => &[SqlServer],
+        "CURDATE" | "DATE_ADD" | "DATE_FORMAT" | "DATE_SUB" | "IF" | "JSON_UNQUOTE"
+        | "STR_TO_DATE" | "TIMESTAMPDIFF" | "TRUNCATE" | "UUID" => &[MySql],
+        "CEILING" | "DATEADD" | "DATEPART" | "EOMONTH" | "GETDATE" | "ISNULL" | "LEN" | "NEWID"
+        | "SYSDATETIME" | "TRY_CAST" => &[SqlServer],
         "AGE" | "ARRAY_AGG" | "DATE_TRUNC" | "GENERATE_SERIES" | "GEN_RANDOM_UUID"
-        | "JSONB_BUILD_OBJECT" | "RANDOM" | "SPLIT_PART" | "TO_CHAR" | "TO_DATE" => &[Postgres],
-        "CEIL" | "LENGTH" | "LPAD" | "MOD" | "NOW" | "RPAD" | "REGEXP_REPLACE" | "EXTRACT"
-        | "POSITION" => &[MySql, Postgres],
-        "CONVERT" | "DATEDIFF" | "FORMAT" | "RAND" | "YEAR" => &[MySql, SqlServer],
-        "JSON_VALUE" | "STRING_AGG" => &[SqlServer, Postgres],
+        | "JSONB_BUILD_OBJECT" | "SPLIT_PART" | "TO_CHAR" | "TO_DATE" => &[Postgres],
+        "DATETIME" | "JULIANDAY" | "PRINTF" | "STRFTIME" | "TYPEOF" => &[Sqlite],
+        "CEIL" | "LPAD" | "MOD" | "NOW" | "RPAD" | "REGEXP_REPLACE" | "EXTRACT" | "POSITION" => {
+            &[MySql, Postgres]
+        }
+        "CONVERT" | "DATEDIFF" | "RAND" | "YEAR" => &[MySql, SqlServer],
+        "JSON_VALUE" => &[SqlServer, Postgres],
+        "DATE" | "GROUP_CONCAT" | "IFNULL" | "INSTR" | "JSON_EXTRACT" => &[MySql, Sqlite],
+        "IIF" => &[SqlServer, Sqlite],
+        "RANDOM" => &[Postgres, Sqlite],
+        "LENGTH" => &[MySql, Postgres, Sqlite],
+        "FORMAT" => &[MySql, SqlServer, Sqlite],
+        "STRING_AGG" => &[SqlServer, Postgres, Sqlite],
+        "GREATEST" | "LEAST" => &[MySql, SqlServer, Postgres],
         _ => return true,
     };
     only.contains(&dialect)
@@ -222,14 +239,24 @@ fn keyword_in(k: &str, dialect: Dialect) -> bool {
         "BREAK" | "CATCH" | "CLUSTERED" | "EXEC" | "GO" | "GOTO" | "NOCOUNT" | "NONCLUSTERED"
         | "OUTPUT" | "PRINT" | "PROC" | "RAISERROR" | "THROW" | "TOP" | "TRAN" | "TRY"
         | "WAITFOR" => &[SqlServer],
-        "CONCURRENTLY" | "CONFLICT" | "DEFERRABLE" | "ELSIF" | "EXCEPTION" | "EXTENSION"
-        | "FILTER" | "ILIKE" | "IMMUTABLE" | "ISNULL" | "LANGUAGE" | "MATERIALIZED" | "NOTNULL"
-        | "NULLS" | "OWNER" | "PERFORM" | "RAISE" | "REFRESH" | "SETOF" | "STABLE" | "STRICT"
-        | "TEMP" | "VACUUM" | "VOLATILE" => &[Postgres],
-        "CALL" | "COMMENT" | "DO" | "INOUT" | "LATERAL" | "LIMIT" | "OUT" | "RECURSIVE"
-        | "RENAME" | "RETURNING" | "SECURITY" | "SHOW" => &[MySql, Postgres],
-        "IDENTITY" | "INSTEAD" => &[SqlServer, Postgres],
+        "CONCURRENTLY" | "ELSIF" | "EXCEPTION" | "EXTENSION" | "ILIKE" | "IMMUTABLE"
+        | "LANGUAGE" | "OWNER" | "PERFORM" | "REFRESH" | "SETOF" | "STABLE" | "VOLATILE" => {
+            &[Postgres]
+        }
+        "ATTACH" | "AUTOINCREMENT" | "DETACH" | "PRAGMA" => &[Sqlite],
+        "CONFLICT" | "DEFERRABLE" | "FILTER" | "ISNULL" | "MATERIALIZED" | "NOTNULL" | "NULLS"
+        | "RAISE" | "STRICT" | "TEMP" | "VACUUM" => &[Postgres, Sqlite],
+        "CALL" | "COMMENT" | "INOUT" | "LATERAL" | "OUT" | "SECURITY" | "SHOW" => {
+            &[MySql, Postgres]
+        }
+        "DO" | "LIMIT" | "RECURSIVE" | "RENAME" | "RETURNING" => &[MySql, Postgres, Sqlite],
+        "IDENTITY" => &[SqlServer, Postgres],
+        "INSTEAD" => &[SqlServer, Postgres, Sqlite],
         "USE" => &[MySql, SqlServer],
+        // server-side programming SQLite doesn't have
+        "CLOSE" | "CONTINUE" | "CURSOR" | "DEALLOCATE" | "DECLARE" | "FETCH" | "FUNCTION"
+        | "GRANT" | "LOOP" | "OPEN" | "PROCEDURE" | "RETURN" | "RETURNS" | "REVOKE" | "ROLE"
+        | "SCHEMA" | "SEQUENCE" | "TRUNCATE" | "WHILE" => &[MySql, SqlServer, Postgres],
         // highlighted, but not something anyone types as a keyword
         "CTE" => &[],
         _ => return true,
@@ -721,7 +748,7 @@ fn quoted(name: &str, dialect: Dialect) -> String {
         && !(dialect == Dialect::Postgres && name.chars().any(char::is_uppercase));
     match dialect {
         _ if plain => name.to_string(),
-        Dialect::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        Dialect::Postgres | Dialect::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
         Dialect::MySql => format!("`{}`", name.replace('`', "``")),
         Dialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
     }

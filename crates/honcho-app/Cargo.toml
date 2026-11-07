@@ -29,3 +29,4 @@ gpui = "0.2.2"
 gpui = { version = "0.2.2", default-features = false, features = ["test-support"] }
 honcho-db = { path = "../honcho-db", features = ["fake"] }
 tempfile = "3"
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
