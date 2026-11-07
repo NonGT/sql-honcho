@@ -444,6 +444,11 @@ fn connect_fake_as(
     fill(cx, ["fake db", "", "", user, "", "app"]);
     press(cx, "enter");
     wait_until(cx, |cx| dialog(ws, cx).is_none());
+    // the browser opens the connection the tab is on
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    wait_until(cx, |cx| {
+        b.read_with(cx, |b, _| b.is_idle() && b.labels().len() > 1)
+    });
 }
 
 fn query_tab(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<QueryTab> {
@@ -479,6 +484,118 @@ fn connect_attaches_the_session_to_the_tab(cx: &mut TestAppContext) {
         ws.active_connection(cx).map(|c| c.saved.name.clone())
     });
     assert_eq!(name.as_deref(), Some("fake db"));
+}
+
+fn tab_target(
+    ws: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<(String, Option<String>)> {
+    ws.read_with(cx, |ws, cx| {
+        let q = ws.active_query_tab().read(cx);
+        q.connection
+            .as_ref()
+            .map(|c| (c.saved.name.clone(), q.database.clone()))
+    })
+}
+
+fn wait_for_target(ws: &Entity<Workspace>, cx: &mut VisualTestContext, database: &str) {
+    wait_until(cx, |cx| {
+        tab_target(ws, cx) == Some(("fake db".into(), Some(database.into())))
+    });
+}
+
+/// A tab with no connection, as a file opens in.
+fn open_unconnected(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.sql");
+    std::fs::write(&path, "select 1;").unwrap();
+    // an untouched tab would take the file in, connection and all
+    cx.simulate_input("-- ");
+    ws.update_in(cx, |ws, window, cx| ws.open_paths(vec![path], window, cx));
+    assert_eq!(tab_target(ws, cx), None);
+    dir
+}
+
+#[gpui::test]
+fn new_tabs_open_where_the_current_tab_or_the_browser_is(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    // connecting a tab opened the tree down to its database
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    assert_eq!(
+        b.read_with(cx, |b, cx| b.selected_target(cx))
+            .map(|(s, d)| (s.name, d)),
+        Some(("fake db".into(), Some("app".into())))
+    );
+
+    press(cx, "P-n");
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), 2);
+    wait_for_target(&ws, cx, "app");
+
+    // a tab without a connection goes by what the browser has selected
+    let _dir = open_unconnected(&ws, cx);
+    let id = b.read_with(cx, |b, cx| b.open_connections(cx)[0].id.clone());
+    b.update(cx, |b, cx| b.reveal(&id, Some("analytics"), cx));
+    press(cx, "P-n");
+    wait_for_target(&ws, cx, "analytics");
+}
+
+#[gpui::test]
+fn the_connection_chip_offers_what_the_browser_has_open(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    let pick = |cx: &mut VisualTestContext| {
+        let q = query_tab(&ws, cx);
+        q.update(cx, |_, cx| cx.emit(crate::query::TabEvent::PickConnection));
+        cx.run_until_parked();
+        q.read_with(cx, |q, _| q.connection_names())
+    };
+    // nothing open yet: straight to the dialog
+    assert_eq!(pick(cx), None);
+    assert!(dialog(&ws, cx).is_some());
+    press(cx, "escape");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+
+    connect_fake(&ws, cx, None);
+    let _dir = open_unconnected(&ws, cx);
+    assert_eq!(pick(cx), Some(vec!["fake db".to_string()]));
+    press(cx, "escape");
+    assert_eq!(
+        query_tab(&ws, cx).read_with(cx, |q, _| q.connection_names()),
+        None
+    );
+
+    pick(cx);
+    press(cx, "enter");
+    wait_for_target(&ws, cx, "app");
+
+    // past the list is the dialog
+    pick(cx);
+    press(cx, "down");
+    press(cx, "enter");
+    assert!(dialog(&ws, cx).is_some());
+}
+
+#[gpui::test]
+fn use_in_this_tab_connects_the_current_tab(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let _dir = open_unconnected(&ws, cx);
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.act("analytics", "use", cx));
+    wait_for_target(&ws, cx, "analytics");
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), 2);
+
+    // a tab that recreates an object keeps its server; a new tab gets it
+    browse(&ws, cx, "Procedures (1)");
+    b.update(cx, |b, cx| b.act("refresh_stats", "definition", cx));
+    wait_until(cx, |cx| ws.read_with(cx, |ws, _| ws.tab_count() == 3));
+    let q = query_tab(&ws, cx);
+    wait_until(cx, |cx| q.read_with(cx, |q, _| q.origin.is_some()));
+    let tabs = ws.read_with(cx, |ws, _| ws.tab_count());
+    b.update(cx, |b, cx| b.act("fake db", "use", cx));
+    cx.run_until_parked();
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), tabs + 1);
+    wait_until(cx, |cx| tab_target(&ws, cx).is_some());
 }
 
 #[gpui::test]
@@ -853,7 +970,7 @@ fn browser_labels(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<Str
 /// Clicks a row and waits for whatever it loads.
 fn browse(ws: &Entity<Workspace>, cx: &mut VisualTestContext, label: &str) {
     let b = ws.read_with(cx, |ws, _| ws.browser().clone());
-    b.update(cx, |b, cx| b.click(label, false, cx));
+    b.update(cx, |b, cx| b.expand(label, cx));
     wait_until(cx, |cx| b.read_with(cx, |b, _| b.is_idle()));
 }
 
@@ -861,7 +978,18 @@ fn browse(ws: &Entity<Workspace>, cx: &mut VisualTestContext, label: &str) {
 fn object_browser_loads_as_nodes_open(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     connect_fake(&ws, cx, None);
-    assert_eq!(browser_labels(&ws, cx), ["fake db"]);
+    assert_eq!(
+        browser_labels(&ws, cx),
+        [
+            "fake db",
+            "  app",
+            "    Tables (2)",
+            "    Views (1)",
+            "    Procedures (1)",
+            "    Functions (1)",
+            "  analytics",
+        ]
+    );
 
     browse(&ws, cx, "fake db");
     browse(&ws, cx, "app");
@@ -943,7 +1071,7 @@ fn filter_searches_nodes_that_were_never_opened(cx: &mut TestAppContext) {
     assert!(!labels.iter().any(|l| l.trim() == "orders"), "{labels:?}");
 
     b.update(cx, |b, cx| b.set_filter("", cx));
-    assert_eq!(browser_labels(&ws, cx), ["fake db", "  app", "  analytics"]);
+    assert_eq!(browser_labels(&ws, cx).len(), 7);
 }
 
 #[gpui::test]

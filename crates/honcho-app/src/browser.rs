@@ -65,6 +65,11 @@ pub enum BrowserEvent {
         saved: Box<SavedConnection>,
         database: String,
     },
+    /// Connect the current tab here.
+    UseHere {
+        saved: Box<SavedConnection>,
+        database: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -896,6 +901,18 @@ impl ObjectBrowser {
             (MenuAction::CopyName, other) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(other.label()))
             }
+            (MenuAction::UseHere, _) => {
+                if let Some(saved) = self.conn_of(&path, cx) {
+                    let database = match &item {
+                        Item::Database(d) => Some(d.clone()),
+                        _ => None,
+                    };
+                    cx.emit(BrowserEvent::UseHere {
+                        saved: Box::new(saved),
+                        database,
+                    });
+                }
+            }
             (MenuAction::NewQuery, _) => {
                 if let Some(saved) = self.conn_of(&path, cx) {
                     let database = match &item {
@@ -914,6 +931,54 @@ impl ObjectBrowser {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// The connection and database of the selected row.
+    pub fn selected_target(&self, cx: &App) -> Option<(SavedConnection, Option<String>)> {
+        let path = self.selected.as_ref()?;
+        let saved = self.conn_of(path, cx)?;
+        let database = path
+            .get(1)
+            .and_then(|s| s.strip_prefix("d:"))
+            .map(str::to_string);
+        Some((saved, database))
+    }
+
+    /// Connections with a session open, in the order they're listed.
+    pub fn open_connections(&self, cx: &App) -> Vec<SavedConnection> {
+        cx.global::<Connections>()
+            .store
+            .connections()
+            .iter()
+            .filter(|c| self.session(&c.id).is_some())
+            .cloned()
+            .collect()
+    }
+
+    /// Opens a connection a tab just connected to and expands its
+    /// database, selecting it. Nothing already open is closed.
+    pub fn reveal(&mut self, conn_id: &str, database: Option<&str>, cx: &mut Context<Self>) {
+        let Some(saved) = self.saved(conn_id, cx) else {
+            return;
+        };
+        let root = vec![format!("c:{conn_id}")];
+        self.expanded.insert(root.clone());
+        let mut selected = root.clone();
+        if let Some(db) = database {
+            selected.push(format!("d:{db}"));
+            self.expanded.insert(selected.clone());
+        }
+        self.selected = Some(selected.clone());
+        if matches!(self.children.get(&root), Some(Children::Loaded(_))) {
+            self.load_open_children(&root, cx);
+        } else if !matches!(self.conns.get(conn_id), Some(Conn::Opening)) {
+            self.load(root, Item::Connection(Box::new(saved)), false, cx);
+        }
+        self.save_expanded(cx);
+        self.rebuild(cx);
+        if let Some(ix) = self.rows.iter().position(|r| r.path == selected) {
+            self.scroll.scroll_to_item(ix, gpui::ScrollStrategy::Top);
+        }
     }
 
     /// Remembers the width once a drag is over.
@@ -987,7 +1052,22 @@ impl ObjectBrowser {
         }
     }
 
-    /// A right-click action on the row with this label: "definition" or "run".
+    /// Opens the row with this label; one already open stays open.
+    #[cfg(test)]
+    pub fn expand(&mut self, label: &str, cx: &mut Context<Self>) {
+        let row = self
+            .rows
+            .iter()
+            .find(|r| r.item.label() == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("no row {label}"));
+        if !row.expanded {
+            self.toggle(row.path, row.item, cx);
+        }
+    }
+
+    /// A right-click action on the row with this label: "definition",
+    /// "run" or "use".
     #[cfg(test)]
     pub fn act(&mut self, label: &str, what: &str, cx: &mut Context<Self>) {
         let row = self
@@ -996,6 +1076,15 @@ impl ObjectBrowser {
             .find(|r| r.item.label() == label)
             .cloned()
             .unwrap_or_else(|| panic!("no row {label}"));
+        if what == "use" {
+            self.menu = Some(Menu {
+                path: row.path,
+                item: row.item,
+                position: Point::default(),
+            });
+            self.menu_action(MenuAction::UseHere, cx);
+            return;
+        }
         let Item::Object(o) = &row.item else {
             panic!("{label} isn't an object");
         };
@@ -1160,6 +1249,7 @@ enum MenuAction {
     CopyName,
     Template(Template),
     NewQuery,
+    UseHere,
     Run,
     SaveProject,
 }
@@ -1167,9 +1257,14 @@ enum MenuAction {
 fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
     use MenuAction::*;
     match item {
-        Item::Connection(_) => vec![("New query tab", NewQuery), ("Refresh", Refresh)],
+        Item::Connection(_) => vec![
+            ("New query tab", NewQuery),
+            ("Use in this tab", UseHere),
+            ("Refresh", Refresh),
+        ],
         Item::Database(_) => vec![
             ("New query tab", NewQuery),
+            ("Use in this tab", UseHere),
             ("Save to project folder…", SaveProject),
             ("Refresh", Refresh),
         ],

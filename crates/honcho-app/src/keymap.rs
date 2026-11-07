@@ -112,6 +112,10 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
             ("up", PrevDatabase, Some("DatabaseList")),
             ("down", NextDatabase, Some("DatabaseList")),
             ("enter", PickDatabase, Some("DatabaseList")),
+            ("escape", CloseDatabases, Some("ConnectionList")),
+            ("up", PrevDatabase, Some("ConnectionList")),
+            ("down", NextDatabase, Some("ConnectionList")),
+            ("enter", PickDatabase, Some("ConnectionList")),
             ("enter", Submit, CONNECTION_FIELD),
             // after clicking a swatch or checkbox focus sits on the dialog
             ("enter", Submit, Some("ConnectionDialog")),

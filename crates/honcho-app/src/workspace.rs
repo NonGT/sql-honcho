@@ -230,6 +230,19 @@ impl Workspace {
                 BrowserEvent::SaveProject { saved, database } => {
                     this.save_project(saved.name.clone(), database.clone(), window, cx)
                 }
+                BrowserEvent::UseHere { saved, database } => {
+                    // a tab that's busy or recreates an object keeps its server
+                    let q = this.active_query_tab().read(cx);
+                    if q.origin.is_some() || q.is_running() {
+                        this.new_tab(String::new(), None, window, cx);
+                    }
+                    let (saved, database) = ((**saved).clone(), database.clone());
+                    this.active_query_tab()
+                        .clone()
+                        .update(cx, |q, cx| q.open_saved(saved, database, false, cx));
+                    let editor = this.active_editor().clone();
+                    window.focus(&editor.focus_handle(cx));
+                }
             },
         ));
     }
@@ -556,6 +569,11 @@ impl Workspace {
                     }
                 }
                 TabEvent::OpenScript(text) => this.new_tab(text.clone(), None, window, cx),
+                TabEvent::Connected { conn_id, database } => {
+                    this.browser
+                        .update(cx, |b, cx| b.reveal(conn_id, database.as_deref(), cx));
+                }
+                TabEvent::PickConnection => this.pick_connection(window, cx),
             },
         ));
         self.query_tabs.insert(editor.entity_id(), query);
@@ -616,8 +634,45 @@ impl Workspace {
         }
     }
 
+    /// Offers the connections open in the browser, each on the database
+    /// selected there; with none open, straight to the dialog.
+    fn pick_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let browser = self.browser.read(cx);
+        let selected = browser.selected_target(cx);
+        let list: Vec<_> = browser
+            .open_connections(cx)
+            .into_iter()
+            .map(|saved| {
+                let database = selected
+                    .as_ref()
+                    .filter(|(s, _)| s.id == saved.id)
+                    .and_then(|(_, d)| d.clone());
+                (saved, database)
+            })
+            .collect();
+        if list.is_empty() {
+            self.open_connections(window, cx);
+        } else {
+            self.active_query_tab()
+                .clone()
+                .update(cx, |q, cx| q.show_connections(list, cx));
+        }
+    }
+
+    /// A new tab goes where the current one is, or else to what's
+    /// selected in the browser.
     fn new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
+        let q = self.active_query_tab().read(cx);
+        let target = match &q.connection {
+            Some(c) => Some((c.saved.clone(), q.database.clone())),
+            None => self.browser.read(cx).selected_target(cx),
+        };
         self.new_tab(String::new(), None, window, cx);
+        if let Some((saved, database)) = target {
+            self.active_query_tab()
+                .clone()
+                .update(cx, |q, cx| q.open_saved(saved, database, false, cx));
+        }
     }
 
     fn open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
