@@ -150,6 +150,17 @@ impl Connection for MySqlConnection {
         self.conn()?.ping().await.map_err(query_error)
     }
 
+    async fn in_transaction(&mut self) -> Result<bool> {
+        // every OK packet says whether a transaction is open; DO 0 just
+        // gets a fresh one, without the PROCESS privilege innodb_trx needs
+        let conn = self.conn()?;
+        conn.query_drop("DO 0").await.map_err(query_error)?;
+        Ok(conn.last_ok_packet().is_some_and(|ok| {
+            ok.status_flags()
+                .contains(mysql_async::consts::StatusFlags::SERVER_STATUS_IN_TRANS)
+        }))
+    }
+
     async fn current_database(&mut self) -> Result<Option<String>> {
         let db: Option<Option<String>> = self
             .conn()?
