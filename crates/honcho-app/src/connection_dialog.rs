@@ -100,6 +100,17 @@ fn mode_label(mode: TlsMode) -> &'static str {
     }
 }
 
+/// SQL Server sign-in methods, as `options["auth"]` holds them.
+const SQL_SERVER_AUTHS: [(&str, &str, &str); 3] = [
+    ("sql", "SQL login", ""),
+    ("aad", "Entra token", "Paste an access token into Password."),
+    (
+        "windows",
+        "Windows",
+        "Leave User empty to sign in as yourself, or give DOMAIN\\user.",
+    ),
+];
+
 fn mode_hint(mode: TlsMode) -> &'static str {
     match mode {
         TlsMode::Disable => "Never encrypt.",
@@ -987,11 +998,47 @@ impl Render for ConnectionDialog {
                 move |this, _, _, cx| {
                     if available {
                         this.draft.driver = kind;
+                        if kind != DriverKind::SqlServer {
+                            this.draft.options.remove("auth");
+                        }
                         this.driver_changed(cx);
                     }
                 },
             ))
         }));
+
+        let sql_auth = self
+            .draft
+            .options
+            .get("auth")
+            .map_or("sql", String::as_str)
+            .to_string();
+        let sql_auths = div()
+            .flex()
+            .gap_1()
+            .children(SQL_SERVER_AUTHS.map(|(key, text, _)| {
+                // Windows sign-in needs the Windows libraries
+                let available = key != "windows" || cfg!(windows);
+                button_with_id(key, text, sql_auth == key, available).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        if !available {
+                            return;
+                        }
+                        if key == "sql" {
+                            this.draft.options.remove("auth");
+                        } else {
+                            this.draft.options.insert("auth".into(), key.into());
+                        }
+                        cx.notify();
+                    },
+                ))
+            }));
+        let sql_auth_hint = SQL_SERVER_AUTHS
+            .iter()
+            .find(|(key, ..)| *key == sql_auth)
+            .map(|(.., hint)| *hint)
+            .filter(|h| !h.is_empty());
+        let is_sql_server = self.draft.driver == DriverKind::SqlServer;
 
         let swatch = |tag: Option<ColorTag>, active: bool| {
             div()
@@ -1202,6 +1249,14 @@ impl Render for ConnectionDialog {
                 Section::General => d
                     .child(field("Name", &self.fields.name, None))
                     .child(row().child(label("Driver")).child(drivers))
+                    .when(is_sql_server, |d| {
+                        d.child(row().child(label("Auth")).child(sql_auths))
+                            .children(sql_auth_hint.map(|hint| {
+                                row()
+                                    .child(label(""))
+                                    .child(div().text_color(Theme::muted()).child(hint))
+                            }))
+                    })
                     .child(
                         row()
                             .child(field("Host", &self.fields.host, None).flex_1())

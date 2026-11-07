@@ -147,11 +147,20 @@ fn ident(kind: DriverKind, name: &str) -> String {
 fn literal(kind: DriverKind, v: &Value) -> String {
     match v {
         Value::Null => "NULL".into(),
+        // T-SQL has no TRUE; bit columns take 1 and 0
+        Value::Bool(b) if kind == DriverKind::SqlServer => if *b { "1" } else { "0" }.into(),
         Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         Value::Int(i) => i.to_string(),
         Value::UInt(u) => u.to_string(),
         Value::Float(f) if f.is_finite() => f.to_string(),
         Value::Decimal(d) => d.clone(),
+        Value::Bytes(b) if kind == DriverKind::SqlServer => {
+            let mut s = String::from("0x");
+            for byte in b {
+                let _ = write!(s, "{byte:02X}");
+            }
+            s
+        }
         Value::Bytes(b) => {
             let mut s = String::from("X'");
             for byte in b {
@@ -166,6 +175,10 @@ fn literal(kind: DriverKind, v: &Value) -> String {
             // MySQL also reads backslash escapes inside strings
             if kind == DriverKind::MySql {
                 escaped = escaped.replace('\\', "\\\\");
+            }
+            // without N, characters outside the database's code page are lost
+            if kind == DriverKind::SqlServer {
+                return format!("N'{escaped}'");
             }
             format!("'{escaped}'")
         }
@@ -254,6 +267,13 @@ mod tests {
             inserts(DriverKind::Postgres, &refs, &rows),
             "INSERT INTO \"users\" (\"id\", \"name\") VALUES (1, 'O''Brien \\ ไทย');\n"
         );
+        assert_eq!(
+            inserts(DriverKind::SqlServer, &refs, &rows),
+            "INSERT INTO [users] ([id], [name]) VALUES (1, N'O''Brien \\ ไทย');\n"
+        );
+        let flags = [vec![Value::Bool(true), Value::Bytes(vec![0xde, 0xad])]];
+        let flags: Vec<Vec<&Value>> = flags.iter().map(|r| r.iter().collect()).collect();
+        assert!(inserts(DriverKind::SqlServer, &refs, &flags).contains("VALUES (1, 0xDEAD)"));
         let no_table = cols(&["x"]);
         let out = inserts(
             DriverKind::MySql,

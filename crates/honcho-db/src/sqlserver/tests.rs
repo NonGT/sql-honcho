@@ -309,3 +309,81 @@ async fn read_only_sees_statements_without_semicolons() {
         "{events:?}"
     );
 }
+
+// Pull, edit and apply routines in their own schema, in `analytics`,
+// which no other test puts routines in.
+it!(project_round_trip, |s| {
+    use crate::project::{self, Manifest, Project, Status};
+    let setup = run(
+        &s,
+        "USE analytics
+         GO
+         IF SCHEMA_ID('proj') IS NULL EXEC('CREATE SCHEMA proj')
+         DROP VIEW IF EXISTS proj.base
+         DROP PROCEDURE IF EXISTS proj.double_it
+         GO
+         -- doubles; really
+         CREATE PROC proj.double_it @p int, @doubled int OUTPUT AS
+         SET @doubled = @p * 2;
+         GO
+         CREATE VIEW proj.base AS SELECT 1 AS n",
+    )
+    .await;
+    assert!(
+        matches!(setup.last(), Some(QueryEvent::Finished(Ok(_)))),
+        "{setup:?}"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let p = Project::init(
+        dir.path(),
+        Manifest {
+            connection: "docker".into(),
+            database: "analytics".into(),
+        },
+    )
+    .unwrap();
+    let entries = project::status(&s, &p).await.unwrap();
+    for e in &entries {
+        project::pull(&p, DriverKind::SqlServer, e).unwrap();
+    }
+    let entries = project::status(&s, &p).await.unwrap();
+    for e in &entries {
+        assert_eq!(e.status, Status::Same, "{}", e.object.name);
+    }
+
+    let file = dir.path().join("procedures/proj.double_it.sql");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("-- doubles; really\n"), "{text}");
+    assert!(
+        text.contains("CREATE OR ALTER PROC proj.double_it"),
+        "{text}"
+    );
+    std::fs::write(&file, text.replace("@p * 2", "@p * 3")).unwrap();
+    let entries = project::status(&s, &p).await.unwrap();
+    let edited = entries
+        .iter()
+        .find(|e| e.object.name == "double_it")
+        .unwrap();
+    assert_eq!(edited.status, Status::Edited);
+    project::apply(&s, &p, DriverKind::SqlServer, edited)
+        .await
+        .unwrap();
+    let entries = project::status(&s, &p).await.unwrap();
+    for e in &entries {
+        assert_eq!(e.status, Status::Same, "{}", e.object.name);
+    }
+
+    // the call the Run form builds
+    let object = ObjectRef::new(ObjectKind::Procedure, "double_it")
+        .in_database("analytics")
+        .in_schema("proj");
+    let params = s.parameters(object.clone()).await.unwrap();
+    let sql = crate::routine::call(
+        DriverKind::SqlServer,
+        &object,
+        &params,
+        &["5".into(), "".into()],
+    );
+    let events = run(&s, &sql).await;
+    assert_eq!(rows_of(&events), vec![vec![Value::Int(15)]], "{sql}");
+});

@@ -9,13 +9,13 @@ fn proc_ref() -> ObjectRef {
 #[test]
 fn names_survive_the_file_system() {
     for name in ["refresh_stats", "a/b:c", "ราคา", "50%_off", "x.y"] {
-        let path = Project::file_for(ObjectKind::Procedure, name).unwrap();
+        let path = Project::file_for(ObjectKind::Procedure, None, name).unwrap();
         let stem = path.file_stem().unwrap().to_str().unwrap();
         assert!(!stem.contains('/') && !stem.contains(':'), "{stem}");
         assert_eq!(object_name(stem), name);
     }
     assert_eq!(
-        Project::file_for(ObjectKind::View, "active_users").unwrap(),
+        Project::file_for(ObjectKind::View, None, "active_users").unwrap(),
         Path::new("views/active_users.sql")
     );
 }
@@ -103,7 +103,7 @@ fn status_says_which_side_moved() {
 fn entry(kind: ObjectKind, name: &str, text: &str) -> Entry {
     Entry {
         object: ObjectRef::new(kind, name),
-        path: Project::file_for(kind, name).unwrap(),
+        path: Project::file_for(kind, None, name).unwrap(),
         file: Some(text.into()),
         server: None,
         status: Status::FileOnly,
@@ -163,7 +163,7 @@ fn pull_records_a_baseline_kept_out_of_git() {
     );
     let e = Entry {
         object: proc_ref(),
-        path: Project::file_for(ObjectKind::Procedure, "refresh_stats").unwrap(),
+        path: Project::file_for(ObjectKind::Procedure, None, "refresh_stats").unwrap(),
         file: None,
         server: Some(PROC.into()),
         status: Status::ServerOnly,
@@ -171,8 +171,9 @@ fn pull_records_a_baseline_kept_out_of_git() {
     pull(&project, DriverKind::MySql, &e).unwrap();
     let files = project.files().unwrap();
     assert_eq!(files.len(), 1);
-    assert_eq!(files[0].1, "refresh_stats");
-    let seen = project.baseline().seen[&key(ObjectKind::Procedure, "refresh_stats")];
+    assert_eq!(files[0].1, None);
+    assert_eq!(files[0].2, "refresh_stats");
+    let seen = project.baseline().seen[&key(ObjectKind::Procedure, None, "refresh_stats")];
     assert_eq!(seen.server, hash(&normalise(PROC, ObjectKind::Procedure)));
     assert_eq!(
         fs::read_to_string(dir.path().join(".sql-honcho/.gitignore")).unwrap(),
@@ -187,4 +188,45 @@ fn pull_records_a_baseline_kept_out_of_git() {
         ..project.clone()
     };
     assert!(other.baseline().seen.is_empty());
+}
+
+#[test]
+fn sql_server_files_carry_the_schema() {
+    let path = Project::file_for(ObjectKind::Procedure, Some("sales"), "x.y").unwrap();
+    assert_eq!(path, Path::new("procedures/sales.x%2Ey.sql"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = Project::init(
+        dir.path(),
+        Manifest {
+            connection: "dev".into(),
+            database: "app".into(),
+        },
+    )
+    .unwrap();
+    let def = "-- totals\nCREATE PROC [sales].[x.y] @id int AS\nSELECT @id;";
+    let e = Entry {
+        object: ObjectRef::new(ObjectKind::Procedure, "x.y")
+            .in_database("app")
+            .in_schema("sales"),
+        path,
+        file: None,
+        server: Some(def.into()),
+        status: Status::ServerOnly,
+    };
+    pull(&project, DriverKind::SqlServer, &e).unwrap();
+    let files = project.files().unwrap();
+    assert_eq!(
+        (files[0].1.as_deref(), files[0].2.as_str()),
+        (Some("sales"), "x.y")
+    );
+    let text = &files[0].3;
+    assert!(
+        text.contains("CREATE OR ALTER PROC [sales].[x.y]"),
+        "{text}"
+    );
+    assert_eq!(
+        status_of(ObjectKind::Procedure, Some(text), Some(def), None),
+        Status::Same
+    );
 }

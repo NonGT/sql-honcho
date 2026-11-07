@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! sql-honcho.json          connection name and database
-//! procedures/name.sql
+//! procedures/name.sql     schema.name.sql where the server has schemas
 //! functions/name.sql
 //! triggers/name.sql
 //! views/name.sql
@@ -64,6 +64,9 @@ struct Baseline {
     seen: BTreeMap<String, Seen>,
 }
 
+/// A file's kind, schema, object name and text.
+type FileEntry = (ObjectKind, Option<String>, String, String);
+
 #[derive(Clone, Debug)]
 pub struct Project {
     pub root: PathBuf,
@@ -98,13 +101,18 @@ impl Project {
         })
     }
 
-    /// Where an object's file goes, relative to the root.
-    pub fn file_for(kind: ObjectKind, name: &str) -> Option<PathBuf> {
-        Some(Path::new(folder(kind)?).join(format!("{}.sql", file_name(name))))
+    /// Where an object's file goes, relative to the root. Dots in names
+    /// are escaped, so the one after the schema is unambiguous.
+    pub fn file_for(kind: ObjectKind, schema: Option<&str>, name: &str) -> Option<PathBuf> {
+        let stem = match schema {
+            Some(schema) => format!("{}.{}", file_name(schema), file_name(name)),
+            None => file_name(name),
+        };
+        Some(Path::new(folder(kind)?).join(format!("{stem}.sql")))
     }
 
     /// The objects the folder has files for, with their text.
-    fn files(&self) -> Result<Vec<(ObjectKind, String, String)>> {
+    fn files(&self) -> Result<Vec<FileEntry>> {
         let mut out = Vec::new();
         for kind in KINDS {
             let dir = self.root.join(folder(kind).unwrap());
@@ -121,7 +129,11 @@ impl Project {
                     continue;
                 };
                 let text = fs::read_to_string(&path).map_err(|e| io(&path, e))?;
-                out.push((kind, object_name(stem), text));
+                let (schema, name) = match stem.split_once('.') {
+                    Some((schema, name)) => (Some(object_name(schema)), name),
+                    None => (None, stem),
+                };
+                out.push((kind, schema, object_name(name), text));
             }
         }
         Ok(out)
@@ -150,10 +162,11 @@ impl Project {
         fs::write(&path, text).map_err(|e| io(&path, e))
     }
 
-    fn remember(&self, kind: ObjectKind, name: &str, file: &str, server: &str) -> Result<()> {
+    fn remember(&self, object: &ObjectRef, file: &str, server: &str) -> Result<()> {
+        let kind = object.kind;
         let mut baseline = self.baseline();
         baseline.seen.insert(
-            key(kind, name),
+            key(kind, object.schema.as_deref(), &object.name),
             Seen {
                 file: hash(&normalise(file, kind)),
                 server: hash(&normalise(server, kind)),
@@ -163,8 +176,8 @@ impl Project {
     }
 }
 
-fn key(kind: ObjectKind, name: &str) -> String {
-    Project::file_for(kind, name)
+fn key(kind: ObjectKind, schema: Option<&str>, name: &str) -> String {
+    Project::file_for(kind, schema, name)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default()
 }
@@ -257,13 +270,14 @@ fn without_definer(definition: &str) -> String {
 /// don't count.
 pub fn normalise(text: &str, kind: ObjectKind) -> String {
     // a definition from the server is one statement, semicolons and all;
-    // a file is a script with DELIMITER lines around it
-    let starts_create = text
+    // a MySQL file is a script with DELIMITER lines around it
+    let code = &text[routine::code_start(text)..];
+    let starts_create = code
         .split_whitespace()
         .next()
         .is_some_and(|w| w.eq_ignore_ascii_case("CREATE"));
     let create = if starts_create {
-        text
+        code
     } else {
         create_statement(DriverKind::MySql, text).unwrap_or(text)
     };
@@ -284,7 +298,7 @@ pub fn normalise(text: &str, kind: ObjectKind) -> String {
         .rsplit('.')
         .next()
         .unwrap_or_default()
-        .trim_matches('`')
+        .trim_matches(['`', '"', '[', ']'])
         .to_lowercase();
     format!("{name}{}", tidy(&create[end..]))
 }
@@ -366,39 +380,50 @@ pub async fn status(session: &Session, project: &Project) -> Result<Vec<Entry>> 
             KINDS.to_vec(),
         )
         .await?;
-    let mut server: HashMap<(ObjectKind, String), (ObjectRef, String)> = HashMap::new();
+    type Key = (ObjectKind, Option<String>, String);
+    let lower = |s: &str| s.to_lowercase();
+    let mut server: HashMap<Key, (ObjectRef, String)> = HashMap::new();
     for o in objects {
         if !KINDS.contains(&o.kind) {
             continue;
         }
         let def = session.definition(o.clone()).await?;
-        server.insert((o.kind, o.name.to_lowercase()), (o, def));
+        server.insert(
+            (o.kind, o.schema.as_deref().map(lower), lower(&o.name)),
+            (o, def),
+        );
     }
     let baseline = project.baseline();
     let mut entries = Vec::new();
-    for (kind, name, text) in project.files()? {
-        let found = server.remove(&(kind, name.to_lowercase()));
+    for (kind, schema, name, text) in project.files()? {
+        let found = server.remove(&(kind, schema.as_deref().map(lower), lower(&name)));
         let object = found
             .as_ref()
             .map(|(o, _)| o.clone())
-            .unwrap_or_else(|| ObjectRef::new(kind, name.clone()).in_database(db.clone()));
+            .unwrap_or_else(|| ObjectRef {
+                schema: schema.clone(),
+                ..ObjectRef::new(kind, name.clone()).in_database(db.clone())
+            });
         let def = found.map(|(_, d)| d);
         entries.push(Entry {
-            path: Project::file_for(kind, &name).unwrap(),
+            path: Project::file_for(kind, schema.as_deref(), &name).unwrap(),
             status: status_of(
                 kind,
                 Some(&text),
                 def.as_deref(),
-                baseline.seen.get(&key(kind, &name)).copied(),
+                baseline
+                    .seen
+                    .get(&key(kind, schema.as_deref(), &name))
+                    .copied(),
             ),
             object,
             file: Some(text),
             server: def,
         });
     }
-    for ((kind, _), (object, def)) in server {
+    for ((kind, ..), (object, def)) in server {
         entries.push(Entry {
-            path: Project::file_for(kind, &object.name).unwrap(),
+            path: Project::file_for(kind, object.schema.as_deref(), &object.name).unwrap(),
             status: Status::ServerOnly,
             object,
             file: None,
@@ -420,7 +445,7 @@ pub fn pull(project: &Project, driver: DriverKind, entry: &Entry) -> Result<()> 
         fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
     }
     fs::write(&path, &text).map_err(|e| io(&path, e))?;
-    project.remember(entry.object.kind, &entry.object.name, &text, def)
+    project.remember(&entry.object, &text, def)
 }
 
 async fn run(session: &Session, sql: String) -> Result<()> {
@@ -470,7 +495,7 @@ pub async fn apply(
         return Err(e);
     }
     let now = session.definition(entry.object.clone()).await?;
-    project.remember(entry.object.kind, &entry.object.name, file, &now)?;
+    project.remember(&entry.object, file, &now)?;
     Ok(now)
 }
 
