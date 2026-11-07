@@ -115,6 +115,13 @@ pub enum TabEvent {
     },
     /// Open a new tab with this text.
     OpenScript(String),
+    /// Connected to a different connection, or moved to another database.
+    Connected {
+        conn_id: String,
+        database: Option<String>,
+    },
+    /// The connection chip was clicked: offer the open connections.
+    PickConnection,
 }
 
 /// The server object a tab's script recreates, and its definition when the
@@ -183,8 +190,13 @@ pub struct QueryTab {
     /// Highlighted row in the open database list.
     database_ix: usize,
     database_focus: FocusHandle,
+    /// The connection list, with the database to open each on.
+    connections: Option<Vec<(SavedConnection, Option<String>)>>,
+    connection_ix: usize,
+    connection_focus: FocusHandle,
     /// Focus the database list on the next render; it opens after an await.
     focus_databases: bool,
+    focus_connections: bool,
     running: Option<Running>,
     pub output: Option<Output>,
     /// Why the connection is gone, when it is.
@@ -229,7 +241,11 @@ impl QueryTab {
             databases: None,
             database_ix: 0,
             database_focus: cx.focus_handle(),
+            connections: None,
+            connection_ix: 0,
+            connection_focus: cx.focus_handle(),
             focus_databases: false,
+            focus_connections: false,
             running: None,
             output: None,
             lost: None,
@@ -528,6 +544,7 @@ impl QueryTab {
     }
 
     pub fn set_connection(&mut self, conn: ActiveConnection, cx: &mut Context<Self>) {
+        let moved = self.connection.as_ref().map(|c| &c.saved.id) != Some(&conn.saved.id);
         if let Some(old) = self.connection.replace(conn) {
             close_session(old, cx);
         }
@@ -537,7 +554,7 @@ impl QueryTab {
         self.target_key = None;
         self.catalog = None;
         self.update_target(cx);
-        self.refresh_database(cx);
+        self.refresh_database(moved, cx);
         cx.notify();
     }
 
@@ -551,14 +568,22 @@ impl QueryTab {
         }
     }
 
-    fn refresh_database(&mut self, cx: &mut Context<Self>) {
+    /// Asks the session which database it's on; `announce` tells the
+    /// workspace once it knows.
+    fn refresh_database(&mut self, announce: bool, cx: &mut Context<Self>) {
         let Some(conn) = &self.connection else {
             return;
         };
-        let session = conn.session.clone();
+        let (session, conn_id) = (conn.session.clone(), conn.saved.id.clone());
         cx.spawn(async move |this, cx| {
             if let Ok(db) = session.current_database().await {
                 this.update(cx, |this, cx| {
+                    if announce {
+                        cx.emit(TabEvent::Connected {
+                            conn_id,
+                            database: db.clone(),
+                        });
+                    }
                     this.database = db;
                     cx.notify();
                 })
@@ -736,7 +761,7 @@ impl QueryTab {
             }
             this.update(cx, |this, cx| {
                 this.running = None;
-                this.refresh_database(cx);
+                this.refresh_database(false, cx);
                 cx.notify();
             })
             .ok();
@@ -1000,7 +1025,15 @@ impl QueryTab {
             let result = session.use_database(name.clone()).await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(()) => this.database = Some(name),
+                    Ok(()) => {
+                        if let Some(c) = &this.connection {
+                            cx.emit(TabEvent::Connected {
+                                conn_id: c.saved.id.clone(),
+                                database: Some(name.clone()),
+                            });
+                        }
+                        this.database = Some(name)
+                    }
                     Err(DbError::ConnectionLost(reason)) if this.auto_reconnect() => {
                         // the new session opens on the chosen database
                         this.database = Some(name);
@@ -1062,7 +1095,13 @@ impl QueryTab {
                 .text_color(Theme::muted())
                 .child("Connect…"),
         }
-        .on_click(cx.listener(|_, _, _, cx| cx.emit(TabEvent::NeedConnection)));
+        .on_click(cx.listener(|this, _, window, cx| {
+            if this.connections.is_some() {
+                this.close_connections(window, cx);
+            } else {
+                cx.emit(TabEvent::PickConnection);
+            }
+        }));
 
         let database = self.connection.as_ref().map(|_| {
             chip("tab-database")
@@ -1179,6 +1218,142 @@ impl QueryTab {
                     })),
             )
             .child(right)
+    }
+
+    /// Shows the connection list; the workspace fills it with what the
+    /// object browser has open.
+    pub fn show_connections(
+        &mut self,
+        list: Vec<(SavedConnection, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.databases = None;
+        let current = self.connection.as_ref().map(|c| c.saved.id.clone());
+        self.connection_ix = list
+            .iter()
+            .position(|(s, _)| Some(&s.id) == current.as_ref())
+            .unwrap_or(0);
+        self.connections = Some(list);
+        self.focus_connections = true;
+        cx.notify();
+    }
+
+    fn close_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.connections = None;
+        window.focus(&self.editor.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn move_connection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(list) = &self.connections {
+            // one past the end is "Other connection…"
+            let last = list.len() as isize;
+            self.connection_ix = (self.connection_ix as isize + delta).clamp(0, last) as usize;
+            cx.notify();
+        }
+    }
+
+    /// Opens a session on the picked entry; past the end means the dialog.
+    pub fn pick_connection(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = self.connections.as_ref().and_then(|l| l.get(ix).cloned());
+        self.close_connections(window, cx);
+        match picked {
+            Some((saved, database)) => self.open_saved(saved, database, false, cx),
+            None => cx.emit(TabEvent::NeedConnection),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn connection_names(&self) -> Option<Vec<String>> {
+        self.connections
+            .as_ref()
+            .map(|l| l.iter().map(|(s, _)| s.name.clone()).collect())
+    }
+
+    fn render_connections(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let list = self.connections.as_ref()?;
+        let current = self.connection.as_ref().map(|c| c.saved.id.clone());
+        let row = |id: SharedString, ix: usize| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_3()
+                .py_0p5()
+                .cursor_pointer()
+                .when(ix == self.connection_ix, |d| d.bg(Theme::accent_dim()))
+                .hover(|d| d.bg(Theme::border()))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.pick_connection(ix, window, cx)),
+                )
+        };
+        let other = list.len();
+        let menu = div()
+            .id("connection-list")
+            .key_context("ConnectionList")
+            .track_focus(&self.connection_focus)
+            .absolute()
+            .top(px(30.))
+            .left(px(8.))
+            .w(px(260.))
+            .max_h(px(300.))
+            .overflow_y_scroll()
+            .py_1()
+            .bg(Theme::panel())
+            .border_1()
+            .border_color(Theme::border())
+            .rounded_md()
+            .shadow_lg()
+            .occlude()
+            .on_action(cx.listener(|this, _: &CloseDatabases, window, cx| {
+                this.close_connections(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevDatabase, _, cx| this.move_connection(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextDatabase, _, cx| this.move_connection(1, cx)))
+            .on_action(cx.listener(|this, _: &PickDatabase, window, cx| {
+                let ix = this.connection_ix;
+                this.pick_connection(ix, window, cx)
+            }))
+            .when(!list.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px_3()
+                        .py_0p5()
+                        .text_color(Theme::muted())
+                        .child("Open in the browser"),
+                )
+            })
+            .children(list.iter().enumerate().map(|(ix, (saved, database))| {
+                row(SharedString::from(format!("conn-{}", saved.id)), ix)
+                    .when(current.as_ref() == Some(&saved.id), |d| {
+                        d.text_color(Theme::accent())
+                    })
+                    .child(color_dot(saved.color))
+                    .child(saved.name.clone())
+                    .children(
+                        database
+                            .clone()
+                            .map(|db| div().text_color(Theme::muted()).child(db)),
+                    )
+            }))
+            .child(
+                row("conn-other".into(), other)
+                    .when(!list.is_empty(), |d| {
+                        d.mt_1().border_t_1().border_color(Theme::border())
+                    })
+                    .child("Other connection…"),
+            );
+        let backdrop = div()
+            .id("connection-backdrop")
+            .absolute()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.close_connections(window, cx)),
+            );
+        Some(div().absolute().size_full().child(backdrop).child(menu))
     }
 
     fn render_databases(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -1582,6 +1757,9 @@ impl Render for QueryTab {
         if std::mem::take(&mut self.focus_databases) {
             window.focus(&self.database_focus);
         }
+        if std::mem::take(&mut self.focus_connections) {
+            window.focus(&self.connection_focus);
+        }
         let max_panel = window.viewport_size().height - px(200.);
         div()
             .key_context("QueryTab")
@@ -1626,6 +1804,7 @@ impl Render for QueryTab {
             )
             .children(self.render_output(cx))
             .children(self.render_databases(cx))
+            .children(self.render_connections(cx))
     }
 }
 
