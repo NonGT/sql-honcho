@@ -238,6 +238,10 @@ impl Session {
             .await
     }
 
+    pub async fn in_transaction(&self) -> Result<bool> {
+        self.call(|c| c.in_transaction()).await
+    }
+
     pub async fn databases(&self) -> Result<Vec<String>> {
         self.call(|c| c.databases()).await
     }

@@ -9,9 +9,12 @@
 //! - `hang MS`: wait, ignoring cancel
 //! - `error TEXT`: fail with a query error
 //! - `lose`: fail as if the connection dropped
+//! - `begin`, `commit`: open and close a transaction
 //!
 //! Connecting as user `bad` fails authentication; user `slow` never finishes
 //! connecting; user `flaky` can't connect while [`REFUSE_FLAKY`] is set.
+//! User `pg` gets a connection that, like Postgres, can't reach across
+//! databases.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,6 +63,8 @@ impl Driver for FakeDriver {
             _ => {}
         }
         Ok(Box::new(FakeConnection {
+            cross_database: config.user != "pg",
+            in_transaction: false,
             database: config.database.clone(),
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             closed: self.closed.clone(),
@@ -68,6 +73,8 @@ impl Driver for FakeDriver {
 }
 
 pub struct FakeConnection {
+    cross_database: bool,
+    in_transaction: bool,
     database: Option<String>,
     cancel: Arc<Mutex<CancellationToken>>,
     closed: Arc<AtomicUsize>,
@@ -119,7 +126,7 @@ impl Connection for FakeConnection {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             schemas: false,
-            cross_database: true,
+            cross_database: self.cross_database,
         }
     }
 
@@ -176,6 +183,8 @@ impl Connection for FakeConnection {
                 }
                 "hang" => tokio::time::sleep(Duration::from_millis(n()?)).await,
                 "error" => return Err(DbError::query(arg)),
+                "begin" => self.in_transaction = true,
+                "commit" => self.in_transaction = false,
                 "lose" => return Err(DbError::ConnectionLost("server went away".into())),
                 other => return Err(DbError::query(format!("unknown fake command: {other}"))),
             }
@@ -209,11 +218,19 @@ impl Connection for FakeConnection {
         Ok(self.database.clone())
     }
 
+    async fn in_transaction(&mut self) -> Result<bool> {
+        Ok(self.in_transaction)
+    }
+
     async fn use_database(&mut self, name: &str) -> Result<()> {
         if !DATABASES.contains(&name) {
             return Err(DbError::query(format!("unknown database '{name}'")));
         }
         self.database = Some(name.to_string());
+        if !self.cross_database {
+            // a new connection, as Postgres would need
+            self.in_transaction = false;
+        }
         Ok(())
     }
 

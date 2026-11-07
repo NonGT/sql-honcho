@@ -236,6 +236,14 @@ it!(lists_schemas_and_scripts_tables, |s| {
     assert_eq!(cols[2].data_type, "decimal(12, 2)");
 });
 
+it!(knows_when_a_transaction_is_open, |s| {
+    assert!(!s.in_transaction().await.unwrap());
+    run(&s, "BEGIN TRAN; SELECT 1").await;
+    assert!(s.in_transaction().await.unwrap());
+    run(&s, "COMMIT").await;
+    assert!(!s.in_transaction().await.unwrap());
+});
+
 it!(cancels_and_stays_usable_for_metadata, |s| {
     let handle = s.execute("WAITFOR DELAY '00:01:00'");
     handle.cancel_token().cancel();

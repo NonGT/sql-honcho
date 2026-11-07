@@ -46,6 +46,12 @@ pub trait Connection: Send {
 
     async fn use_database(&mut self, name: &str) -> Result<()>;
 
+    /// Whether a transaction is open, which closing the connection would
+    /// roll back. Drivers that can't tell say no.
+    async fn in_transaction(&mut self) -> Result<bool> {
+        Ok(false)
+    }
+
     async fn databases(&mut self) -> Result<Vec<String>>;
 
     /// Schemas in a database. Empty when the server has no schema level.

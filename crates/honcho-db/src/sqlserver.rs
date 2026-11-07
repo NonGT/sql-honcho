@@ -318,6 +318,14 @@ impl Connection for SqlServerConnection {
         Ok(rows.first().and_then(|r| opt_text(r, 0)))
     }
 
+    async fn in_transaction(&mut self) -> Result<bool> {
+        let rows = self.query("SELECT @@TRANCOUNT", &[]).await?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.get::<i32, _>(0))
+            .is_some_and(|n| n > 0))
+    }
+
     async fn use_database(&mut self, name: &str) -> Result<()> {
         self.client()?
             .simple_query(format!("USE {}", quote(name)))

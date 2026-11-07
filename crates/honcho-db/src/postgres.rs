@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tokio_postgres::error::ErrorPosition;
+use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{AsyncMessage, Client, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -437,6 +437,21 @@ impl Connection for PostgresConnection {
 
     async fn current_database(&mut self) -> Result<Option<String>> {
         Ok(Some(self.database.clone()))
+    }
+
+    async fn in_transaction(&mut self) -> Result<bool> {
+        // outside a transaction block, each statement's transaction starts
+        // with it; inside one, now() is when BEGIN ran. A simple query, as
+        // the extended protocol moves statement_timestamp() on at Execute.
+        let sql = "SELECT now() <> statement_timestamp()";
+        match self.client()?.simple_query(sql).await {
+            Ok(messages) => Ok(messages
+                .iter()
+                .any(|m| matches!(m, SimpleQueryMessage::Row(r) if r.get(0) == Some("t")))),
+            // open, and waiting for a ROLLBACK
+            Err(e) if e.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => Ok(true),
+            Err(e) => Err(plain_error(e)),
+        }
     }
 
     async fn use_database(&mut self, name: &str) -> Result<()> {
