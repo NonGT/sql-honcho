@@ -1420,6 +1420,16 @@ async fn dialog_failed(err: impl std::fmt::Display, cx: &mut gpui::AsyncWindowCo
     }
 }
 
+/// Whether the file starts with SQLite's header, whatever it's called.
+fn is_sqlite(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && &head == b"SQLite format 3\0"
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::size;
@@ -1443,14 +1453,4 @@ mod tests {
         );
         assert_eq!(resize_edge(point(px(400.), px(300.)), s), None);
     }
-}
-
-/// Whether the file starts with SQLite's header, whatever it's called.
-fn is_sqlite(path: &Path) -> bool {
-    use std::io::Read;
-    let mut head = [0u8; 16];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut head))
-        .is_ok()
-        && &head == b"SQLite format 3\0"
 }

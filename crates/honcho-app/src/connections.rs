@@ -77,7 +77,8 @@ pub fn driver(kind: DriverKind) -> Option<Arc<dyn Driver>> {
         DriverKind::Sqlite => Some(Arc::new(honcho_db::sqlite::SqliteDriver)),
         #[cfg(test)]
         DriverKind::Fake => Some(Arc::new(honcho_db::fake::FakeDriver::default())),
-        _ => None,
+        #[cfg(not(test))]
+        DriverKind::Fake => None,
     }
 }
 
