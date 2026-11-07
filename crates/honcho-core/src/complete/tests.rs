@@ -405,3 +405,35 @@ fn sql_server_routines_and_quoting() {
 fn labels_in(sql: &str, s: &TestSchema) -> Vec<String> {
     at(sql, s).items.into_iter().map(|c| c.label).collect()
 }
+
+#[test]
+fn postgres_quotes_and_dollar_bodies() {
+    let in_schema = |schema: &str, name: &str, kind, detail| SchemaObject {
+        schema: Some(schema.into()),
+        ..obj(name, kind, detail)
+    };
+    let mut s = TestSchema {
+        dialect: Dialect::Postgres,
+        current: Some("app".into()),
+        databases: Some(vec!["app".into()]),
+        ..Default::default()
+    };
+    s.objects.insert(
+        "app".into(),
+        vec![
+            in_schema("public", "users", Kind::Table, None),
+            in_schema("public", "Orders", Kind::Table, None),
+            in_schema("sales", "daily", Kind::Table, None),
+        ],
+    );
+    let from = items("SELECT * FROM |", &s);
+    assert!(from.contains(&pair("users", "users")), "{from:?}");
+    // unquoted, Orders would mean orders
+    assert!(from.contains(&pair("Orders", "\"Orders\"")), "{from:?}");
+    assert!(from.contains(&pair("daily", "sales.daily")), "{from:?}");
+    // nothing completes inside a dollar-quoted body
+    assert!(labels_in("SELECT $$ FROM us|", &s).is_empty());
+    assert!(!labels_in("SELECT $$x$$ FROM us|", &s).is_empty());
+    // $1 is a parameter, not a quote
+    assert!(!labels_in("SELECT * FROM us| WHERE id = $1", &s).is_empty());
+}

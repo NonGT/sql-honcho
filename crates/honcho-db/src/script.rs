@@ -26,8 +26,9 @@ pub fn split(kind: crate::DriverKind, sql: &str) -> Vec<Statement<'_>> {
     match kind {
         MySql | Fake => crate::mysql::split(sql),
         SqlServer => crate::sqlserver::split(sql),
+        Postgres => crate::postgres::split(sql),
         // each driver brings its own splitter when it lands
-        Postgres | Sqlite => vec![Statement::whole(sql)],
+        Sqlite => vec![Statement::whole(sql)],
     }
 }
 

@@ -5,8 +5,9 @@ A native SQL editor and database client written in Rust on top of
 
 The goal is a fast editor that behaves like VS Code (multi-cursor, line
 operations, the usual keybindings) plus a client for PostgreSQL, MySQL/MariaDB,
-SQL Server and SQLite. So far it has the editor, saved connections, and
-running queries against MySQL/MariaDB with results in a grid.
+SQL Server and SQLite. So far it has the editor, saved connections, a
+schema browser, and running queries against MySQL/MariaDB, PostgreSQL and
+SQL Server with results in a grid.
 
 ## Build
 
@@ -130,8 +131,8 @@ Drivers also run the conformance suite against real databases in Docker
     HONCHO_IT=1 cargo test -p honcho-db
     docker compose -f docker/compose.yml down -v
 
-MySQL and MariaDB serve TLS with a test CA from `docker/tls` (regenerate
-with `docker/tls/gen.sh`); its certificate names 127.0.0.1 and
+MySQL, MariaDB and Postgres serve TLS with a test CA from `docker/tls`
+(regenerate with `docker/tls/gen.sh`); its certificate names 127.0.0.1 and
 db.honcho.test, not localhost, so the tests can see a name check fail.
 
 An `sshd` container (port 32222, user `tunnel`, password `Honcho_test1`, keys

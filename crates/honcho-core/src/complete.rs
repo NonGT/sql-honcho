@@ -42,6 +42,9 @@ pub enum Dialect {
     MySql,
     /// `db.schema.table`, [brackets], and `#` starts a temp table name.
     SqlServer,
+    /// `schema.table`, "double quotes", and $$ quoted bodies. Unquoted
+    /// names fold to lower case.
+    Postgres,
 }
 
 impl Dialect {
@@ -50,6 +53,7 @@ impl Dialect {
         match self {
             Dialect::MySql => None,
             Dialect::SqlServer => Some("dbo"),
+            Dialect::Postgres => Some("public"),
         }
     }
 
@@ -185,8 +189,10 @@ struct Token {
 /// Tokens, and the ranges of comments and strings, where nothing completes.
 fn tokenize(sql: &str, dialect: Dialect) -> (Vec<Token>, Vec<Range<usize>>) {
     let mysql = dialect == Dialect::MySql;
+    let postgres = dialect == Dialect::Postgres;
     // T-SQL names take # (temp tables) and @ (variables)
-    let ident = |c: u8| is_ident_byte(c) || (!mysql && matches!(c, b'#' | b'@'));
+    let ident =
+        |c: u8| is_ident_byte(c) || (dialect == Dialect::SqlServer && matches!(c, b'#' | b'@'));
     let b = sql.as_bytes();
     let mut out = Vec::new();
     let mut dead = Vec::new();
@@ -234,7 +240,16 @@ fn tokenize(sql: &str, dialect: Dialect) -> (Vec<Token>, Vec<Range<usize>>) {
                 dead.push(start..i);
                 Tok::Other
             }
-            b'`' | b'"' | b'[' => {
+            b'$' if postgres && dollar_tag(sql, i).is_some() => {
+                let tag = dollar_tag(sql, i).unwrap();
+                i = sql[i + tag.len()..]
+                    .find(tag)
+                    .map_or(b.len() + 1, |p| i + tag.len() + p + tag.len());
+                dead.push(start..i);
+                i = i.min(b.len());
+                continue;
+            }
+            b'`' | b'"' | b'[' if !(postgres && c == b'[') => {
                 let close = if c == b'[' { b']' } else { c };
                 let from = i + 1;
                 i += 1;
@@ -293,6 +308,21 @@ fn tokenize(sql: &str, dialect: Dialect) -> (Vec<Token>, Vec<Range<usize>>) {
         }
     }
     (out, dead)
+}
+
+/// `$tag$` or `$$` at `i`, unless the `$` is part of a name or `$1`.
+fn dollar_tag(sql: &str, i: usize) -> Option<&str> {
+    let b = sql.as_bytes();
+    if i > 0 && is_ident_byte(b[i - 1]) {
+        return None;
+    }
+    let len = b[i + 1..]
+        .iter()
+        .position(|&c| !(c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80))?;
+    if b[i + 1 + len] != b'$' || b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(&sql[i..i + len + 2])
 }
 
 fn is_ident_byte(c: u8) -> bool {
@@ -614,9 +644,12 @@ fn quoted(name: &str, dialect: Dialect) -> String {
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-        && !is_keyword(name);
+        && !is_keyword(name)
+        // Postgres would fold it to lower case
+        && !(dialect == Dialect::Postgres && name.chars().any(char::is_uppercase));
     match dialect {
         _ if plain => name.to_string(),
+        Dialect::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
         Dialect::MySql => format!("`{}`", name.replace('`', "``")),
         Dialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
     }

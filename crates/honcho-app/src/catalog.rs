@@ -293,6 +293,7 @@ impl Schema for View<'_> {
     fn dialect(&self) -> Dialect {
         match self.catalog.map(|c| c.saved.driver) {
             Some(DriverKind::SqlServer) => Dialect::SqlServer,
+            Some(DriverKind::Postgres) => Dialect::Postgres,
             _ => Dialect::MySql,
         }
     }
