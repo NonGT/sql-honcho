@@ -161,6 +161,7 @@ both_servers!(
     marks_a_killed_connection_lost,
     read_only_is_enforced_by_the_server_too,
     reads_thai_from_a_table,
+    knows_when_a_transaction_is_open,
     tls_require_and_disable,
     tls_verify_checks_the_ca_and_the_name,
     tls_client_certificate,
@@ -290,6 +291,21 @@ async fn tls_client_certificate(server: Server) {
     finished_ok(&run(&s, "SELECT COUNT(*) FROM users").await);
     let err = try_connect(&rt, x509(false)).await.err().unwrap();
     assert!(matches!(err, DbError::Auth(_)), "{err:?}");
+}
+
+async fn knows_when_a_transaction_is_open(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt, server).await;
+    assert!(!s.in_transaction().await.unwrap());
+    finished_ok(&run(&s, "START TRANSACTION; SELECT 1").await);
+    assert!(s.in_transaction().await.unwrap());
+    finished_ok(&run(&s, "COMMIT").await);
+    assert!(!s.in_transaction().await.unwrap());
+    // with autocommit off, the first read opens one
+    finished_ok(&run(&s, "SET autocommit = 0; SELECT COUNT(*) FROM users").await);
+    assert!(s.in_transaction().await.unwrap());
+    finished_ok(&run(&s, "ROLLBACK; SET autocommit = 1").await);
+    assert!(!s.in_transaction().await.unwrap());
 }
 
 async fn reads_thai_from_a_table(server: Server) {
