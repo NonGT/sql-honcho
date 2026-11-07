@@ -28,6 +28,9 @@ pub const DEFAULT_WIDTH: Pixels = px(260.);
 const INDENT: f32 = 14.;
 const SEARCH_LIMIT: usize = 500;
 const SEARCH_DELAY: Duration = Duration::from_millis(250);
+/// Path length of a group under a schema; search results fill the tree
+/// down to there.
+const SEARCH_DEPTH: usize = 4;
 const GROUPS: [ObjectKind; 6] = [
     ObjectKind::Table,
     ObjectKind::View,
@@ -38,8 +41,9 @@ const GROUPS: [ObjectKind; 6] = [
 ];
 
 /// A node's place in the tree, one segment per level, e.g.
-/// `["c:<id>", "d:app", "g:Table", "o:users", "columns"]`. Kept as strings
-/// so expanded nodes can be saved.
+/// `["c:<id>", "d:app", "g:Table", "o:users", "columns"]`, with an
+/// `s:dbo` level after the database where the server has schemas. Kept as
+/// strings so expanded nodes can be saved.
 type Path = Vec<String>;
 
 pub enum BrowserEvent {
@@ -76,7 +80,9 @@ pub enum BrowserEvent {
 enum Item {
     Connection(Box<SavedConnection>),
     Database(String),
-    Group(String, ObjectKind, usize),
+    /// A database and one of its schemas.
+    Schema(String, String),
+    Group(Scope, ObjectKind, usize),
     Object(ObjectRef),
     Columns(ObjectRef),
     Column(ColumnInfo),
@@ -89,6 +95,7 @@ impl Item {
         match self {
             Item::Connection(c) => format!("c:{}", c.id),
             Item::Database(d) => format!("d:{d}"),
+            Item::Schema(_, s) => format!("s:{s}"),
             Item::Group(_, k, _) => format!("g:{k:?}"),
             Item::Object(o) => format!("o:{}", o.name),
             Item::Columns(_) => "columns".into(),
@@ -110,6 +117,7 @@ impl Item {
         match self {
             Item::Connection(c) => c.name.clone(),
             Item::Database(d) => d.clone(),
+            Item::Schema(_, s) => s.clone(),
             Item::Group(_, k, n) => format!("{} ({n})", group_name(*k)),
             Item::Object(o) => o.name.clone(),
             Item::Columns(_) => "Columns".into(),
@@ -146,6 +154,7 @@ impl Item {
         match self {
             Item::Connection(_) => "",
             Item::Database(_) => "▤",
+            Item::Schema(..) => "◇",
             Item::Group(..) | Item::Columns(_) | Item::Indexes(_) => "≡",
             Item::Object(o) => match o.kind {
                 ObjectKind::Table => "▦",
@@ -269,7 +278,7 @@ impl ObjectBrowser {
     /// Children of a node: from a search while filtering, otherwise from
     /// what's been loaded.
     fn children_of(&self, path: &Path, item: &Item, cx: &App) -> Option<Result<Vec<Item>, String>> {
-        if let (Some(search), true) = (&self.search, path.len() <= 3) {
+        if let (Some(search), true) = (&self.search, path.len() <= SEARCH_DEPTH) {
             if let Some(items) = search_children(search, path, item, cx) {
                 return Some(Ok(items));
             }
@@ -311,10 +320,10 @@ impl ObjectBrowser {
         // while filtering, everything down to the matches is open
         let expanded = self.expanded.contains(&path)
             || (self.search.is_some()
-                && path.len() <= 3
+                && path.len() <= SEARCH_DEPTH
                 && matches!(
                     item,
-                    Item::Connection(_) | Item::Database(_) | Item::Group(..)
+                    Item::Connection(_) | Item::Database(_) | Item::Schema(..) | Item::Group(..)
                 )
                 && self
                     .search
@@ -690,7 +699,11 @@ impl ObjectBrowser {
                 self.select_top(path, o, cx)
             }
             Item::Object(o) => self.open_definition(path, o, cx),
-            Item::Column(c) => cx.emit(BrowserEvent::Insert(ident(DriverKind::MySql, &c.name))),
+            Item::Column(c) => {
+                if let Some(saved) = self.conn_of(path, cx) {
+                    cx.emit(BrowserEvent::Insert(ident(saved.driver, &c.name)));
+                }
+            }
             _ => {}
         }
     }
@@ -704,8 +717,8 @@ impl ObjectBrowser {
             return;
         };
         let text = format!(
-            "SELECT * FROM {} LIMIT 1000;",
-            qualified(saved.driver, object)
+            "{};",
+            select(saved.driver, "*", &qualified(saved.driver, object), 1000).replace('\n', " ")
         );
         cx.emit(BrowserEvent::Open {
             saved: Box::new(saved),
@@ -725,12 +738,32 @@ impl ObjectBrowser {
     /// leaving the tree as it is until the new list arrives.
     pub fn reload_database(&mut self, conn_id: &str, database: &str, cx: &mut Context<Self>) {
         let path = vec![format!("c:{conn_id}"), format!("d:{database}")];
-        let (Some(session), Some(Children::Loaded(_))) =
+        let (Some(session), Some(Children::Loaded(items))) =
             (self.session(conn_id), self.children.get(&path))
         else {
             return;
         };
-        let item = Item::Database(database.to_string());
+        let schemas: Vec<Item> = items
+            .iter()
+            .filter(|i| matches!(i, Item::Schema(..)))
+            .cloned()
+            .collect();
+        if schemas.is_empty() {
+            self.refill(session, path, Item::Database(database.to_string()), cx);
+            return;
+        }
+        // with schemas, the objects hang off each schema that has loaded
+        for item in schemas {
+            let mut p = path.clone();
+            p.push(item.segment());
+            if matches!(self.children.get(&p), Some(Children::Loaded(_))) {
+                self.refill(session.clone(), p, item, cx);
+            }
+        }
+    }
+
+    /// Replaces the groups under a database or schema with a fresh list.
+    fn refill(&mut self, session: Session, path: Path, item: Item, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let Ok(Fetched::Database(groups)) = fetch(&session, &item).await else {
                 return;
@@ -877,10 +910,9 @@ impl ObjectBrowser {
             return;
         };
         let (path, item) = (menu.path, menu.item);
-        let kind = self
-            .conn_of(&path, cx)
-            .map(|s| s.driver)
-            .unwrap_or(DriverKind::MySql);
+        let Some(kind) = self.conn_of(&path, cx).map(|s| s.driver) else {
+            return;
+        };
         match (action, &item) {
             (MenuAction::Refresh, _) => self.refresh(path, item.clone(), cx),
             (MenuAction::SaveProject, Item::Database(d)) => {
@@ -904,7 +936,7 @@ impl ObjectBrowser {
             (MenuAction::UseHere, _) => {
                 if let Some(saved) = self.conn_of(&path, cx) {
                     let database = match &item {
-                        Item::Database(d) => Some(d.clone()),
+                        Item::Database(d) | Item::Schema(d, _) => Some(d.clone()),
                         _ => None,
                     };
                     cx.emit(BrowserEvent::UseHere {
@@ -916,7 +948,7 @@ impl ObjectBrowser {
             (MenuAction::NewQuery, _) => {
                 if let Some(saved) = self.conn_of(&path, cx) {
                     let database = match &item {
-                        Item::Database(d) => Some(d.clone()),
+                        Item::Database(d) | Item::Schema(d, _) => Some(d.clone()),
                         _ => None,
                     };
                     cx.emit(BrowserEvent::Open {
@@ -1126,22 +1158,26 @@ fn search_children(search: &Search, path: &Path, item: &Item, cx: &App) -> Optio
             dbs.dedup();
             Some(dbs.into_iter().map(Item::Database).collect())
         }
-        Item::Database(db) => Some(
-            GROUPS
-                .iter()
-                .filter_map(|&k| {
-                    let n = found
-                        .iter()
-                        .filter(|o| o.kind == k && o.database.as_ref() == Some(db))
-                        .count();
-                    (n > 0).then(|| Item::Group(db.clone(), k, n))
-                })
-                .collect(),
-        ),
-        Item::Group(db, k, _) => Some(
+        Item::Database(db) => {
+            let in_db = || found.iter().filter(|o| o.database.as_ref() == Some(db));
+            let mut schemas: Vec<String> = in_db().filter_map(|o| o.schema.clone()).collect();
+            if schemas.is_empty() {
+                return Some(groups_found(found, &scope(db, None)));
+            }
+            schemas.sort();
+            schemas.dedup();
+            Some(
+                schemas
+                    .into_iter()
+                    .map(|s| Item::Schema(db.clone(), s))
+                    .collect(),
+            )
+        }
+        Item::Schema(db, schema) => Some(groups_found(found, &scope(db, Some(schema)))),
+        Item::Group(at, k, _) => Some(
             found
                 .iter()
-                .filter(|o| o.kind == *k && o.database.as_ref() == Some(db))
+                .filter(|o| o.kind == *k && in_scope(o, at))
                 .cloned()
                 .map(Item::Object)
                 .collect(),
@@ -1150,9 +1186,34 @@ fn search_children(search: &Search, path: &Path, item: &Item, cx: &App) -> Optio
     }
 }
 
+fn scope(database: &str, schema: Option<&str>) -> Scope {
+    Scope {
+        database: Some(database.to_string()),
+        schema: schema.map(str::to_string),
+    }
+}
+
+fn in_scope(o: &ObjectRef, scope: &Scope) -> bool {
+    o.database == scope.database && o.schema == scope.schema
+}
+
+/// The groups a search found something in, with how many.
+fn groups_found(found: &[ObjectRef], at: &Scope) -> Vec<Item> {
+    GROUPS
+        .iter()
+        .filter_map(|&k| {
+            let n = found
+                .iter()
+                .filter(|o| o.kind == k && in_scope(o, at))
+                .count();
+            (n > 0).then(|| Item::Group(at.clone(), k, n))
+        })
+        .collect()
+}
+
 enum Fetched {
     Items(Vec<Item>),
-    /// A database's groups, each with its objects.
+    /// A database's (or schema's) groups, each with its objects.
     Database(Vec<(Item, Vec<Item>)>),
 }
 
@@ -1166,32 +1227,16 @@ async fn fetch(session: &Session, item: &Item) -> Result<Fetched, DbError> {
                 .map(Item::Database)
                 .collect(),
         ),
-        Item::Database(db) => {
-            let objects = session
-                .objects(
-                    Scope {
-                        database: Some(db.clone()),
-                        schema: None,
-                    },
-                    vec![],
-                )
-                .await?;
-            Fetched::Database(
-                GROUPS
-                    .iter()
-                    .filter_map(|&k| {
-                        let mut of: Vec<Item> = objects
-                            .iter()
-                            .filter(|o| o.kind == k)
-                            .cloned()
-                            .map(Item::Object)
-                            .collect();
-                        of.sort_by_key(|i| i.label().to_lowercase());
-                        (!of.is_empty()).then(|| (Item::Group(db.clone(), k, of.len()), of))
-                    })
-                    .collect(),
-            )
-        }
+        Item::Database(db) if session.capabilities().schemas => Fetched::Items(
+            session
+                .schemas(db.clone())
+                .await?
+                .into_iter()
+                .map(|s| Item::Schema(db.clone(), s))
+                .collect(),
+        ),
+        Item::Database(db) => groups(session, scope(db, None)).await?,
+        Item::Schema(db, schema) => groups(session, scope(db, Some(schema))).await?,
         Item::Object(o) => {
             let mut items = vec![Item::Columns(o.clone())];
             if o.kind == ObjectKind::Table {
@@ -1218,6 +1263,25 @@ async fn fetch(session: &Session, item: &Item) -> Result<Fetched, DbError> {
         // groups are filled with their database
         Item::Group(..) | Item::Column(_) | Item::Index(_) => Fetched::Items(vec![]),
     })
+}
+
+async fn groups(session: &Session, at: Scope) -> Result<Fetched, DbError> {
+    let objects = session.objects(at.clone(), vec![]).await?;
+    Ok(Fetched::Database(
+        GROUPS
+            .iter()
+            .filter_map(|&k| {
+                let mut of: Vec<Item> = objects
+                    .iter()
+                    .filter(|o| o.kind == k)
+                    .cloned()
+                    .map(Item::Object)
+                    .collect();
+                of.sort_by_key(|i| i.label().to_lowercase());
+                (!of.is_empty()).then(|| (Item::Group(at.clone(), k, of.len()), of))
+            })
+            .collect(),
+    ))
 }
 
 enum Done {
@@ -1288,6 +1352,14 @@ fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
     }
 }
 
+/// The first `n` rows: T-SQL has TOP where the others have LIMIT.
+fn select(kind: DriverKind, columns: &str, table: &str, n: usize) -> String {
+    match kind {
+        DriverKind::SqlServer => format!("SELECT TOP ({n}) {columns}\nFROM {table}"),
+        _ => format!("SELECT {columns}\nFROM {table}\nLIMIT {n}"),
+    }
+}
+
 fn template(kind: DriverKind, o: &ObjectRef, columns: &[ColumnInfo], which: Template) -> String {
     let table = qualified(kind, o);
     let names: Vec<String> = columns.iter().map(|c| ident(kind, &c.name)).collect();
@@ -1301,7 +1373,7 @@ fn template(kind: DriverKind, o: &ObjectRef, columns: &[ColumnInfo], which: Temp
             .collect::<Vec<_>>()
     };
     match which {
-        Template::Select => format!("SELECT {}\nFROM {table}\nLIMIT 100;\n", names.join(", ")),
+        Template::Select => format!("{};\n", select(kind, &names.join(", "), &table, 100)),
         Template::Insert => format!(
             "INSERT INTO {table} ({})\nVALUES (\n{}\n);\n",
             names.join(", "),
@@ -1616,6 +1688,11 @@ mod tests {
         assert_eq!(
             update,
             "UPDATE `app`.`users`\nSET `email` = NULL -- varchar(255)\nWHERE `id` = NULL;\n"
+        );
+        let t = t.in_schema("dbo");
+        assert_eq!(
+            template(DriverKind::SqlServer, &t, &cols, Template::Select),
+            "SELECT TOP (100) [id], [email]\nFROM [app].[dbo].[users];\n"
         );
     }
 }

@@ -72,6 +72,7 @@ pub struct ActiveConnection {
 pub fn driver(kind: DriverKind) -> Option<Arc<dyn Driver>> {
     match kind {
         DriverKind::MySql => Some(Arc::new(honcho_db::mysql::MySqlDriver)),
+        DriverKind::SqlServer => Some(Arc::new(honcho_db::sqlserver::SqlServerDriver)),
         #[cfg(test)]
         DriverKind::Fake => Some(Arc::new(honcho_db::fake::FakeDriver::default())),
         _ => None,
