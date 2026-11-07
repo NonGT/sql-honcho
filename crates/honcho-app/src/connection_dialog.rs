@@ -1299,7 +1299,10 @@ impl Render for ConnectionDialog {
                     })
                     .child(row().child(label("Color")).child(colors))
                     .child(row().child(label("")).child(read_only))
-                    .child(row().child(label("")).child(auto_reconnect)),
+                    // there's no server to drop a file
+                    .when(!is_sqlite, |d| {
+                        d.child(row().child(label("")).child(auto_reconnect))
+                    }),
                 Section::Tls => d
                     .child(row().child(label("Mode")).child(modes))
                     .child(
