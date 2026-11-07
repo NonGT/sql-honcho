@@ -28,8 +28,16 @@ pub struct DbRuntime {
     rt: Option<Runtime>,
 }
 
+/// tiberius brings in aws-lc-rs next to the ring that mysql_async and russh
+/// use, and with two providers compiled in rustls won't pick one itself.
+pub(crate) fn install_crypto_provider() {
+    // fails only when one is installed already, which is fine
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 impl DbRuntime {
     pub fn new() -> std::io::Result<Self> {
+        install_crypto_provider();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("honcho-db")

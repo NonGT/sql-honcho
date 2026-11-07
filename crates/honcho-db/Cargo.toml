@@ -13,12 +13,19 @@ async-trait = "0.1"
 directories = "6.0.0"
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
-tokio-util = "0.7"
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono", "sql-browser-tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures-util = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
+
+[target.'cfg(windows)'.dependencies]
+tiberius = { version = "0.13", default-features = false, features = ["winauth"] }

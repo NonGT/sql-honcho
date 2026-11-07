@@ -30,8 +30,8 @@ pub trait Connection: Send {
     /// return that error.
     async fn execute(&mut self, sql: &str, sink: &mut ResultSink) -> Result<()>;
 
-    /// How `execute` would split the SQL, for checking read-only sessions.
-    /// Drivers that send scripts whole needn't override it.
+    /// The statements of the SQL, for checking read-only sessions. Drivers
+    /// that send scripts whole needn't override it.
     fn statements<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
         vec![Statement::whole(sql)]
     }
