@@ -37,6 +37,7 @@ impl Driver for MySqlDriver {
     }
 
     async fn connect(&self, config: &ConnectConfig) -> Result<Box<dyn Connection>> {
+        crate::runtime::install_crypto_provider();
         let host = match config.host.as_str() {
             "" => "localhost",
             h => h,

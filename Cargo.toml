@@ -12,3 +12,5 @@ repository = "https://github.com/NonGT/sql-honcho"
 # without it verify-ca behaves like verify-full. Drop this after 0.37.1.
 [patch.crates-io]
 mysql_async = { git = "https://github.com/blackbeam/mysql_async", rev = "d7525dcb1d35f3d60101a2e95e84171c3d3ac4a5" }
+# Client::simple_batch, for PRINT output and row counts (tiberius-rs/tiberius#468).
+tiberius = { git = "https://github.com/NonGT/tiberius", rev = "af18274c5e3b97436deb24aac45195af3273e889" }

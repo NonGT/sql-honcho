@@ -16,6 +16,7 @@ pub mod routine;
 mod runtime;
 pub mod script;
 mod sink;
+pub mod sqlserver;
 pub mod tunnel;
 mod types;
 mod value;
