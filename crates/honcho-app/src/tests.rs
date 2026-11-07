@@ -358,6 +358,80 @@ fn saving_a_connection_keeps_the_password_out_of_the_file(cx: &mut TestAppContex
     );
 }
 
+fn sqlite_file(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("shop.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO items (name) VALUES ('ชา'), ('kafae');",
+        )
+        .unwrap();
+    path
+}
+
+fn saved_connections(cx: &mut VisualTestContext) -> Vec<honcho_config::SavedConnection> {
+    cx.update(|_, cx| cx.global::<Connections>().store.connections().to_vec())
+}
+
+#[gpui::test]
+fn a_sqlite_connection_is_just_a_file(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = sqlite_file(dir.path());
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    d.update(cx, |d, _| d.set_driver(DriverKind::Sqlite));
+    cx.simulate_input("shop");
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    assert_eq!(status(&d, cx).as_deref(), Some("Pick the database file."));
+
+    // name, then straight to the file
+    press(cx, "tab");
+    cx.simulate_input(&path.display().to_string());
+    press(cx, "enter");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+    let saved = saved_connections(cx);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        (
+            saved[0].host.as_str(),
+            saved[0].port,
+            saved[0].user.as_str()
+        ),
+        (path.display().to_string().as_str(), None, "")
+    );
+    let q = query_tab(&ws, cx);
+    wait_until(cx, |cx| q.read_with(cx, |q, _| q.connection.is_some()));
+    cx.simulate_input("select count(*) from items");
+    run(&ws, cx, "P-enter");
+    assert_eq!(result_rows(&ws, cx), [1]);
+}
+
+#[gpui::test]
+fn opening_a_sqlite_file_connects_to_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = sqlite_file(dir.path());
+    let (ws, cx) = open(cx, vec![path.clone()]);
+    let q = query_tab(&ws, cx);
+    wait_until(cx, |cx| q.read_with(cx, |q, _| q.connection.is_some()));
+    assert_eq!(
+        tab_target(&ws, cx).map(|t| t.0),
+        Some("shop.db".to_string())
+    );
+    // it opened as a database, not as text
+    assert_eq!(text(&ws, cx), "");
+    cx.simulate_input("select name from items order by id");
+    run(&ws, cx, "P-enter");
+    assert_eq!(result_rows(&ws, cx), [2]);
+
+    // again: a new tab, through the same saved connection
+    ws.update_in(cx, |ws, window, cx| ws.open_paths(vec![path], window, cx));
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), 2);
+    assert_eq!(saved_connections(cx).len(), 1);
+}
+
 #[gpui::test]
 fn password_field_wont_copy(cx: &mut TestAppContext) {
     let (_ws, cx) = open(cx, vec![]);

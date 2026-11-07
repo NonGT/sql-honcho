@@ -355,6 +355,22 @@ impl ConnectionDialog {
                     .map_err(|_| format!("Port {p} isn't a number from 1 to 65535."))?,
             ),
         };
+        if self.draft.driver == DriverKind::Sqlite {
+            let file = text(&self.fields.host);
+            if file.is_empty() {
+                return Err("Pick the database file.".into());
+            }
+            return Ok(SavedConnection {
+                name,
+                host: file,
+                port: None,
+                user: String::new(),
+                database: None,
+                tls: TlsConfig::default(),
+                ssh: None,
+                ..self.draft.clone()
+            });
+        }
         let database = Some(text(&self.fields.database)).filter(|d| !d.is_empty());
         let path = |f: &Entity<EditorView>| {
             Some(text(f))
@@ -744,6 +760,10 @@ impl ConnectionDialog {
                 }
                 v
             }
+            // a file is all SQLite needs
+            (Section::General, _) if self.draft.driver == DriverKind::Sqlite => {
+                vec![&f.name, &f.host]
+            }
             (section, _) => f.on(section),
         };
         fields.into_iter().cloned().collect()
@@ -997,6 +1017,9 @@ impl Render for ConnectionDialog {
                         if kind != DriverKind::SqlServer {
                             this.draft.options.remove("auth");
                         }
+                        if kind == DriverKind::Sqlite {
+                            this.section = Section::General;
+                        }
                         this.driver_changed(cx);
                     }
                 },
@@ -1035,6 +1058,7 @@ impl Render for ConnectionDialog {
             .map(|(.., hint)| *hint)
             .filter(|h| !h.is_empty());
         let is_sql_server = self.draft.driver == DriverKind::SqlServer;
+        let is_sqlite = self.draft.driver == DriverKind::Sqlite;
 
         let swatch = |tag: Option<ColorTag>, active: bool| {
             div()
@@ -1180,15 +1204,18 @@ impl Render for ConnectionDialog {
                 "General".into(),
                 Section::General,
             ))
-            .child(section_tab("section-tls", tls_label, Section::Tls))
-            .child(section_tab(
-                "section-ssh",
-                match &self.draft.ssh {
-                    Some(_) => "SSH · on".into(),
-                    None => "SSH".into(),
-                },
-                Section::Ssh,
-            ));
+            // a local file has no TLS or SSH
+            .when(!is_sqlite, |d| {
+                d.child(section_tab("section-tls", tls_label, Section::Tls))
+                    .child(section_tab(
+                        "section-ssh",
+                        match &self.draft.ssh {
+                            Some(_) => "SSH · on".into(),
+                            None => "SSH".into(),
+                        },
+                        Section::Ssh,
+                    ))
+            });
 
         let ssh_on = self.draft.ssh.is_some();
         let auth = self.draft.ssh.as_ref().map(|s| s.auth).unwrap_or_default();
@@ -1257,14 +1284,19 @@ impl Render for ConnectionDialog {
                             ),
                         )
                     })
-                    .child(
-                        row()
-                            .child(field("Host", &self.fields.host, None).flex_1())
-                            .child(field("Port", &self.fields.port, Some(84.))),
-                    )
-                    .child(field("User", &self.fields.user, None))
-                    .child(field("Password", &self.fields.password, None))
-                    .child(field("Database", &self.fields.database, None))
+                    .when(is_sqlite, |d| {
+                        d.child(path_row("File", &self.fields.host, "browse-file"))
+                    })
+                    .when(!is_sqlite, |d| {
+                        d.child(
+                            row()
+                                .child(field("Host", &self.fields.host, None).flex_1())
+                                .child(field("Port", &self.fields.port, Some(84.))),
+                        )
+                        .child(field("User", &self.fields.user, None))
+                        .child(field("Password", &self.fields.password, None))
+                        .child(field("Database", &self.fields.database, None))
+                    })
                     .child(row().child(label("Color")).child(colors))
                     .child(row().child(label("")).child(read_only))
                     .child(row().child(label("")).child(auto_reconnect)),

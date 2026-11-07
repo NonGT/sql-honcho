@@ -74,6 +74,7 @@ pub fn driver(kind: DriverKind) -> Option<Arc<dyn Driver>> {
         DriverKind::MySql => Some(Arc::new(honcho_db::mysql::MySqlDriver)),
         DriverKind::SqlServer => Some(Arc::new(honcho_db::sqlserver::SqlServerDriver)),
         DriverKind::Postgres => Some(Arc::new(honcho_db::postgres::PostgresDriver)),
+        DriverKind::Sqlite => Some(Arc::new(honcho_db::sqlite::SqliteDriver)),
         #[cfg(test)]
         DriverKind::Fake => Some(Arc::new(honcho_db::fake::FakeDriver::default())),
         _ => None,
