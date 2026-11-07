@@ -478,7 +478,9 @@ fn bad_input_is_reported_and_not_saved(cx: &mut TestAppContext) {
 /// runtime's own threads, which the test executor doesn't drive.
 fn wait_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
     cx.executor().allow_parking();
-    for _ in 0..300 {
+    // generous, for loaded CI runners; it returns as soon as `done` holds
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
         cx.run_until_parked();
         if done(cx) {
             return;

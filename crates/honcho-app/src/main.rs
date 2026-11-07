@@ -111,6 +111,23 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
+/// A bare binary has no bundle to take an icon from, so the Dock would show
+/// the generic one.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(include_bytes!("../../../assets/icon/png/1024.png"));
+    if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+    }
+}
+
 fn main() {
     let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
 
@@ -118,6 +135,8 @@ fn main() {
         theme::init_font(cx);
         keymap::install(cx);
         connections::Connections::init(cx);
+        #[cfg(target_os = "macos")]
+        set_dock_icon();
         if keymap::Platform::current() == keymap::Platform::Linux {
             cx.set_prompt_builder(prompt::build);
         }
