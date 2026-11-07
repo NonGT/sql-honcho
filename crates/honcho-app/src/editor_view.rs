@@ -784,6 +784,7 @@ fn kind_letter(kind: Kind) -> &'static str {
         Kind::Table => "t",
         Kind::View => "v",
         Kind::Database => "d",
+        Kind::Schema => "s",
         Kind::Procedure => "p",
         Kind::Function => "f",
         Kind::Keyword => "k",
@@ -794,7 +795,7 @@ fn kind_color(kind: Kind) -> Hsla {
     match kind {
         Kind::Column => Theme::token(sql::TokenKind::QuotedIdent),
         Kind::Table | Kind::View | Kind::Alias => Theme::token(sql::TokenKind::Type),
-        Kind::Database => Theme::muted(),
+        Kind::Database | Kind::Schema => Theme::muted(),
         Kind::Procedure | Kind::Function => Theme::token(sql::TokenKind::Function),
         Kind::Keyword => Theme::token(sql::TokenKind::Keyword),
     }

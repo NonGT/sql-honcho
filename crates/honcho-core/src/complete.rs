@@ -12,6 +12,7 @@ pub enum Kind {
     Table,
     View,
     Database,
+    Schema,
     Procedure,
     Function,
     Keyword,
@@ -19,6 +20,8 @@ pub enum Kind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaObject {
+    /// On servers with schemas.
+    pub schema: Option<String>,
     pub name: String,
     pub kind: Kind,
     /// Parameters and return type for routines.
@@ -31,20 +34,51 @@ pub struct SchemaColumn {
     pub data_type: String,
 }
 
+/// The SQL being written: how names are quoted and qualified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Dialect {
+    /// `db.table`, backticks, `#` comments and backslash escapes.
+    #[default]
+    MySql,
+    /// `db.schema.table`, [brackets], and `#` starts a temp table name.
+    SqlServer,
+}
+
+impl Dialect {
+    /// The schema unqualified names resolve in, on servers with schemas.
+    fn default_schema(self) -> Option<&'static str> {
+        match self {
+            Dialect::MySql => None,
+            Dialect::SqlServer => Some("dbo"),
+        }
+    }
+
+    fn has_schemas(self) -> bool {
+        self.default_schema().is_some()
+    }
+}
+
 /// What the completer knows about the server. `None` means not loaded
 /// yet, which the result reports so the caller can fetch it.
 pub trait Schema {
+    fn dialect(&self) -> Dialect {
+        Dialect::MySql
+    }
     fn current_database(&self) -> Option<&str>;
     fn databases(&self) -> Option<&[String]>;
+    /// Every object in the database, in all its schemas.
     fn objects(&self, database: &str) -> Option<&[SchemaObject]>;
-    fn columns(&self, database: &str, table: &str) -> Option<&[SchemaColumn]>;
+    /// A table's columns; without a schema, the one the server would pick.
+    fn columns(&self, database: &str, schema: Option<&str>, table: &str)
+        -> Option<&[SchemaColumn]>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Need {
     Databases,
     Objects(String),
-    Columns(String, String),
+    /// Database, schema and table.
+    Columns(String, Option<String>, String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,7 +183,10 @@ struct Token {
 }
 
 /// Tokens, and the ranges of comments and strings, where nothing completes.
-fn tokenize(sql: &str) -> (Vec<Token>, Vec<Range<usize>>) {
+fn tokenize(sql: &str, dialect: Dialect) -> (Vec<Token>, Vec<Range<usize>>) {
+    let mysql = dialect == Dialect::MySql;
+    // T-SQL names take # (temp tables) and @ (variables)
+    let ident = |c: u8| is_ident_byte(c) || (!mysql && matches!(c, b'#' | b'@'));
     let b = sql.as_bytes();
     let mut out = Vec::new();
     let mut dead = Vec::new();
@@ -172,7 +209,7 @@ fn tokenize(sql: &str) -> (Vec<Token>, Vec<Range<usize>>) {
                 dead.push(start..i + 1);
                 continue;
             }
-            b'#' => {
+            b'#' if mysql => {
                 i = sql[i..].find('\n').map_or(b.len(), |p| i + p);
                 dead.push(start..i + 1);
                 continue;
@@ -188,7 +225,7 @@ fn tokenize(sql: &str) -> (Vec<Token>, Vec<Range<usize>>) {
             b'\'' => {
                 i += 1;
                 while i < b.len() && b[i] != b'\'' {
-                    if b[i] == b'\\' {
+                    if mysql && b[i] == b'\\' {
                         i += 1;
                     }
                     i += 1;
@@ -225,8 +262,8 @@ fn tokenize(sql: &str) -> (Vec<Token>, Vec<Range<usize>>) {
                 }
                 Tok::Other
             }
-            _ if is_ident_byte(c) => {
-                while i < b.len() && is_ident_byte(b[i]) {
+            _ if ident(c) => {
+                while i < b.len() && ident(b[i]) {
                     i += 1;
                 }
                 Tok::Ident {
@@ -285,7 +322,8 @@ fn is_keyword(w: &str) -> bool {
 /// select list names.
 #[derive(Clone, Debug, PartialEq)]
 struct Source {
-    database: Option<String>,
+    /// The names before the table's: database, or database and schema.
+    qualifier: Vec<String>,
     name: String,
     alias: Option<String>,
     derived: Option<Vec<String>>,
@@ -352,7 +390,7 @@ fn sources(tokens: &[Token], group: usize) -> Vec<Source> {
                     let alias = alias_at(tokens, &mut i);
                     if let Some(alias) = alias {
                         out.push(Source {
-                            database: None,
+                            qualifier: vec![],
                             name: alias.clone(),
                             alias: Some(alias),
                             derived: Some(columns),
@@ -381,10 +419,9 @@ fn sources(tokens: &[Token], group: usize) -> Vec<Source> {
                         break;
                     }
                     let name = parts.pop().unwrap();
-                    let database = parts.pop();
                     let alias = alias_at(tokens, &mut i);
                     out.push(Source {
-                        database,
+                        qualifier: parts,
                         name,
                         alias,
                         derived: None,
@@ -481,7 +518,7 @@ fn context(before: &[Token], group: usize) -> Context {
             {
                 return Context::Tables;
             }
-            if is_kw(t, "CALL") {
+            if is_kw(t, "CALL") || is_kw(t, "EXEC") || is_kw(t, "EXECUTE") {
                 return Context::Procedures;
             }
             if is_kw(t, "USE") {
@@ -553,8 +590,23 @@ fn keyword_case(keyword: &str, prefix: &str) -> String {
     }
 }
 
+/// The object's schema when it isn't the one unqualified names find.
+fn elsewhere(o: &SchemaObject, dialect: Dialect) -> Option<&str> {
+    o.schema
+        .as_deref()
+        .filter(|s| Some(*s) != dialect.default_schema())
+}
+
+/// The schemas objects are in, each once.
+fn schemas_of(objects: &[SchemaObject]) -> Vec<String> {
+    let mut out: Vec<String> = objects.iter().filter_map(|o| o.schema.clone()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Names that need quoting to be used as typed.
-fn quoted(name: &str) -> String {
+fn quoted(name: &str, dialect: Dialect) -> String {
     let plain = name
         .chars()
         .next()
@@ -563,16 +615,17 @@ fn quoted(name: &str) -> String {
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
         && !is_keyword(name);
-    if plain {
-        name.to_string()
-    } else {
-        format!("`{}`", name.replace('`', "``"))
+    match dialect {
+        _ if plain => name.to_string(),
+        Dialect::MySql => format!("`{}`", name.replace('`', "``")),
+        Dialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
     }
 }
 
 pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
     let cursor = cursor.min(sql.len());
-    let (tokens, dead) = tokenize(sql);
+    let dialect = schema.dialect();
+    let (tokens, dead) = tokenize(sql, dialect);
 
     // the partly typed name: identifier chars just before the cursor
     let prefix_start = sql[..cursor]
@@ -638,11 +691,35 @@ pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
     let push = |out: &mut Completions, label: &str, kind: Kind, detail: Option<String>| {
         let insert = match kind {
             Kind::Keyword | Kind::Function => keyword_case(label, prefix),
-            _ => quoted(label),
+            _ => quoted(label, dialect),
         };
         out.items.push(Candidate {
             label: label.to_string(),
             kind,
+            detail,
+            insert,
+        });
+    };
+    // `qualify` writes the schema too where the name alone wouldn't find
+    // the object; T-SQL's own functions always need it
+    let push_object = |out: &mut Completions, o: &SchemaObject, qualify: bool| {
+        let schema = o.schema.as_deref();
+        let needs_schema = elsewhere(o, dialect).is_some()
+            || (o.kind == Kind::Function && dialect == Dialect::SqlServer);
+        let insert = match schema {
+            Some(sc) if qualify && needs_schema => {
+                format!("{}.{}", quoted(sc, dialect), quoted(&o.name, dialect))
+            }
+            _ => quoted(&o.name, dialect),
+        };
+        let detail = match (elsewhere(o, dialect), &o.detail) {
+            (Some(sc), Some(d)) => Some(format!("{sc} · {d}")),
+            (Some(sc), None) => Some(sc.to_string()),
+            (None, d) => d.clone(),
+        };
+        out.items.push(Candidate {
+            label: o.name.clone(),
+            kind: o.kind,
             detail,
             insert,
         });
@@ -656,6 +733,25 @@ pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
             }
         }
     };
+    let is_database = |out: &mut Completions, name: &str| -> bool {
+        match schema.databases() {
+            Some(dbs) => dbs.iter().any(|d| d.eq_ignore_ascii_case(name)),
+            None => {
+                out.missing.push(Need::Databases);
+                false
+            }
+        }
+    };
+    // the database and schema a qualifier before a table name points at
+    let locate = |qualifier: &[String]| -> Option<(String, Option<String>)> {
+        let current = || current_db.clone();
+        Some(match (dialect.has_schemas(), qualifier) {
+            (_, []) => (current()?, None),
+            (true, [schema]) => (current()?, Some(schema.clone())),
+            (true, [.., db, schema]) => (db.clone(), Some(schema.clone())),
+            (false, [.., db]) => (db.clone(), None),
+        })
+    };
     let columns_of = |out: &mut Completions, s: &Source| -> Vec<SchemaColumn> {
         if let Some(cols) = &s.derived {
             return cols
@@ -666,54 +762,95 @@ pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
                 })
                 .collect();
         }
-        let Some(db) = s.database.clone().or_else(|| current_db.clone()) else {
+        let Some((db, sc)) = locate(&s.qualifier) else {
             return vec![];
         };
-        match schema.columns(&db, &s.name) {
+        match schema.columns(&db, sc.as_deref(), &s.name) {
             Some(c) => c.to_vec(),
             None => {
-                out.missing.push(Need::Columns(db, s.name.clone()));
+                out.missing.push(Need::Columns(db, sc, s.name.clone()));
                 vec![]
             }
         }
     };
+    let table = |qualifier: &[String], name: &str| Source {
+        qualifier: qualifier.to_vec(),
+        name: name.to_string(),
+        alias: None,
+        derived: None,
+    };
+    let in_schema = |o: &SchemaObject, name: &str| {
+        o.schema
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case(name))
+    };
 
+    // the clause decides what kind of name goes here, qualified or not
+    let ctx = context(&before[..j], group);
+    let fits = |o: &SchemaObject| match ctx {
+        Context::Tables => matches!(o.kind, Kind::Table | Kind::View),
+        Context::Procedures => o.kind == Kind::Procedure,
+        _ => true,
+    };
     if !qualifier.is_empty() {
         let q = qualifier.last().unwrap().clone();
-        // table or alias in scope: its columns; otherwise a database
-        let source = scope.iter().find(|s| s.called(&q)).cloned();
-        if qualifier.len() == 1 {
-            match source {
-                Some(source) => {
-                    for c in columns_of(&mut out, &source) {
-                        push(&mut out, &c.name, Kind::Column, Some(c.data_type));
+        // a table or alias in scope: its columns
+        let source = scope
+            .iter()
+            .find(|s| qualifier.len() == 1 && s.called(&q))
+            .cloned();
+        let push_columns = |out: &mut Completions, s: &Source| {
+            for c in columns_of(out, s) {
+                push(out, &c.name, Kind::Column, Some(c.data_type));
+            }
+        };
+        match (source, dialect.has_schemas(), qualifier.len()) {
+            (Some(source), ..) => push_columns(&mut out, &source),
+            // schema.: its objects; db.: that database's schemas
+            (None, true, 1) => {
+                let here = match &current_db {
+                    Some(db) => objects_in(&mut out, db),
+                    None => vec![],
+                };
+                let found: Vec<&SchemaObject> = here.iter().filter(|o| in_schema(o, &q)).collect();
+                if !found.is_empty() {
+                    for o in found.into_iter().filter(|o| fits(o)) {
+                        push_object(&mut out, o, false);
+                    }
+                } else if is_database(&mut out, &q) {
+                    for sc in schemas_of(&objects_in(&mut out, &q)) {
+                        push(&mut out, &sc, Kind::Schema, None);
                     }
                 }
-                None => match schema.databases() {
-                    Some(dbs) if dbs.iter().any(|d| d.eq_ignore_ascii_case(&q)) => {
-                        for o in objects_in(&mut out, &q) {
-                            push(&mut out, &o.name, o.kind, o.detail.clone());
+            }
+            // db.schema. or schema.table.
+            (None, true, 2) => {
+                if is_database(&mut out, &qualifier[0]) {
+                    for o in objects_in(&mut out, &qualifier[0]) {
+                        if in_schema(&o, &q) && fits(&o) {
+                            push_object(&mut out, &o, false);
                         }
                     }
-                    Some(_) => {}
-                    None => out.missing.push(Need::Databases),
-                },
+                } else {
+                    push_columns(&mut out, &table(&qualifier[..1], &q));
+                }
             }
-        }
-        // db.table.: that table's columns
-        if qualifier.len() == 2 {
-            let source = Source {
-                database: Some(qualifier[0].clone()),
-                name: q,
-                alias: None,
-                derived: None,
-            };
-            for c in columns_of(&mut out, &source) {
-                push(&mut out, &c.name, Kind::Column, Some(c.data_type));
+            (None, true, n) => push_columns(&mut out, &table(&qualifier[..n - 1], &q)),
+            // db.: its objects
+            (None, false, 1) => {
+                if is_database(&mut out, &q) {
+                    for o in objects_in(&mut out, &q) {
+                        if fits(&o) {
+                            push_object(&mut out, &o, false);
+                        }
+                    }
+                }
             }
+            // db.table.: that table's columns
+            (None, false, 2) => push_columns(&mut out, &table(&qualifier[..1], &q)),
+            _ => {}
         }
     } else {
-        let ctx = context(&before, group);
         let tables_here = |out: &mut Completions| -> Vec<SchemaObject> {
             match &current_db {
                 Some(db) => objects_in(out, db),
@@ -722,10 +859,14 @@ pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
         };
         match ctx {
             Context::Tables => {
-                for o in tables_here(&mut out) {
+                let here = tables_here(&mut out);
+                for o in &here {
                     if matches!(o.kind, Kind::Table | Kind::View) {
-                        push(&mut out, &o.name, o.kind, None);
+                        push_object(&mut out, o, true);
                     }
+                }
+                for sc in schemas_of(&here) {
+                    push(&mut out, &sc, Kind::Schema, None);
                 }
                 match schema.databases() {
                     Some(dbs) => {
@@ -739,7 +880,7 @@ pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
             Context::Procedures => {
                 for o in tables_here(&mut out) {
                     if o.kind == Kind::Procedure {
-                        push(&mut out, &o.name, o.kind, o.detail.clone());
+                        push_object(&mut out, &o, true);
                     }
                 }
             }
@@ -765,7 +906,7 @@ pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
                 }
                 for o in tables_here(&mut out) {
                     if o.kind == Kind::Function {
-                        push(&mut out, &o.name, o.kind, o.detail.clone());
+                        push_object(&mut out, &o, true);
                     }
                 }
                 for f in FUNCTIONS {

@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{App, AppContext, Context, Entity, Global};
 use honcho_config::SavedConnection;
-use honcho_core::complete::{Kind, Need, Schema, SchemaColumn, SchemaObject};
-use honcho_db::{ObjectKind, ObjectRef, Scope, Session};
+use honcho_core::complete::{Dialect, Kind, Need, Schema, SchemaColumn, SchemaObject};
+use honcho_db::{DriverKind, ObjectKind, ObjectRef, Scope, Session};
 
 use crate::connections;
 
@@ -46,7 +46,8 @@ pub struct Catalog {
     conn: Conn,
     databases: Option<Vec<String>>,
     objects: HashMap<String, Vec<SchemaObject>>,
-    columns: HashMap<(String, String), Vec<SchemaColumn>>,
+    /// By database, schema (when the table was named with one) and table.
+    columns: HashMap<(String, Option<String>, String), Vec<SchemaColumn>>,
     /// Asked for and not back yet, or failed: not asked again until a clear.
     asked: HashSet<Need>,
     /// Needs waiting for the session to open.
@@ -183,10 +184,11 @@ impl Catalog {
                     )
                     .await
                     .map(|o| Loaded::Objects(o.iter().filter_map(schema_object).collect())),
-                Need::Columns(db, table) => session
-                    .columns(
-                        ObjectRef::new(ObjectKind::Table, table.clone()).in_database(db.clone()),
-                    )
+                Need::Columns(db, schema, table) => session
+                    .columns(ObjectRef {
+                        schema: schema.clone(),
+                        ..ObjectRef::new(ObjectKind::Table, table.clone()).in_database(db.clone())
+                    })
                     .await
                     .map(|cols| {
                         Loaded::Columns(
@@ -213,8 +215,8 @@ impl Catalog {
                     (Need::Objects(db), Ok(Loaded::Objects(o))) => {
                         this.objects.insert(db, o);
                     }
-                    (Need::Columns(db, t), Ok(Loaded::Columns(c))) => {
-                        this.columns.insert((db, t), c);
+                    (Need::Columns(db, schema, t), Ok(Loaded::Columns(c))) => {
+                        this.columns.insert((db, schema, t), c);
                     }
                     // a table that doesn't exist yet, say: leave it asked
                     _ => {}
@@ -264,6 +266,7 @@ fn schema_object(o: &ObjectRef) -> Option<SchemaObject> {
         ObjectKind::Trigger | ObjectKind::Sequence => return None,
     };
     Some(SchemaObject {
+        schema: o.schema.clone(),
         name: o.name.clone(),
         kind,
         detail: o.signature.clone(),
@@ -287,6 +290,13 @@ impl View<'_> {
 }
 
 impl Schema for View<'_> {
+    fn dialect(&self) -> Dialect {
+        match self.catalog.map(|c| c.saved.driver) {
+            Some(DriverKind::SqlServer) => Dialect::SqlServer,
+            _ => Dialect::MySql,
+        }
+    }
+
     fn current_database(&self) -> Option<&str> {
         self.current
     }
@@ -299,15 +309,30 @@ impl Schema for View<'_> {
         self.catalog?.objects.get(database).map(Vec::as_slice)
     }
 
-    fn columns(&self, database: &str, table: &str) -> Option<&[SchemaColumn]> {
+    fn columns(
+        &self,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Option<&[SchemaColumn]> {
         let catalog = self.catalog?;
+        let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
         // names in SQL are often typed in another case than the server's
         catalog
             .columns
-            .get(&(database.to_string(), table.to_string()))
+            .get(&(
+                database.to_string(),
+                schema.map(str::to_string),
+                table.to_string(),
+            ))
             .or_else(|| {
-                catalog.columns.iter().find_map(|((d, t), c)| {
-                    (d.eq_ignore_ascii_case(database) && t.eq_ignore_ascii_case(table)).then_some(c)
+                catalog.columns.iter().find_map(|((d, s, t), c)| {
+                    let schema_matches = match (s, schema) {
+                        (Some(a), Some(b)) => same(a, b),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    (same(d, database) && schema_matches && same(t, table)).then_some(c)
                 })
             })
             .map(Vec::as_slice)

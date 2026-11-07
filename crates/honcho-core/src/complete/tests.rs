@@ -5,13 +5,17 @@ use super::*;
 
 #[derive(Default)]
 struct TestSchema {
+    dialect: Dialect,
     current: Option<String>,
     databases: Option<Vec<String>>,
     objects: HashMap<String, Vec<SchemaObject>>,
-    columns: HashMap<(String, String), Vec<SchemaColumn>>,
+    columns: HashMap<(String, Option<String>, String), Vec<SchemaColumn>>,
 }
 
 impl Schema for TestSchema {
+    fn dialect(&self) -> Dialect {
+        self.dialect
+    }
     fn current_database(&self) -> Option<&str> {
         self.current.as_deref()
     }
@@ -21,19 +25,39 @@ impl Schema for TestSchema {
     fn objects(&self, database: &str) -> Option<&[SchemaObject]> {
         self.objects.get(database).map(Vec::as_slice)
     }
-    fn columns(&self, database: &str, table: &str) -> Option<&[SchemaColumn]> {
+    fn columns(
+        &self,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Option<&[SchemaColumn]> {
         self.columns
-            .get(&(database.to_string(), table.to_string()))
+            .get(&(
+                database.to_string(),
+                schema.map(str::to_string),
+                table.to_string(),
+            ))
             .map(Vec::as_slice)
     }
 }
 
 fn obj(name: &str, kind: Kind, detail: Option<&str>) -> SchemaObject {
     SchemaObject {
+        schema: None,
         name: name.into(),
         kind,
         detail: detail.map(Into::into),
     }
+}
+
+fn cols(names: &[(&str, &str)]) -> Vec<SchemaColumn> {
+    names
+        .iter()
+        .map(|(n, t)| SchemaColumn {
+            name: n.to_string(),
+            data_type: t.to_string(),
+        })
+        .collect()
 }
 
 fn shop() -> TestSchema {
@@ -57,17 +81,8 @@ fn shop() -> TestSchema {
             ),
         ],
     );
-    let cols = |names: &[(&str, &str)]| {
-        names
-            .iter()
-            .map(|(n, t)| SchemaColumn {
-                name: n.to_string(),
-                data_type: t.to_string(),
-            })
-            .collect::<Vec<_>>()
-    };
     s.columns.insert(
-        ("shop".into(), "orders".into()),
+        ("shop".into(), None, "orders".into()),
         cols(&[
             ("id", "int"),
             ("user_id", "int"),
@@ -75,7 +90,7 @@ fn shop() -> TestSchema {
         ]),
     );
     s.columns.insert(
-        ("shop".into(), "users".into()),
+        ("shop".into(), None, "users".into()),
         cols(&[
             ("id", "int"),
             ("email", "varchar(255)"),
@@ -214,10 +229,13 @@ fn databases_after_a_qualifier_or_use() {
 #[test]
 fn reports_what_isnt_loaded() {
     let mut s = shop();
-    s.columns.remove(&("shop".into(), "users".into()));
+    s.columns.remove(&("shop".into(), None, "users".into()));
     let c = at("SELECT u.| FROM users u", &s);
     assert!(c.items.is_empty());
-    assert_eq!(c.missing, [Need::Columns("shop".into(), "users".into())]);
+    assert_eq!(
+        c.missing,
+        [Need::Columns("shop".into(), None, "users".into())]
+    );
     let empty = TestSchema {
         current: Some("shop".into()),
         ..Default::default()
@@ -267,4 +285,123 @@ fn fast_on_a_big_schema() {
     }
     let each = started.elapsed() / runs;
     assert!(each.as_millis() < 50, "{each:?} per completion");
+}
+
+/// SQL Server: `app` with tables in dbo and in sales.
+fn mssql() -> TestSchema {
+    let in_schema = |schema: &str, name: &str, kind: Kind, detail: Option<&str>| SchemaObject {
+        schema: Some(schema.into()),
+        ..obj(name, kind, detail)
+    };
+    let mut s = TestSchema {
+        dialect: Dialect::SqlServer,
+        current: Some("app".into()),
+        databases: Some(vec!["app".into(), "analytics".into()]),
+        ..Default::default()
+    };
+    s.objects.insert(
+        "app".into(),
+        vec![
+            in_schema("dbo", "users", Kind::Table, None),
+            in_schema("sales", "orders", Kind::Table, None),
+            in_schema("sales", "close day", Kind::Procedure, Some("(@day date)")),
+            in_schema(
+                "dbo",
+                "order_total",
+                Kind::Function,
+                Some("(@u int) → money"),
+            ),
+        ],
+    );
+    s.objects.insert(
+        "analytics".into(),
+        vec![in_schema("report", "daily", Kind::View, None)],
+    );
+    s.columns.insert(
+        ("app".into(), Some("sales".into()), "orders".into()),
+        cols(&[("id", "int"), ("amount", "money")]),
+    );
+    s.columns.insert(
+        ("app".into(), None, "users".into()),
+        cols(&[("id", "int"), ("email", "nvarchar(255)")]),
+    );
+    s
+}
+
+fn items(sql: &str, s: &TestSchema) -> Vec<(String, String)> {
+    at(sql, s)
+        .items
+        .into_iter()
+        .filter(|c| c.kind != Kind::Keyword && c.kind != Kind::Function || c.detail.is_some())
+        .map(|c| (c.label, c.insert))
+        .collect()
+}
+
+fn pair(label: &str, insert: &str) -> (String, String) {
+    (label.into(), insert.into())
+}
+
+#[test]
+fn sql_server_names_go_through_schemas() {
+    let s = mssql();
+    // tables outside dbo are written with their schema
+    let from = items("SELECT * FROM |", &s);
+    assert!(from.contains(&pair("users", "users")), "{from:?}");
+    assert!(from.contains(&pair("orders", "sales.orders")), "{from:?}");
+    assert!(from.contains(&pair("sales", "sales")), "{from:?}");
+    // schema.: what's in it
+    assert_eq!(
+        items("SELECT * FROM sales.|", &s),
+        [pair("orders", "orders")]
+    );
+    // db.: its schemas; db.schema.: the objects there
+    assert_eq!(
+        items("SELECT * FROM analytics.|", &s),
+        [pair("report", "report")]
+    );
+    assert_eq!(
+        items("SELECT * FROM analytics.report.|", &s),
+        [pair("daily", "daily")]
+    );
+    // columns through schema-qualified tables and their aliases
+    assert_eq!(
+        items("SELECT o.| FROM sales.orders o", &s),
+        [pair("id", "id"), pair("amount", "amount")]
+    );
+    assert_eq!(
+        items("SELECT sales.orders.am| FROM sales.orders", &s)[0],
+        pair("amount", "amount")
+    );
+    assert_eq!(
+        items("SELECT u.| FROM [app].[dbo].users u", &s).len(),
+        0,
+        "dbo is asked for by name"
+    );
+    let c = at("SELECT u.| FROM [app].[dbo].users u", &s);
+    assert_eq!(
+        c.missing,
+        [Need::Columns(
+            "app".into(),
+            Some("dbo".into()),
+            "users".into()
+        )]
+    );
+}
+
+#[test]
+fn sql_server_routines_and_quoting() {
+    let s = mssql();
+    let exec = at("EXEC clo|", &s);
+    assert_eq!(exec.items[0].insert, "sales.[close day]");
+    assert_eq!(exec.items[0].detail.as_deref(), Some("sales · (@day date)"));
+    // T-SQL needs the schema on a function call
+    let f = at("SELECT order_t| FROM users", &s);
+    assert_eq!(f.items[0].insert, "dbo.order_total");
+    // # is a temp table, not a comment; backslashes don't escape
+    assert!(!labels_in("SELECT * FROM #t WHERE em|", &s).is_empty());
+    assert!(!labels_in("SELECT 'C:\\' AS p, em| FROM users", &s).is_empty());
+}
+
+fn labels_in(sql: &str, s: &TestSchema) -> Vec<String> {
+    at(sql, s).items.into_iter().map(|c| c.label).collect()
 }
