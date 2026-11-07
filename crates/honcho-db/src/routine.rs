@@ -44,7 +44,8 @@ pub fn editable(o: &ObjectRef) -> bool {
 /// REPLACE. SQL Server alters in place with CREATE OR ALTER.
 pub fn script(kind: DriverKind, o: &ObjectRef, definition: &str) -> String {
     if kind == DriverKind::SqlServer {
-        let body = definition.trim_end();
+        // the server keeps the blank lines between GO and CREATE
+        let body = definition.trim();
         if !editable(o) {
             return format!("{body}\n");
         }
