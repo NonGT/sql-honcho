@@ -482,8 +482,10 @@ pub async fn apply(
         ..entry.object.clone()
     };
     if let Some((create, drop)) = routine::trial(driver, &unqualified, file) {
-        run(session, create).await?;
+        let tried = run(session, create).await;
+        // the trial can fail after creating, as SQLite's view check does
         let _ = run(session, drop).await;
+        tried?;
     }
     if let Err(e) = run(session, file.clone()).await {
         if let Some(old) = &entry.server {

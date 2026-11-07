@@ -47,10 +47,12 @@ fn fixture_for(server: Server) -> Fixture {
         enabled: enabled(),
         driver: Arc::new(MySqlDriver),
         config: config(server),
-        bad_auth: ConnectConfig {
+        bad_auth: Some(ConnectConfig {
             password: Some("wrong".into()),
             ..config(server)
-        },
+        }),
+        databases: &["app", "analytics"],
+        routines: true,
         seed_scope: Scope {
             database: Some("app".into()),
             schema: None,

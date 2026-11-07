@@ -26,10 +26,12 @@ fn sql_server() -> Fixture {
         enabled: enabled(),
         driver: Arc::new(SqlServerDriver),
         config: config(),
-        bad_auth: ConnectConfig {
+        bad_auth: Some(ConnectConfig {
             password: Some("wrong".into()),
             ..config()
-        },
+        }),
+        databases: &["app", "analytics"],
+        routines: true,
         seed_scope: Scope {
             database: Some("app".into()),
             schema: Some("dbo".into()),
