@@ -269,3 +269,62 @@ async fn says_when_the_ssh_server_cant_forward() {
         other => panic!("{other:?}"),
     }
 }
+
+// Postgres cancels over a second connection, which has to find its way
+// through the tunnel as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_tls_and_cancel_through_the_tunnel() {
+    if !enabled() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rt = DbRuntime::new().unwrap();
+    let known = trusted(&rt, dir.path()).await;
+    let config = ConnectConfig {
+        host: "postgres".into(),
+        port: Some(5432),
+        tls: TlsConfig {
+            mode: TlsMode::VerifyFull,
+            ca_file: Some(docker("tls/ca.pem")),
+            server_name: Some("db.honcho.test".into()),
+            ..Default::default()
+        },
+        ..via(ssh(SshAuth::Password, &known))
+    };
+    let s = rt
+        .connect(
+            Arc::new(crate::postgres::PostgresDriver),
+            config,
+            SessionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let ssl = first_value(
+        &query(
+            &s,
+            "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        )
+        .await,
+    );
+    assert_eq!(ssl, "true");
+
+    let h = s.execute("SELECT pg_sleep(60)");
+    let token = h.cancel_token();
+    let started = Instant::now();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        token.cancel();
+    });
+    let mut h = h;
+    let mut last = None;
+    while let Some(e) = h.next().await {
+        last = Some(e);
+    }
+    assert_eq!(last, Some(QueryEvent::Finished(Err(DbError::Cancelled))));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(first_value(&query(&s, "SELECT 7").await), "7");
+}

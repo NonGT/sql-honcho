@@ -17,16 +17,17 @@ pub fn ident(kind: DriverKind, name: &str) -> String {
 }
 
 pub fn qualified(kind: DriverKind, o: &ObjectRef) -> String {
-    [
-        o.database.as_deref(),
-        o.schema.as_deref(),
-        Some(o.name.as_str()),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|part| ident(kind, part))
-    .collect::<Vec<_>>()
-    .join(".")
+    // Postgres names can't reach into another database
+    let database = o
+        .database
+        .as_deref()
+        .filter(|_| kind != DriverKind::Postgres);
+    [database, o.schema.as_deref(), Some(o.name.as_str())]
+        .into_iter()
+        .flatten()
+        .map(|part| ident(kind, part))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Objects that open with an Apply button: replacing them is routine work.
@@ -49,9 +50,12 @@ pub fn script(kind: DriverKind, o: &ObjectRef, definition: &str) -> String {
         if !editable(o) {
             return format!("{body}\n");
         }
-        return format!("{}\n", create_or_alter(body));
+        return format!("{}\n", create_or(body, "ALTER"));
     }
     let body = definition.trim_end().trim_end_matches(';').trim_end();
+    if kind == DriverKind::Postgres && o.kind == ObjectKind::Trigger {
+        return format!("{};\n", create_or(body, "REPLACE"));
+    }
     if !mysql_like(kind) {
         return format!("{body};\n");
     }
@@ -109,9 +113,10 @@ pub fn code_start(text: &str) -> usize {
     }
 }
 
-/// `CREATE PROCEDURE ...` as `CREATE OR ALTER PROCEDURE ...`, so running
-/// it replaces the object without dropping it (and its permissions).
-fn create_or_alter(body: &str) -> String {
+/// `CREATE PROCEDURE ...` as `CREATE OR ALTER PROCEDURE ...` (or OR
+/// REPLACE), so running it replaces the object without dropping it (and
+/// its permissions).
+fn create_or(body: &str, verb: &str) -> String {
     let at = code_start(body);
     let mut words = body[at..].split_whitespace();
     let create = words
@@ -122,7 +127,7 @@ fn create_or_alter(body: &str) -> String {
         return body.to_string();
     }
     format!(
-        "{}CREATE OR ALTER{}",
+        "{}CREATE OR {verb}{}",
         &body[..at],
         &body[at + "CREATE".len()..]
     )
@@ -286,6 +291,9 @@ pub fn call(kind: DriverKind, o: &ObjectRef, params: &[RoutineParam], values: &[
     if kind == DriverKind::SqlServer {
         return call_tsql(o, &name, params, &value);
     }
+    if kind == DriverKind::Postgres {
+        return call_postgres(o, &name, params, &value);
+    }
     if o.kind == ObjectKind::Function {
         let args: Vec<String> = (0..params.len()).map(value).collect();
         return format!(
@@ -319,6 +327,30 @@ pub fn call(kind: DriverKind, o: &ObjectRef, params: &[RoutineParam], values: &[
         out.push_str(&format!("SELECT {};\n", outs.join(", ")));
     }
     out
+}
+
+/// Postgres hands OUT and INOUT values back as a row of the CALL itself;
+/// OUT arguments are placeholders. Functions are selected from, which
+/// works for scalar, row and set results alike.
+fn call_postgres(
+    o: &ObjectRef,
+    name: &str,
+    params: &[RoutineParam],
+    value: &dyn Fn(usize) -> String,
+) -> String {
+    let args: Vec<String> = params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match p.mode {
+            ParamMode::Out => "NULL".into(),
+            ParamMode::In | ParamMode::InOut => value(i),
+        })
+        .collect();
+    if o.kind == ObjectKind::Function {
+        format!("SELECT * FROM {name}({});\n", args.join(", "))
+    } else {
+        format!("CALL {name}({});\n", args.join(", "))
+    }
 }
 
 /// T-SQL: parameters are passed by name, OUTPUT ones through variables
@@ -593,6 +625,40 @@ mod tests {
                 &["1".into()]
             ),
             "SELECT * FROM [app].[dbo].[orders_of](1);\n"
+        );
+    }
+
+    #[test]
+    fn postgres_replaces_and_calls() {
+        let t = obj(ObjectKind::Trigger, "audit").in_schema("public");
+        assert_eq!(
+            script(
+                DriverKind::Postgres,
+                &t,
+                "CREATE TRIGGER audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION f();"
+            ),
+            "CREATE OR REPLACE TRIGGER audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION f();\n"
+        );
+        // no database in the name: Postgres can't reach across
+        let p = obj(ObjectKind::Procedure, "double_it").in_schema("proj");
+        let params = [
+            param("p", ParamMode::In, "integer"),
+            param("doubled", ParamMode::InOut, "integer"),
+            param("note", ParamMode::Out, "text"),
+        ];
+        assert_eq!(
+            call(DriverKind::Postgres, &p, &params, &["5".into(), "1".into()]),
+            "CALL \"proj\".\"double_it\"(5, 1, NULL);\n"
+        );
+        let f = obj(ObjectKind::Function, "order_total").in_schema("public");
+        assert_eq!(
+            call(
+                DriverKind::Postgres,
+                &f,
+                &[param("p_user", ParamMode::In, "integer")],
+                &["2".into()]
+            ),
+            "SELECT * FROM \"public\".\"order_total\"(2);\n"
         );
     }
 }

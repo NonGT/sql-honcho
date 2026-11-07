@@ -57,12 +57,26 @@ services:
 
   postgres:
     image: postgres:16
+    # the server wants its key private to it, which a bind mount can't be
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        install -d -o postgres /run/tls &&
+        install -o postgres -m 600 /tls/ca.pem /tls/server-cert.pem /tls/server-key.pem /run/tls/ &&
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_ca_file=/run/tls/ca.pem
+        -c ssl_cert_file=/run/tls/server-cert.pem -c ssl_key_file=/run/tls/server-key.pem
+        -c hba_file=/etc/honcho/pg_hba.conf
     environment:
       POSTGRES_USER: honcho
       POSTGRES_PASSWORD: *password
       POSTGRES_DB: app
     ports: ["35432:5432"]
-    volumes: ["./seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    volumes:
+      - ./seed/postgres.sql:/docker-entrypoint-initdb.d/1-seed.sql:ro
+      - ./seed/postgres-x509.sql:/docker-entrypoint-initdb.d/2-x509.sql:ro
+      - ./postgres/pg_hba.conf:/etc/honcho/pg_hba.conf:ro
+      - ./tls:/tls:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "honcho", "-d", "app"]
       interval: 2s

@@ -161,6 +161,15 @@ fn literal(kind: DriverKind, v: &Value) -> String {
             }
             s
         }
+        // X'..' is a bit string to Postgres
+        Value::Bytes(b) if kind == DriverKind::Postgres => {
+            let mut s = String::from("'\\x");
+            for byte in b {
+                let _ = write!(s, "{byte:02X}");
+            }
+            s.push_str("'::bytea");
+            s
+        }
         Value::Bytes(b) => {
             let mut s = String::from("X'");
             for byte in b {
@@ -274,6 +283,8 @@ mod tests {
         let flags = [vec![Value::Bool(true), Value::Bytes(vec![0xde, 0xad])]];
         let flags: Vec<Vec<&Value>> = flags.iter().map(|r| r.iter().collect()).collect();
         assert!(inserts(DriverKind::SqlServer, &refs, &flags).contains("VALUES (1, 0xDEAD)"));
+        assert!(inserts(DriverKind::Postgres, &refs, &flags)
+            .contains("VALUES (TRUE, '\\xDEAD'::bytea)"));
         let no_table = cols(&["x"]);
         let out = inserts(
             DriverKind::MySql,

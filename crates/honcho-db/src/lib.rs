@@ -11,6 +11,7 @@ mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod mysql;
+pub mod postgres;
 pub mod project;
 pub mod routine;
 mod runtime;
