@@ -5,7 +5,8 @@
 //! in its test code. The database must hold the shared seed from
 //! `docker/seed`: databases `app` and `analytics`; in `app` the tables
 //! `users` and `orders`, the view `active_users`, the procedure
-//! `refresh_stats` and the function `order_total`.
+//! `refresh_stats` and the function `order_total`. SQLite, with one file
+//! and no routines, has the tables and the view in `main`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +20,13 @@ pub struct Fixture {
     pub enabled: bool,
     pub driver: Arc<dyn Driver>,
     pub config: ConnectConfig,
-    pub bad_auth: ConnectConfig,
+    /// A config the server must refuse with an auth error; `None` where
+    /// there are no credentials (SQLite).
+    pub bad_auth: Option<ConnectConfig>,
+    /// Databases `databases()` must list.
+    pub databases: &'static [&'static str],
+    /// Whether the server has procedures and functions.
+    pub routines: bool,
     /// Where the seeded objects live (database, and schema where the
     /// server has one).
     pub seed_scope: Scope,
@@ -110,13 +117,13 @@ pub async fn connects_and_pings(f: Fixture) {
 
 pub async fn rejects_bad_credentials(f: Fixture) {
     check!(f);
+    let Some(bad_auth) = f.bad_auth.clone() else {
+        eprintln!("skipped: driver has no credentials");
+        return;
+    };
     let rt = DbRuntime::new().unwrap();
     let err = rt
-        .connect(
-            f.driver.clone(),
-            f.bad_auth.clone(),
-            SessionOptions::default(),
-        )
+        .connect(f.driver.clone(), bad_auth, SessionOptions::default())
         .await
         .err()
         .expect("connected with bad credentials");
@@ -245,7 +252,7 @@ pub async fn lists_metadata(f: Fixture) {
     let s = connect(&f, &rt).await;
 
     let dbs = s.databases().await.unwrap();
-    for db in ["app", "analytics"] {
+    for db in f.databases {
         assert!(dbs.iter().any(|d| d == db), "{db} missing from {dbs:?}");
     }
 
@@ -259,7 +266,20 @@ pub async fn lists_metadata(f: Fixture) {
     };
     let orders = find(ObjectKind::Table, "orders");
     find(ObjectKind::Table, "users");
-    find(ObjectKind::View, "active_users");
+    let view = find(ObjectKind::View, "active_users");
+    let cols = s.columns(orders).await.unwrap();
+    let id = cols
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case("id"))
+        .expect("orders.id");
+    assert!(id.primary_key);
+    assert!(cols.iter().any(|c| c.name.eq_ignore_ascii_case("amount")));
+    let def = s.definition(view).await.unwrap();
+    assert!(def.to_lowercase().contains("active_users"), "{def}");
+    if !f.routines {
+        return;
+    }
+
     let procedure = find(ObjectKind::Procedure, "refresh_stats");
     // routines carry their parameters, for completion details
     let function = find(ObjectKind::Function, "order_total");
@@ -279,14 +299,6 @@ pub async fn lists_metadata(f: Fixture) {
         .await
         .unwrap();
     assert!(routines.iter().all(|o| o.kind.is_routine()), "{routines:?}");
-
-    let cols = s.columns(orders).await.unwrap();
-    let id = cols
-        .iter()
-        .find(|c| c.name.eq_ignore_ascii_case("id"))
-        .expect("orders.id");
-    assert!(id.primary_key);
-    assert!(cols.iter().any(|c| c.name.eq_ignore_ascii_case("amount")));
 
     let def = s.definition(procedure).await.unwrap();
     assert!(def.to_lowercase().contains("refresh_stats"), "{def}");
@@ -323,7 +335,9 @@ pub async fn searches_objects(f: Fixture) {
         })
     };
     assert!(in_seed(ObjectKind::Table, "orders"), "{found:?}");
-    assert!(in_seed(ObjectKind::Function, "order_total"), "{found:?}");
+    if f.routines {
+        assert!(in_seed(ObjectKind::Function, "order_total"), "{found:?}");
+    }
     // the term is matched literally, not as a pattern
     let none = s.search("ord_rs", 100).await.unwrap();
     assert!(
@@ -335,6 +349,10 @@ pub async fn searches_objects(f: Fixture) {
 
 pub async fn describes_routines(f: Fixture) {
     check!(f);
+    if !f.routines {
+        eprintln!("skipped: driver has no routines");
+        return;
+    }
     let rt = DbRuntime::new().unwrap();
     let s = connect(&f, &rt).await;
     let routines = s
@@ -446,10 +464,12 @@ mod fake {
             database: Some("app".into()),
             ..Default::default()
         },
-        bad_auth: ConnectConfig {
+        bad_auth: Some(ConnectConfig {
             user: "bad".into(),
             ..Default::default()
-        },
+        }),
+        databases: &["app", "analytics"],
+        routines: true,
         seed_scope: Scope {
             database: Some("app".into()),
             schema: None,

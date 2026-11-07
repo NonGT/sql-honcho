@@ -42,7 +42,8 @@ pub fn editable(o: &ObjectRef) -> bool {
 /// A definition as a script that replaces the object when run. MySQL has
 /// no CREATE OR REPLACE for routines and triggers, so those are dropped
 /// first, and their bodies go between DELIMITER lines; views use CREATE OR
-/// REPLACE. SQL Server alters in place with CREATE OR ALTER.
+/// REPLACE. SQL Server alters in place with CREATE OR ALTER. SQLite has
+/// no OR REPLACE at all, so views and triggers are dropped first too.
 pub fn script(kind: DriverKind, o: &ObjectRef, definition: &str) -> String {
     if kind == DriverKind::SqlServer {
         // the server keeps the blank lines between GO and CREATE
@@ -53,6 +54,11 @@ pub fn script(kind: DriverKind, o: &ObjectRef, definition: &str) -> String {
         return format!("{}\n", create_or(body, "ALTER"));
     }
     let body = definition.trim_end().trim_end_matches(';').trim_end();
+    if kind == DriverKind::Sqlite && editable(o) {
+        if let Some(word) = keyword(o.kind) {
+            return format!("DROP {word} IF EXISTS {};\n{body};\n", qualified(kind, o));
+        }
+    }
     if kind == DriverKind::Postgres && o.kind == ObjectKind::Trigger {
         return format!("{};\n", create_or(body, "REPLACE"));
     }
@@ -204,19 +210,21 @@ pub fn create_statement(kind: DriverKind, script: &str) -> Option<&str> {
 /// Name the trial create uses; dropped again straight after.
 pub const TRIAL_NAME: &str = "__honcho_apply_check";
 
-/// For an Apply that has to drop first (MySQL routines and triggers): the
+/// For an Apply that has to drop first (MySQL routines and triggers, SQLite
+/// views and triggers): the
 /// script's CREATE renamed to a throwaway name, and the DROP that removes
 /// it. Creating that first shows the CREATE works, privileges and DEFINER
 /// included, before the real object is dropped. `None` when there's no
 /// CREATE to try or the object can be replaced in one step.
 pub fn trial(kind: DriverKind, o: &ObjectRef, script: &str) -> Option<(String, String)> {
-    if !mysql_like(kind) {
+    let sqlite = kind == DriverKind::Sqlite;
+    if !mysql_like(kind) && !sqlite {
         return None;
     }
     let keyword = match o.kind {
-        ObjectKind::Procedure => "PROCEDURE",
-        ObjectKind::Function => "FUNCTION",
+        ObjectKind::Procedure | ObjectKind::Function if !sqlite => keyword(o.kind)?,
         ObjectKind::Trigger => "TRIGGER",
+        ObjectKind::View if sqlite => "VIEW",
         _ => return None,
     };
     let text = create_statement(kind, script)?;
@@ -231,8 +239,19 @@ pub fn trial(kind: DriverKind, o: &ObjectRef, script: &str) -> Option<(String, S
         qualified(kind, &temp),
         &text[name_end..]
     );
+    let create = if sqlite && o.kind == ObjectKind::View {
+        // SQLite only looks for a view's tables when it's read
+        format!(
+            "{renamed};\nSELECT * FROM {} LIMIT 0;\n",
+            qualified(kind, &temp)
+        )
+    } else if sqlite {
+        format!("{renamed};\n")
+    } else {
+        format!("DELIMITER //\n{renamed} //\nDELIMITER ;\n")
+    };
     Some((
-        format!("DELIMITER //\n{renamed} //\nDELIMITER ;\n"),
+        create,
         format!("DROP {keyword} IF EXISTS {};\n", qualified(kind, &temp)),
     ))
 }
@@ -659,6 +678,36 @@ mod tests {
                 &["2".into()]
             ),
             "SELECT * FROM \"public\".\"order_total\"(2);\n"
+        );
+    }
+
+    #[test]
+    fn sqlite_drops_then_creates_and_tries_first() {
+        let v = obj(ObjectKind::View, "active_users");
+        let text = script(
+            DriverKind::Sqlite,
+            &v,
+            "CREATE VIEW active_users AS SELECT 1",
+        );
+        assert_eq!(
+            text,
+            "DROP VIEW IF EXISTS \"app\".\"active_users\";\nCREATE VIEW active_users AS SELECT 1;\n"
+        );
+        let (create, drop) = trial(DriverKind::Sqlite, &v, &text).unwrap();
+        assert_eq!(
+            create,
+            "CREATE VIEW \"app\".\"__honcho_apply_check\" AS SELECT 1;\n\
+             SELECT * FROM \"app\".\"__honcho_apply_check\" LIMIT 0;\n"
+        );
+        assert_eq!(
+            drop,
+            "DROP VIEW IF EXISTS \"app\".\"__honcho_apply_check\";\n"
+        );
+        // tables are shown, never dropped
+        let t = obj(ObjectKind::Table, "users");
+        assert_eq!(
+            script(DriverKind::Sqlite, &t, "CREATE TABLE users (x)"),
+            "CREATE TABLE users (x);\n"
         );
     }
 }

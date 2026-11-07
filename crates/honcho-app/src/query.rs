@@ -439,7 +439,10 @@ impl QueryTab {
             };
             if let Some((create, drop)) = routine::trial(conn.saved.driver, &origin.object, &script)
             {
-                if let Err(e) = run_to_end(&conn.session, create).await {
+                let tried = run_to_end(&conn.session, create).await;
+                // the trial can fail after creating, as SQLite's view check does
+                let _ = run_to_end(&conn.session, drop).await;
+                if let Err(e) = tried {
                     this.update(cx, |this, cx| {
                         this.say(
                             MessageLevel::Error,
@@ -456,7 +459,6 @@ impl QueryTab {
                     .ok();
                     return;
                 }
-                let _ = run_to_end(&conn.session, drop).await;
             }
             this.update(cx, |this, cx| {
                 let kind = this.kind().unwrap_or(DriverKind::MySql);
