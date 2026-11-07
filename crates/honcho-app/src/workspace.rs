@@ -239,7 +239,7 @@ impl Workspace {
                     let (saved, database) = ((**saved).clone(), database.clone());
                     this.active_query_tab()
                         .clone()
-                        .update(cx, |q, cx| q.open_saved(saved, database, false, cx));
+                        .update(cx, |q, cx| q.switch_to(saved, database, window, cx));
                     let editor = this.active_editor().clone();
                     window.focus(&editor.focus_handle(cx));
                 }

@@ -598,6 +598,66 @@ fn use_in_this_tab_connects_the_current_tab(cx: &mut TestAppContext) {
     wait_until(cx, |cx| tab_target(&ws, cx).is_some());
 }
 
+fn pick_database(ws: &Entity<Workspace>, cx: &mut VisualTestContext, name: &str) {
+    let q = query_tab(ws, cx);
+    q.update_in(cx, |q, window, cx| q.pick_database(name.into(), window, cx));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn switching_away_from_an_open_transaction_asks_first(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    // like Postgres: another database means another connection
+    connect_fake_as(&ws, cx, "pg", None, false);
+    wait_for_target(&ws, cx, "app");
+    cx.simulate_input("begin");
+    run(&ws, cx, "P-enter");
+
+    pick_database(&ws, cx, "analytics");
+    wait_until(cx, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert_eq!(
+        tab_target(&ws, cx),
+        Some(("fake db".into(), Some("app".into())))
+    );
+
+    pick_database(&ws, cx, "analytics");
+    wait_until(cx, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Roll back and switch");
+    wait_for_target(&ws, cx, "analytics");
+
+    // nothing open now, so nothing to ask
+    pick_database(&ws, cx, "app");
+    wait_for_target(&ws, cx, "app");
+    assert!(!cx.has_pending_prompt());
+
+    // "use in this tab" replaces the connection whatever the driver
+    run(&ws, cx, "P-enter");
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.act("analytics", "use", cx));
+    cx.run_until_parked();
+    wait_until(cx, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert_eq!(
+        tab_target(&ws, cx),
+        Some(("fake db".into(), Some("app".into())))
+    );
+}
+
+#[gpui::test]
+fn use_keeps_the_transaction_so_nothing_is_asked(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    wait_for_target(&ws, cx, "app");
+    cx.simulate_input("begin");
+    run(&ws, cx, "P-enter");
+    pick_database(&ws, cx, "analytics");
+    wait_for_target(&ws, cx, "analytics");
+    assert!(!cx.has_pending_prompt());
+}
+
 #[gpui::test]
 fn run_all_then_the_statement_at_the_cursor(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);

@@ -109,9 +109,12 @@ const MAX_ITEMS: usize = 100;
 /// Common built-in functions offered where an expression can go.
 const FUNCTIONS: &[&str] = &[
     "ABS",
+    "AGE",
+    "ARRAY_AGG",
     "AVG",
     "CAST",
     "CEIL",
+    "CEILING",
     "COALESCE",
     "CONCAT",
     "CONCAT_WS",
@@ -121,24 +124,37 @@ const FUNCTIONS: &[&str] = &[
     "CURRENT_DATE",
     "CURRENT_TIMESTAMP",
     "DATE",
+    "DATEADD",
     "DATEDIFF",
+    "DATEPART",
     "DATE_ADD",
     "DATE_FORMAT",
     "DATE_SUB",
+    "DATE_TRUNC",
+    "EOMONTH",
     "EXISTS",
+    "EXTRACT",
     "FLOOR",
     "FORMAT",
+    "GENERATE_SERIES",
+    "GEN_RANDOM_UUID",
+    "GETDATE",
     "GREATEST",
     "GROUP_CONCAT",
     "IF",
     "IFNULL",
+    "IIF",
     "INSTR",
+    "ISNULL",
+    "JSONB_BUILD_OBJECT",
     "JSON_ARRAY",
     "JSON_EXTRACT",
     "JSON_OBJECT",
     "JSON_UNQUOTE",
+    "JSON_VALUE",
     "LEAST",
     "LEFT",
+    "LEN",
     "LENGTH",
     "LOWER",
     "LPAD",
@@ -146,24 +162,80 @@ const FUNCTIONS: &[&str] = &[
     "MAX",
     "MIN",
     "MOD",
+    "NEWID",
     "NOW",
     "NULLIF",
+    "POSITION",
     "RAND",
+    "RANDOM",
+    "REGEXP_REPLACE",
     "REPLACE",
     "RIGHT",
     "ROUND",
     "RPAD",
     "RTRIM",
+    "SPLIT_PART",
+    "STRING_AGG",
     "STR_TO_DATE",
     "SUBSTRING",
     "SUM",
+    "SYSDATETIME",
     "TIMESTAMPDIFF",
+    "TO_CHAR",
+    "TO_DATE",
     "TRIM",
     "TRUNCATE",
+    "TRY_CAST",
     "UPPER",
     "UUID",
     "YEAR",
 ];
+
+/// Whether a built-in function exists in the dialect; those not listed
+/// are everyone's.
+fn function_in(f: &str, dialect: Dialect) -> bool {
+    use Dialect::*;
+    let only: &[Dialect] = match f {
+        "CURDATE" | "DATE" | "DATE_ADD" | "DATE_FORMAT" | "DATE_SUB" | "GROUP_CONCAT" | "IF"
+        | "IFNULL" | "INSTR" | "JSON_EXTRACT" | "JSON_UNQUOTE" | "STR_TO_DATE"
+        | "TIMESTAMPDIFF" | "TRUNCATE" | "UUID" => &[MySql],
+        "CEILING" | "DATEADD" | "DATEPART" | "EOMONTH" | "GETDATE" | "IIF" | "ISNULL" | "LEN"
+        | "NEWID" | "SYSDATETIME" | "TRY_CAST" => &[SqlServer],
+        "AGE" | "ARRAY_AGG" | "DATE_TRUNC" | "GENERATE_SERIES" | "GEN_RANDOM_UUID"
+        | "JSONB_BUILD_OBJECT" | "RANDOM" | "SPLIT_PART" | "TO_CHAR" | "TO_DATE" => &[Postgres],
+        "CEIL" | "LENGTH" | "LPAD" | "MOD" | "NOW" | "RPAD" | "REGEXP_REPLACE" | "EXTRACT"
+        | "POSITION" => &[MySql, Postgres],
+        "CONVERT" | "DATEDIFF" | "FORMAT" | "RAND" | "YEAR" => &[MySql, SqlServer],
+        "JSON_VALUE" | "STRING_AGG" => &[SqlServer, Postgres],
+        _ => return true,
+    };
+    only.contains(&dialect)
+}
+
+/// Whether a keyword means anything in the dialect; those not listed are
+/// everyone's. Highlighting still knows them all.
+fn keyword_in(k: &str, dialect: Dialect) -> bool {
+    use Dialect::*;
+    let only: &[Dialect] = match k {
+        "AUTO_INCREMENT" | "DELIMITER" | "DESCRIBE" | "DETERMINISTIC" | "ELSEIF" | "ENGINE"
+        | "LEAVE" | "MODIFY" | "READS" | "REPEAT" | "SIGNAL" | "UNTIL" => &[MySql],
+        "BREAK" | "CATCH" | "CLUSTERED" | "EXEC" | "GO" | "GOTO" | "NOCOUNT" | "NONCLUSTERED"
+        | "OUTPUT" | "PRINT" | "PROC" | "RAISERROR" | "THROW" | "TOP" | "TRAN" | "TRY"
+        | "WAITFOR" => &[SqlServer],
+        "CONCURRENTLY" | "CONFLICT" | "DEFERRABLE" | "ELSIF" | "EXCEPTION" | "EXTENSION"
+        | "FILTER" | "ILIKE" | "IMMUTABLE" | "ISNULL" | "LANGUAGE" | "MATERIALIZED" | "NOTNULL"
+        | "NULLS" | "OWNER" | "PERFORM" | "RAISE" | "REFRESH" | "SETOF" | "STABLE" | "STRICT"
+        | "TEMP" | "VACUUM" | "VOLATILE" => &[Postgres],
+        "CALL" | "COMMENT" | "DO" | "INOUT" | "LATERAL" | "LIMIT" | "OUT" | "RECURSIVE"
+        | "RENAME" | "RETURNING" | "SECURITY" | "SHOW" => &[MySql, Postgres],
+        "IDENTITY" | "INSTEAD" => &[SqlServer, Postgres],
+        "USE" => &[MySql, SqlServer],
+        // highlighted, but not something anyone types as a keyword
+        "CTE" => &[],
+        _ => return true,
+    };
+    only.contains(&dialect)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
@@ -942,13 +1014,13 @@ pub fn complete(sql: &str, cursor: usize, schema: &dyn Schema) -> Completions {
                         push_object(&mut out, &o, true);
                     }
                 }
-                for f in FUNCTIONS {
+                for f in FUNCTIONS.iter().filter(|f| function_in(f, dialect)) {
                     push(&mut out, f, Kind::Function, None);
                 }
             }
         }
         if ctx != Context::Databases {
-            for k in KEYWORDS {
+            for k in KEYWORDS.iter().filter(|k| keyword_in(k, dialect)) {
                 push(&mut out, k, Kind::Keyword, None);
             }
         }

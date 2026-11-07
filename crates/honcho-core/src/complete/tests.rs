@@ -437,3 +437,50 @@ fn postgres_quotes_and_dollar_bodies() {
     // $1 is a parameter, not a quote
     assert!(!labels_in("SELECT * FROM us| WHERE id = $1", &s).is_empty());
 }
+
+#[test]
+fn keywords_and_functions_follow_the_dialect() {
+    let with = |dialect| TestSchema {
+        dialect,
+        current: Some("app".into()),
+        databases: Some(vec!["app".into()]),
+        objects: HashMap::from([("app".into(), vec![obj("users", Kind::Table, None)])]),
+        ..Default::default()
+    };
+    let offered =
+        |dialect, sql: &str, word: &str| labels_in(sql, &with(dialect)).iter().any(|l| l == word);
+    assert!(offered(
+        Dialect::SqlServer,
+        "SELECT 1 NONCL|",
+        "NONCLUSTERED"
+    ));
+    assert!(!offered(
+        Dialect::Postgres,
+        "SELECT 1 NONCL|",
+        "NONCLUSTERED"
+    ));
+    assert!(!offered(Dialect::MySql, "SELECT 1 NONCL|", "NONCLUSTERED"));
+    assert!(offered(
+        Dialect::Postgres,
+        "SELECT * FROM users WHERE email ILI|",
+        "ILIKE"
+    ));
+    assert!(!offered(
+        Dialect::MySql,
+        "SELECT * FROM users WHERE email ILI|",
+        "ILIKE"
+    ));
+    assert!(offered(Dialect::MySql, "SELECT * FROM users LIM|", "LIMIT"));
+    assert!(!offered(
+        Dialect::SqlServer,
+        "SELECT * FROM users LIM|",
+        "LIMIT"
+    ));
+
+    assert!(offered(Dialect::SqlServer, "SELECT GETD|", "GETDATE"));
+    assert!(!offered(Dialect::Postgres, "SELECT GETD|", "GETDATE"));
+    assert!(offered(Dialect::MySql, "SELECT IFN|", "IFNULL"));
+    assert!(!offered(Dialect::SqlServer, "SELECT IFN|", "IFNULL"));
+    assert!(offered(Dialect::Postgres, "SELECT DATE_TR|", "DATE_TRUNC"));
+    assert!(offered(Dialect::Postgres, "SELECT COAL|", "COALESCE"));
+}

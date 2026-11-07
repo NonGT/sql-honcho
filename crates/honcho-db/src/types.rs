@@ -266,5 +266,6 @@ pub struct Capabilities {
     /// database is a schema (MySQL) or there is only one (SQLite).
     pub schemas: bool,
     /// One connection can query across databases (MySQL, SQL Server).
+    /// Without it, switching databases means a new connection.
     pub cross_database: bool,
 }

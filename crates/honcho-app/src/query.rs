@@ -1015,8 +1015,82 @@ impl QueryTab {
         }
     }
 
-    fn pick_database(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pick_database(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_databases(window, cx);
+        let Some(conn) = &self.connection else {
+            return;
+        };
+        if self.database.as_ref() == Some(&name) {
+            return;
+        }
+        // where switching means a new connection, the old one's
+        // transaction goes with it
+        if conn.session.capabilities().cross_database {
+            self.use_database(name, cx);
+        } else {
+            self.after_leaving(window, cx, move |this, _, cx| this.use_database(name, cx));
+        }
+    }
+
+    /// Connects this tab elsewhere, once its open transaction, if any, may
+    /// be rolled back.
+    pub fn switch_to(
+        &mut self,
+        saved: SavedConnection,
+        database: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.after_leaving(window, cx, move |this, _, cx| {
+            this.open_saved(saved, database, false, cx)
+        });
+    }
+
+    /// Runs `then` straight away when closing this tab's session loses
+    /// nothing, or else once the user agrees to roll back its transaction.
+    fn after_leaving(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let Some(conn) = &self.connection else {
+            return then(self, window, cx);
+        };
+        let session = conn.session.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            // a session that can't answer has nothing worth keeping
+            if session.in_transaction().await.unwrap_or(false) {
+                let Ok(answer) = this.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        "This tab has a transaction open.",
+                        Some(
+                            "Switching closes its connection, which rolls the transaction \
+                             back. Temp tables and SET options go with it.",
+                        ),
+                        &["Cancel", "Roll back and switch"],
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                if answer.await != Ok(1) {
+                    return;
+                }
+            }
+            this.update_in(cx, |this, window, cx| then(this, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn use_database(&mut self, name: String, cx: &mut Context<Self>) {
         let Some(conn) = &self.connection else {
             return;
         };
@@ -1258,7 +1332,7 @@ impl QueryTab {
         let picked = self.connections.as_ref().and_then(|l| l.get(ix).cloned());
         self.close_connections(window, cx);
         match picked {
-            Some((saved, database)) => self.open_saved(saved, database, false, cx),
+            Some((saved, database)) => self.switch_to(saved, database, window, cx),
             None => cx.emit(TabEvent::NeedConnection),
         }
     }

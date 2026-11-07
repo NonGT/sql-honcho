@@ -228,6 +228,19 @@ it!(lists_schemas_and_scripts_objects, |s| {
     );
 });
 
+it!(knows_when_a_transaction_is_open, |s| {
+    assert!(!s.in_transaction().await.unwrap());
+    run(&s, "BEGIN; SELECT 1").await;
+    assert!(s.in_transaction().await.unwrap());
+    run(&s, "COMMIT").await;
+    assert!(!s.in_transaction().await.unwrap());
+    // a failed statement leaves it open until a ROLLBACK
+    run(&s, "BEGIN; SELEC 1").await;
+    assert!(s.in_transaction().await.unwrap());
+    run(&s, "ROLLBACK").await;
+    assert!(!s.in_transaction().await.unwrap());
+});
+
 it!(cancels_and_stays_usable, |s| {
     let handle = s.execute("SELECT pg_sleep(60)");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
