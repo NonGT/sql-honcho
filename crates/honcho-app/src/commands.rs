@@ -2,6 +2,8 @@
 //! in-window menu on Windows and Linux, and the command palette are all
 //! built from this one list.
 
+use std::ops::Range;
+
 use gpui::{Action, Keystroke, Menu, MenuItem};
 
 use crate::browser;
@@ -265,34 +267,59 @@ fn key_name(key: &str, p: Platform) -> String {
 
 /// Where `query` matches `label` as a subsequence, ignoring case, and how
 /// well: starts of words and runs of letters count most.
-pub fn fuzzy(query: &str, label: &str) -> Option<(i32, Vec<std::ops::Range<usize>>)> {
+pub fn fuzzy(query: &str, label: &str) -> Option<(i32, Vec<Range<usize>>)> {
     let query: Vec<char> = query
         .chars()
         .filter(|c| !c.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect();
+    // the first try skips a letter mid-word when the same letter starts a
+    // later word ("tlc" is Toggle Line Comment, not the t in Edit)
+    [true, false]
+        .into_iter()
+        .filter_map(|prefer_starts| match_chars(&query, label, prefer_starts))
+        .max_by_key(|(score, _)| *score)
+}
+
+fn match_chars(
+    query: &[char],
+    label: &str,
+    prefer_starts: bool,
+) -> Option<(i32, Vec<Range<usize>>)> {
+    let chars: Vec<(usize, char)> = label.char_indices().collect();
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let word_start = |i: usize| i == 0 || !chars[i - 1].1.is_alphanumeric();
     let mut score = 0;
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut ranges: Vec<Range<usize>> = Vec::new();
     let mut qi = 0;
-    let mut prev: Option<char> = None;
-    let mut last_match: Option<usize> = None;
-    for (i, c) in label.char_indices() {
+    let mut last_end: Option<usize> = None;
+    for (ci, &(i, c)) in chars.iter().enumerate() {
         if qi == query.len() {
             break;
         }
-        if c.to_lowercase().eq(std::iter::once(query[qi])) {
-            let word_start = prev.is_none_or(|p| !p.is_alphanumeric());
-            let follows = last_match.is_some_and(|end| end == i);
-            score += 1 + if word_start { 6 } else { 0 } + if follows { 4 } else { 0 };
-            let end = i + c.len_utf8();
-            match ranges.last_mut() {
-                Some(r) if follows => r.end = end,
-                _ => ranges.push(i..end),
-            }
-            last_match = Some(end);
-            qi += 1;
+        if lower(c) != query[qi] {
+            continue;
         }
-        prev = Some(c);
+        let start = word_start(ci);
+        let follows = last_end == Some(i);
+        if prefer_starts
+            && !start
+            && !follows
+            && chars[ci + 1..]
+                .iter()
+                .enumerate()
+                .any(|(k, &(_, d))| lower(d) == query[qi] && word_start(ci + 1 + k))
+        {
+            continue;
+        }
+        score += 1 + if start { 6 } else { 0 } + if follows { 4 } else { 0 };
+        let end = i + c.len_utf8();
+        match ranges.last_mut() {
+            Some(r) if follows => r.end = end,
+            _ => ranges.push(i..end),
+        }
+        last_end = Some(end);
+        qi += 1;
     }
     (qi == query.len()).then(|| (score - ranges.len() as i32, ranges))
 }
@@ -360,6 +387,9 @@ mod tests {
         assert!(start > middle, "{start} {middle}");
         // across words, the way people abbreviate
         assert!(fuzzy("runall", "Connection: Run All").is_some());
-        assert!(fuzzy("tlc", "Edit: Toggle Line Comment").is_some());
+        let (_, r) = fuzzy("tlc", "Edit: Toggle Line Comment").unwrap();
+        assert_eq!(r, [6..7, 13..14, 18..19]);
+        // a letter that starts no later word still matches mid-word
+        assert!(fuzzy("dt", "Edit: Undo").is_some());
     }
 }
