@@ -2,17 +2,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    actions, canvas, div, point, prelude::*, px, App, Bounds, Context, CursorStyle, Decorations,
-    Entity, EntityId, ExternalPaths, FocusHandle, Focusable, HitboxBehavior, MouseButton, Pixels,
-    Point, PromptLevel, ResizeEdge, SharedString, Size, Subscription, Task, Window,
+    actions, anchored, canvas, deferred, div, point, prelude::*, px, App, Bounds, Context,
+    CursorStyle, Decorations, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
+    HitboxBehavior, MouseButton, Pixels, Point, PromptLevel, ResizeEdge, SharedString, Size,
+    Subscription, Task, Window,
 };
 
 use crate::browser::{self, BrowserEvent, ObjectBrowser};
+use crate::commands::{self, Entry, MenuSpec};
 use crate::connection_dialog::{ConnectionDialog, DialogEvent};
 use crate::connections;
 use crate::diff_view::{DiffEvent, DiffView};
 use crate::editor_view::EditorView;
 use crate::find::{self, FindBar};
+use crate::keymap::Platform;
+use crate::palette::{CommandPalette, PaletteEvent};
 use crate::project_pane::{ProjectEvent, ProjectPane};
 use crate::query::{Origin, QueryTab, TabEvent};
 use crate::routine_form::{FormEvent, RoutineForm};
@@ -37,6 +41,7 @@ actions!(
         Quit,
         ManageConnections,
         OpenProject,
+        ShowCommandPalette,
     ]
 );
 
@@ -66,6 +71,11 @@ pub struct Workspace {
     browser_drag: Option<(Pixels, Pixels)>,
     /// Keyed by the tab's editor.
     query_tabs: HashMap<EntityId, Entity<QueryTab>>,
+    /// The in-window menu bar on Windows and Linux, and which one is open.
+    menus: Vec<MenuSpec>,
+    open_menu: Option<usize>,
+    /// The palette, and what had focus before it opened.
+    palette: Option<(Entity<CommandPalette>, Option<FocusHandle>)>,
 }
 
 impl Workspace {
@@ -93,6 +103,12 @@ impl Workspace {
             browser,
             query_tabs: HashMap::new(),
             find,
+            menus: match Platform::current() {
+                Platform::Mac => Vec::new(),
+                p => commands::menus(p),
+            },
+            open_menu: None,
+            palette: None,
         };
         this.subscribe_browser(window, cx);
         this.new_tab(String::new(), None, window, cx);
@@ -937,22 +953,28 @@ impl Workspace {
             .bg(Theme::panel())
             .border_b_1()
             .border_color(Theme::border())
-            .on_mouse_down(MouseButton::Left, |e, window, _| {
-                if e.click_count == 2 {
-                    window.zoom_window();
-                } else {
-                    window.start_window_move();
-                }
-            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.close_menu(cx);
+                    if e.click_count == 2 {
+                        window.zoom_window();
+                    } else {
+                        window.start_window_move();
+                    }
+                }),
+            )
             .on_mouse_down(MouseButton::Right, |e, window, _| {
                 window.show_window_menu(e.position)
             })
+            .child(self.render_menu_bar(cx))
             .child(
                 div()
                     .flex_1()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(Theme::muted())
+                    .when(!self.menus.is_empty(), |d| d.pl_3())
                     .child(title),
             )
             .child(
@@ -1117,6 +1139,19 @@ impl Render for Workspace {
                     })
                     .child(self.render_titlebar(full_title.clone(), cx))
             })
+            .when(!client_decorations && !self.menus.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .h(px(28.))
+                        .px_1()
+                        .bg(Theme::panel())
+                        .border_b_1()
+                        .border_color(Theme::border())
+                        .child(self.render_menu_bar(cx)),
+                )
+            })
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -1154,6 +1189,9 @@ impl Render for Workspace {
                 this.open_connections(window, cx)
             }))
             .on_action(cx.listener(Self::open_project))
+            .on_action(cx.listener(|this, _: &ShowCommandPalette, window, cx| {
+                this.toggle_palette(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
@@ -1264,10 +1302,157 @@ impl Render for Workspace {
             .children(self.connection_dialog.clone())
             .children(self.routine_form.clone())
             .children(self.diff.clone())
+            .children(self.palette.as_ref().map(|(p, _)| p.clone()))
     }
 }
 
 impl Workspace {
+    fn render_menu_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let names = self.menus.iter().enumerate().map(|(i, m)| {
+            let open = self.open_menu == Some(i);
+            div()
+                .id(("menu-name", i))
+                .relative()
+                .h_full()
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .when(open, |d| d.bg(Theme::border()))
+                .hover(|d| d.bg(Theme::border()))
+                .child(m.name)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_menu = if this.open_menu == Some(i) {
+                            None
+                        } else {
+                            Some(i)
+                        };
+                        cx.notify();
+                    }),
+                )
+                // with one menu open, moving across the bar opens the others
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if this.open_menu.is_some_and(|o| o != i) {
+                        this.open_menu = Some(i);
+                        cx.notify();
+                    }
+                }))
+                .when(open, |d| {
+                    d.child(div().absolute().top_full().left_0().child(
+                        deferred(anchored().child(self.render_menu(i, cx))).with_priority(1),
+                    ))
+                })
+        });
+        div().flex().h_full().items_center().children(names)
+    }
+
+    fn render_menu(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Platform::current();
+        let items = self.menus[ix]
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(row, e)| match e {
+                Entry::Separator => div()
+                    .my_1()
+                    .h(px(1.))
+                    .bg(Theme::border())
+                    .into_any_element(),
+                Entry::Command(label, action) => {
+                    let action = *action;
+                    div()
+                        .id(("menu-item", row))
+                        .flex()
+                        .gap_6()
+                        .px_3()
+                        .py_0p5()
+                        .rounded_sm()
+                        .hover(|d| d.bg(Theme::accent_dim()))
+                        .child(div().flex_1().child(*label))
+                        .children(
+                            commands::shortcut(&*action(), p)
+                                .map(|s| div().text_color(Theme::muted()).child(s)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_menu(cx);
+                                window.dispatch_action(action(), cx);
+                            }),
+                        )
+                        .into_any_element()
+                }
+            });
+        div()
+            .occlude()
+            .min_w(px(220.))
+            .p_1()
+            .bg(Theme::panel())
+            .border_1()
+            .border_color(Theme::border())
+            .rounded_md()
+            .shadow_lg()
+            .text_size(px(12.))
+            .text_color(Theme::text())
+            .on_mouse_down_out(cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                // a click on the bar itself is the menu names' to handle
+                if e.position.y > px(32.) {
+                    this.close_menu(cx);
+                }
+            }))
+            .children(items)
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.open_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, back)) = self.palette.take() {
+            if let Some(back) = back {
+                window.focus(&back);
+            }
+            cx.notify();
+            return;
+        }
+        self.close_menu(cx);
+        let back = window.focused(cx);
+        let palette = cx.new(CommandPalette::new);
+        self.subscriptions.push(cx.subscribe_in(
+            &palette,
+            window,
+            |this, _, e: &PaletteEvent, window, cx| {
+                let Some((_, back)) = this.palette.take() else {
+                    return;
+                };
+                let back = back.unwrap_or_else(|| this.focus_handle.clone());
+                window.focus(&back);
+                // after this handler, since the workspace may handle it
+                if let PaletteEvent::Run(action) = e {
+                    let action = action.boxed_clone();
+                    window.defer(cx, move |window, cx| {
+                        back.dispatch_action(&*action, window, cx)
+                    });
+                }
+                cx.notify();
+            },
+        ));
+        window.focus(&palette.focus_handle(cx));
+        self.palette = Some((palette, back));
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn palette(&self) -> Option<Entity<CommandPalette>> {
+        self.palette.as_ref().map(|(p, _)| p.clone())
+    }
+
     fn render_sidebar_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = |id: &'static str, text: &'static str, which: Sidebar| {
             let active = self.sidebar == which;

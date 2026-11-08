@@ -1,11 +1,13 @@
 mod browser;
 mod catalog;
+mod commands;
 mod connection_dialog;
 mod connections;
 mod editor_view;
 mod find;
 mod grid;
 mod keymap;
+mod palette;
 mod prompt;
 mod query;
 
@@ -20,96 +22,11 @@ mod workspace;
 use std::path::PathBuf;
 
 use gpui::{
-    px, size, App, AppContext, Application, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    px, size, App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds,
     WindowDecorations, WindowOptions,
 };
 
-use editor_view as ed;
 use workspace::Workspace;
-
-fn menus() -> Vec<Menu> {
-    vec![
-        Menu {
-            name: "sql-honcho".into(),
-            items: vec![MenuItem::action("Quit sql-honcho", workspace::Quit)],
-        },
-        Menu {
-            name: "File".into(),
-            items: vec![
-                MenuItem::action("New File", workspace::NewFile),
-                MenuItem::action("Open…", workspace::OpenFile),
-                MenuItem::separator(),
-                MenuItem::action("Save", workspace::Save),
-                MenuItem::action("Save As…", workspace::SaveAs),
-                MenuItem::separator(),
-                MenuItem::action("Close Tab", workspace::CloseTab),
-            ],
-        },
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::action("Undo", ed::Undo),
-                MenuItem::action("Redo", ed::Redo),
-                MenuItem::separator(),
-                MenuItem::action("Cut", ed::Cut),
-                MenuItem::action("Copy", ed::Copy),
-                MenuItem::action("Paste", ed::Paste),
-                MenuItem::separator(),
-                MenuItem::action("Find", find::Find),
-                MenuItem::action("Replace", find::FindReplace),
-                MenuItem::action("Find Next", find::FindNext),
-                MenuItem::action("Find Previous", find::FindPrev),
-                MenuItem::separator(),
-                MenuItem::action("Toggle Line Comment", ed::ToggleComment),
-                MenuItem::action("Indent", ed::Indent),
-                MenuItem::action("Outdent", ed::Outdent),
-            ],
-        },
-        Menu {
-            name: "Selection".into(),
-            items: vec![
-                MenuItem::action("Select All", ed::SelectAll),
-                MenuItem::action("Select Line", ed::SelectLine),
-                MenuItem::separator(),
-                MenuItem::action("Copy Line Up", ed::CopyLinesUp),
-                MenuItem::action("Copy Line Down", ed::CopyLinesDown),
-                MenuItem::action("Move Line Up", ed::MoveLinesUp),
-                MenuItem::action("Move Line Down", ed::MoveLinesDown),
-                MenuItem::action("Delete Line", ed::DeleteLines),
-                MenuItem::separator(),
-                MenuItem::action("Add Cursor Above", ed::AddCursorAbove),
-                MenuItem::action("Add Cursor Below", ed::AddCursorBelow),
-                MenuItem::action("Add Cursors to Line Ends", ed::SplitSelectionIntoLines),
-                MenuItem::action("Add Next Occurrence", ed::SelectNextOccurrence),
-                MenuItem::action("Select All Occurrences", ed::SelectAllOccurrences),
-            ],
-        },
-        Menu {
-            name: "Connection".into(),
-            items: vec![
-                MenuItem::action("Connections…", workspace::ManageConnections),
-                MenuItem::separator(),
-                MenuItem::action("Run Statement or Selection", query::RunStatement),
-                MenuItem::action("Run All", query::RunAll),
-                MenuItem::action("Cancel Query", query::CancelQuery),
-                MenuItem::action("Toggle Results", query::TogglePanel),
-                MenuItem::action("Refresh Completions", query::RefreshSchema),
-            ],
-        },
-        Menu {
-            name: "View".into(),
-            items: vec![
-                MenuItem::action("Zoom In", workspace::ZoomIn),
-                MenuItem::action("Zoom Out", workspace::ZoomOut),
-                MenuItem::action("Reset Zoom", workspace::ZoomReset),
-                MenuItem::separator(),
-                MenuItem::action("Toggle Object Browser", browser::ToggleBrowser),
-                MenuItem::action("Next Tab", workspace::NextTab),
-                MenuItem::action("Previous Tab", workspace::PrevTab),
-            ],
-        },
-    ]
-}
 
 /// A bare binary has no bundle to take an icon from, so the Dock would show
 /// the generic one.
@@ -140,7 +57,7 @@ fn main() {
         if keymap::Platform::current() == keymap::Platform::Linux {
             cx.set_prompt_builder(prompt::build);
         }
-        cx.set_menus(menus());
+        cx.set_menus(commands::native_menus());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
