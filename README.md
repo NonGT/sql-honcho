@@ -39,6 +39,9 @@ work but their passwords can't be saved.
 File dialogs on Linux go through xdg-desktop-portal, so a desktop without
 one (plain XFCE, for example) needs `xdg-desktop-portal-gtk` installed.
 
+Windows and Linux get the same menus as macOS, drawn in the window (in the
+title bar on Linux).
+
 On Windows you need the Visual Studio C++ build tools and a Windows SDK. On
 ARM64 Windows you also need clang on PATH (`winget install LLVM.LLVM`) for
 the `ring` dependency. If a release build fails running `fxc.exe`, point
@@ -50,6 +53,7 @@ the `ring` dependency. If a release build fails running `fxc.exe`, point
 Bindings follow VS Code's defaults on each platform; the full tables are in
 `crates/honcho-app/src/keymap.rs`. The main ones, macOS first:
 
+    Cmd+Shift+P / Ctrl+Shift+P   command palette (also F1): every menu command by name
     Cmd+D / Ctrl+D               select word, then add next occurrence
     Cmd+Shift+L / Ctrl+Shift+L   select all occurrences
     Alt+Cmd+Up/Down              add cursor above/below

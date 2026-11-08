@@ -12,6 +12,7 @@ use crate::connection_dialog::*;
 use crate::editor_view::*;
 use crate::find::*;
 use crate::grid::*;
+use crate::palette::*;
 use crate::query::*;
 use crate::routine_form::*;
 use crate::workspace::*;
@@ -116,6 +117,9 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
             ("up", PrevDatabase, Some("ConnectionList")),
             ("down", NextDatabase, Some("ConnectionList")),
             ("enter", PickDatabase, Some("ConnectionList")),
+            ("up", PaletteUp, Some("PaletteQuery")),
+            ("down", PaletteDown, Some("PaletteQuery")),
+            ("enter", PaletteRun, Some("PaletteQuery")),
             ("enter", Submit, CONNECTION_FIELD),
             // after clicking a swatch or checkbox focus sits on the dialog
             ("enter", Submit, Some("ConnectionDialog")),
@@ -313,6 +317,8 @@ fn workspace(p: Platform) -> Vec<Binding> {
             ("P-j", TogglePanel, None),
             ("P-i", ShowCompletions, EDITOR),
             ("P-b", ToggleBrowser, None),
+            ("P-shift-p", ShowCommandPalette, None),
+            ("f1", ShowCommandPalette, None),
         ]
     );
     match p {

@@ -1804,3 +1804,55 @@ fn save_to_project_works_from_the_connection_and_schema_rows() {
         Some("main")
     );
 }
+
+fn palette(
+    ws: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<Entity<crate::palette::CommandPalette>> {
+    ws.read_with(cx, |ws, _| ws.palette())
+}
+
+#[gpui::test]
+fn the_palette_runs_commands_and_remembers_them(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-p");
+    let p = palette(&ws, cx).expect("palette opens");
+    let all = p.read_with(cx, |p, _| p.shown_labels());
+    assert!(
+        all.iter().any(|l| l == "File: Open Project Folder"),
+        "{all:?}"
+    );
+
+    cx.simulate_input("newfil");
+    let shown = p.read_with(cx, |p, _| p.shown_labels());
+    assert_eq!(shown.first().map(String::as_str), Some("File: New File"));
+    press(cx, "enter");
+    assert!(palette(&ws, cx).is_none(), "running a command closes it");
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), 2);
+
+    // focus went back to the editor, so typing lands there
+    cx.simulate_input("select 1");
+    assert_eq!(text(&ws, cx), "select 1");
+
+    // the last command leads next time, and escape just closes
+    press(cx, "P-shift-p");
+    let p = palette(&ws, cx).unwrap();
+    let shown = p.read_with(cx, |p, _| p.shown_labels());
+    assert_eq!(shown.first().map(String::as_str), Some("File: New File"));
+    press(cx, "down");
+    press(cx, "escape");
+    assert!(palette(&ws, cx).is_none());
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), 2);
+    cx.simulate_input("!");
+    assert_eq!(text(&ws, cx), "select 1!");
+}
+
+#[gpui::test]
+fn the_palette_runs_editor_commands_on_the_editor(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    cx.simulate_input("select 1");
+    press(cx, "f1");
+    cx.simulate_input("toggle line comment");
+    press(cx, "enter");
+    assert_eq!(text(&ws, cx), "-- select 1");
+}
