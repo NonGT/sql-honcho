@@ -227,9 +227,21 @@ impl Workspace {
                     });
                     window.focus(&editor.focus_handle(cx));
                 }
-                BrowserEvent::SaveProject { saved, database } => {
-                    this.save_project(saved.name.clone(), database.clone(), window, cx)
-                }
+                BrowserEvent::SaveProject { saved, database } => match database {
+                    Some(database) => {
+                        this.save_project(saved.name.clone(), database.clone(), window, cx)
+                    }
+                    None => drop(window.prompt(
+                        PromptLevel::Info,
+                        "Which database?",
+                        Some(
+                            "A project holds one database. Expand this connection, \
+                             right-click the database and pick Save to project folder…",
+                        ),
+                        &["OK"],
+                        cx,
+                    )),
+                },
                 BrowserEvent::UseHere { saved, database } => {
                     // a tab that's busy or recreates an object keeps its server
                     let q = this.active_query_tab().read(cx);

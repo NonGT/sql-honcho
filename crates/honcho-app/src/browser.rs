@@ -64,10 +64,11 @@ pub enum BrowserEvent {
     },
     /// Put text into the current editor.
     Insert(String),
-    /// Write this database's routines and views into a folder.
+    /// Write this database's routines and views into a folder; `None`
+    /// when it was asked of a connection with no database to go by.
     SaveProject {
         saved: Box<SavedConnection>,
-        database: String,
+        database: Option<String>,
     },
     /// Connect the current tab here.
     UseHere {
@@ -77,7 +78,7 @@ pub enum BrowserEvent {
 }
 
 #[derive(Clone, Debug)]
-enum Item {
+pub(crate) enum Item {
     Connection(Box<SavedConnection>),
     Database(String),
     /// A database and one of its schemas.
@@ -915,11 +916,12 @@ impl ObjectBrowser {
         };
         match (action, &item) {
             (MenuAction::Refresh, _) => self.refresh(path, item.clone(), cx),
-            (MenuAction::SaveProject, Item::Database(d)) => {
+            (MenuAction::SaveProject, _) => {
                 if let Some(saved) = self.conn_of(&path, cx) {
+                    let database = project_database(&item, &saved);
                     cx.emit(BrowserEvent::SaveProject {
                         saved: Box::new(saved),
-                        database: d.clone(),
+                        database,
                     });
                 }
             }
@@ -1099,7 +1101,7 @@ impl ObjectBrowser {
     }
 
     /// A right-click action on the row with this label: "definition",
-    /// "run" or "use".
+    /// "run", "use" or "project".
     #[cfg(test)]
     pub fn act(&mut self, label: &str, what: &str, cx: &mut Context<Self>) {
         let row = self
@@ -1108,13 +1110,18 @@ impl ObjectBrowser {
             .find(|r| r.item.label() == label)
             .cloned()
             .unwrap_or_else(|| panic!("no row {label}"));
-        if what == "use" {
+        if what == "use" || what == "project" {
             self.menu = Some(Menu {
                 path: row.path,
                 item: row.item,
                 position: Point::default(),
             });
-            self.menu_action(MenuAction::UseHere, cx);
+            let action = if what == "use" {
+                MenuAction::UseHere
+            } else {
+                MenuAction::SaveProject
+            };
+            self.menu_action(action, cx);
             return;
         }
         let Item::Object(o) = &row.item else {
@@ -1318,12 +1325,22 @@ enum MenuAction {
     SaveProject,
 }
 
+/// The database a project made from this row would hold.
+pub(crate) fn project_database(item: &Item, saved: &SavedConnection) -> Option<String> {
+    match item {
+        Item::Database(d) | Item::Schema(d, _) => Some(d.clone()),
+        _ if saved.driver == DriverKind::Sqlite => Some("main".into()),
+        _ => saved.database.clone(),
+    }
+}
+
 fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
     use MenuAction::*;
     match item {
         Item::Connection(_) => vec![
             ("New query tab", NewQuery),
             ("Use in this tab", UseHere),
+            ("Save to project folder…", SaveProject),
             ("Refresh", Refresh),
         ],
         Item::Database(_) => vec![
@@ -1345,6 +1362,10 @@ fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
             ("Open definition", Definition),
             ("Run…", Run),
             ("Copy name", CopyName),
+        ],
+        Item::Schema(..) => vec![
+            ("Save to project folder…", SaveProject),
+            ("Refresh", Refresh),
         ],
         Item::Object(_) => vec![("Open definition", Definition), ("Copy name", CopyName)],
         Item::Column(_) | Item::Index(_) => vec![("Copy name", CopyName)],
