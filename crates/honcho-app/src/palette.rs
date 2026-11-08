@@ -218,7 +218,13 @@ impl Render for CommandPalette {
                     .items_center()
                     .border_b_1()
                     .border_color(Theme::border())
-                    .child(div().flex_1().child(self.input.clone())),
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(18.))
+                            .overflow_hidden()
+                            .child(self.input.clone()),
+                    ),
             )
             .child(
                 div()
