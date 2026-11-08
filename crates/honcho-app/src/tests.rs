@@ -1777,3 +1777,30 @@ fn project_names_a_missing_connection(cx: &mut TestAppContext) {
         "{failure:?}"
     );
 }
+
+#[test]
+fn save_to_project_works_from_the_connection_and_schema_rows() {
+    use crate::browser::{project_database, Item};
+    let mut mysql = honcho_config::SavedConnection::new("prod", DriverKind::MySql);
+    let at = |item: Item, saved: &honcho_config::SavedConnection| project_database(&item, saved);
+    assert_eq!(at(Item::Connection(Box::new(mysql.clone())), &mysql), None);
+    mysql.database = Some("cems".into());
+    assert_eq!(
+        at(Item::Connection(Box::new(mysql.clone())), &mysql).as_deref(),
+        Some("cems")
+    );
+    assert_eq!(
+        at(Item::Database("app".into()), &mysql).as_deref(),
+        Some("app")
+    );
+    let pg = honcho_config::SavedConnection::new("pg", DriverKind::Postgres);
+    assert_eq!(
+        at(Item::Schema("shop".into(), "public".into()), &pg).as_deref(),
+        Some("shop")
+    );
+    let lite = honcho_config::SavedConnection::new("shop.db", DriverKind::Sqlite);
+    assert_eq!(
+        at(Item::Connection(Box::new(lite.clone())), &lite).as_deref(),
+        Some("main")
+    );
+}
