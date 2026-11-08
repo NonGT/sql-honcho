@@ -354,7 +354,7 @@ mod tests {
     fn fuzzy_prefers_word_starts_and_runs() {
         assert!(fuzzy("xyz", "File: Save").is_none());
         let (_, r) = fuzzy("sav", "File: Save As").unwrap();
-        assert_eq!(r, [6..9]);
+        assert_eq!(r, vec![6..9]);
         let start = fuzzy("op", "File: Open…").unwrap().0;
         let middle = fuzzy("op", "Edit: Copy").unwrap().0;
         assert!(start > middle, "{start} {middle}");
