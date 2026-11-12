@@ -1235,8 +1235,8 @@ impl QueryTab {
             .filter(|c| !c.session.capabilities().explain)
             .map(|c| {
                 SharedString::from(format!(
-                    "Explain isn't available for {:?} yet",
-                    c.saved.driver
+                    "Explain isn't available for {} yet",
+                    crate::connections::driver_name(c.saved.driver)
                 ))
             });
         let tip = move |d: gpui::Stateful<gpui::Div>| match why.clone() {
