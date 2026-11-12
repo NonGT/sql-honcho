@@ -405,6 +405,74 @@ pub async fn switches_database(f: Fixture) {
     assert!(s.use_database("no_such_database").await.is_err());
 }
 
+fn plan_of(events: &[QueryEvent]) -> &crate::Plan {
+    events
+        .iter()
+        .find_map(|e| match e {
+            QueryEvent::Plan(p) => Some(&**p),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no plan: {events:?}"))
+}
+
+fn objects(node: &crate::PlanNode, out: &mut Vec<String>) {
+    out.extend(node.object.iter().map(|o| o.to_lowercase()));
+    for c in &node.children {
+        objects(c, out);
+    }
+}
+
+pub async fn explains_queries(f: Fixture) {
+    check!(f);
+    let rt = DbRuntime::new().unwrap();
+    let s = connect(&f, &rt).await;
+    let caps = s.capabilities();
+    assert!(caps.explain);
+    let explain = |sql: &str, analyze: bool| {
+        collect(s.run(sql.to_string(), crate::RunMode::Explain { analyze }))
+    };
+
+    // no aliases: SQLite names a step by its alias when there is one
+    let events = explain(
+        "SELECT users.email, orders.amount FROM users JOIN orders ON orders.user_id = users.id",
+        false,
+    )
+    .await;
+    assert!(finished(&events).is_ok(), "{events:?}");
+    let plan = plan_of(&events);
+    assert!(!plan.analyzed);
+    assert!(!plan.raw.is_empty());
+    let mut names = Vec::new();
+    objects(&plan.root, &mut names);
+    for table in ["users", "orders"] {
+        assert!(
+            names.iter().any(|n| n.contains(table)),
+            "{table} in {names:?}"
+        );
+    }
+
+    let events = explain(&f.sql.syntax_error, false).await;
+    assert!(finished(&events).is_err(), "{events:?}");
+    assert_usable(&s, &f).await;
+
+    let total = "SELECT SUM(amount) FROM orders";
+    let before = result_sets(&collect(s.execute(total)).await);
+    if caps.explain_analyze {
+        let events = explain("SELECT COUNT(*) FROM orders", true).await;
+        assert!(plan_of(&events).analyzed, "{events:?}");
+    }
+    // MySQL can't measure a one-table UPDATE and gives the estimate, so
+    // this only checks that it ran and was undone
+    let events = explain("UPDATE orders SET amount = amount + 1", true).await;
+    if caps.explain_analyze {
+        assert!(finished(&events).is_ok(), "{events:?}");
+    } else {
+        assert!(finished(&events).is_err(), "{events:?}");
+    }
+    // either way, nothing changed
+    assert_eq!(result_sets(&collect(s.execute(total)).await), before);
+}
+
 /// Expands to one `#[tokio::test]` per check, inside `mod conformance`.
 /// The argument is an expression producing a [`Fixture`]; it is evaluated
 /// once per test. Needs `tokio` with the `macros` feature.
@@ -434,6 +502,7 @@ macro_rules! conformance_tests {
                 searches_objects,
                 describes_routines,
                 switches_database,
+                explains_queries,
             );
         }
     };

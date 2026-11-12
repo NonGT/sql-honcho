@@ -271,4 +271,6 @@ pub struct Capabilities {
     pub cross_database: bool,
     /// [`Connection::explain`](crate::Connection::explain) works.
     pub explain: bool,
+    /// Explain can also run the statement and measure it.
+    pub explain_analyze: bool,
 }

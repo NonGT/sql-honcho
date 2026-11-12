@@ -401,6 +401,7 @@ impl Connection for PostgresConnection {
             schemas: true,
             cross_database: false,
             explain: true,
+            explain_analyze: true,
         }
     }
 

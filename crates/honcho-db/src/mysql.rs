@@ -71,12 +71,17 @@ impl Driver for MySqlDriver {
                 .await
                 .map_err(connect_error)?;
         }
-        Ok(Box::new(MySqlConnection {
+        let mut conn = MySqlConnection {
             conn: Some(conn),
             opts,
             cancelled: Mutex::new(Arc::default()),
             server: None,
-        }))
+        };
+        // up front, so capabilities() knows whether Analyze works
+        conn.server()
+            .await
+            .map_err(|e| DbError::Connect(e.to_string()))?;
+        Ok(Box::new(conn))
     }
 }
 
@@ -153,6 +158,7 @@ impl Connection for MySqlConnection {
             schemas: false,
             cross_database: true,
             explain: true,
+            explain_analyze: self.server != Some(Server::MySql { tree: false }),
         }
     }
 

@@ -673,6 +673,14 @@ impl QueryTab {
             cx.notify();
             return;
         }
+        if let RunMode::Explain { analyze: true } = mode {
+            if let Some(why) = self.no_analyze() {
+                self.output.get_or_insert_with(Output::default);
+                self.say(MessageLevel::Warning, why, None);
+                cx.notify();
+                return;
+            }
+        }
         let target = match target(&self.editor.read(cx).editor, conn.saved.driver, whole) {
             Ok(t) => Target { mode, ..t },
             Err(e) => {
@@ -1204,6 +1212,20 @@ impl QueryTab {
             .collect()
     }
 
+    /// Why Explain Analyze can't run on this connection, if it can't.
+    fn no_analyze(&self) -> Option<&'static str> {
+        let conn = self.connection.as_ref()?;
+        let caps = conn.session.capabilities();
+        if !caps.explain || caps.explain_analyze {
+            return None;
+        }
+        Some(match conn.saved.driver {
+            DriverKind::Sqlite => "SQLite has no Explain Analyze. Explain shows the plan.",
+            DriverKind::MySql => "Explain Analyze needs MySQL 8.3 or later.",
+            _ => "Explain Analyze isn't available on this connection.",
+        })
+    }
+
     fn can_explain(&self) -> bool {
         self.connection
             .as_ref()
@@ -1290,6 +1312,9 @@ impl QueryTab {
                     "Explain Analyze…",
                     Box::new(ExplainAnalyze),
                 )
+                .when(self.no_analyze().is_some(), |d| {
+                    d.text_color(Theme::muted())
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {

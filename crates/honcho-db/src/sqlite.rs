@@ -5,6 +5,7 @@
 //! back through a channel while a query runs. Attached databases show up
 //! as databases, but the connection always stays on `main`.
 
+mod explain;
 mod split;
 
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::script::Statement;
 use crate::types::*;
-use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink, Value};
+use crate::{Canceller, Connection, DbError, Driver, Plan, Result, ResultSink, Value};
 
 pub use split::split;
 
@@ -186,8 +187,38 @@ impl Connection for SqliteConnection {
             schemas: false,
             // attached databases are reachable as db.table
             cross_database: true,
-            explain: false,
+            explain: true,
+            explain_analyze: false,
         }
+    }
+
+    async fn explain(&mut self, sql: &str, analyze: bool) -> Result<Plan> {
+        if analyze {
+            return Err(DbError::Other(
+                "SQLite has no Explain Analyze; Explain shows the plan.".into(),
+            ));
+        }
+        let statement = split(sql)
+            .into_iter()
+            .find(|s| !s.text.trim().is_empty())
+            .ok_or_else(|| DbError::Other("Nothing to explain.".into()))?;
+        let line = statement.line;
+        let text = format!(
+            "EXPLAIN QUERY PLAN {}",
+            statement.text.trim_end().trim_end_matches(';')
+        );
+        let rows = self
+            .with(move |conn| {
+                let mut stmt = conn
+                    .prepare(&text)
+                    .map_err(|e| statement_error(e, &text, line, &AtomicBool::new(false)))?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(3)?)))?
+                    .collect::<rusqlite::Result<Vec<explain::Row>>>()?;
+                Ok(rows)
+            })
+            .await?;
+        explain::parse(&rows)
     }
 
     async fn execute(&mut self, sql: &str, sink: &mut ResultSink) -> Result<()> {
