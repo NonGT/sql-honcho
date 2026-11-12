@@ -1856,3 +1856,40 @@ fn the_palette_runs_editor_commands_on_the_editor(cx: &mut TestAppContext) {
     press(cx, "enter");
     assert_eq!(text(&ws, cx), "-- select 1");
 }
+
+fn shown_plan(
+    ws: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<Entity<crate::plan_view::PlanView>> {
+    let q = query_tab(ws, cx);
+    q.read_with(cx, |q, _| {
+        let o = q.output.as_ref()?;
+        (o.shown == o.sets.len()).then(|| o.plan.clone())?
+    })
+}
+
+#[gpui::test]
+fn explain_shows_the_plan_and_asks_before_analyzing_a_write(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 3");
+    run(&ws, cx, "P-e");
+    let plan = shown_plan(&ws, cx).expect("the plan tab shows");
+    let ops = |cx: &mut VisualTestContext| plan.read_with(cx, |p, _| p.shown_operations());
+    assert_eq!(ops(cx), ["Hash Join", "  Seq Scan", "  Index Scan"]);
+    assert!(!plan.read_with(cx, |p, _| p.plan.analyzed));
+    plan.update(cx, |p, cx| p.toggle(vec![], cx));
+    assert_eq!(ops(cx), ["Hash Join"]);
+
+    press(cx, "P-a");
+    cx.simulate_input("update 3");
+    press(cx, "P-shift-e");
+    wait_until(cx, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Run");
+    wait_until(cx, |cx| {
+        shown_plan(&ws, cx).is_some_and(|p| p.read_with(cx, |p, _| p.plan.analyzed))
+    });
+    // a plain run afterwards has no plan tab
+    run(&ws, cx, "P-enter");
+    assert!(shown_plan(&ws, cx).is_none());
+}

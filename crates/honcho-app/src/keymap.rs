@@ -207,6 +207,8 @@ fn editor(p: Platform) -> Vec<Binding> {
             ("P-[", Outdent, EDITOR),
             ("P-enter", RunStatement, EDITOR),
             ("P-shift-enter", RunAll, EDITOR),
+            ("P-e", Explain, EDITOR),
+            ("P-shift-e", ExplainAnalyze, EDITOR),
             ("P-z", Undo, EDITOR),
             ("P-shift-z", Redo, EDITOR),
             ("P-a", SelectAll, EDITOR),
