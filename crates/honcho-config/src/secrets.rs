@@ -117,6 +117,98 @@ impl Secrets for Keyring {
     }
 }
 
+/// Keeps every secret in one entry of another store, so on macOS a single
+/// "Always Allow" covers all connections rather than one per connection.
+/// Secrets saved one entry each by older versions are read from there the
+/// first time and moved in.
+pub struct Bundled<S> {
+    inner: S,
+    /// Loaded on first use. A key mapped to None was deleted, so the old
+    /// entry under that key isn't read again.
+    map: Mutex<Option<Bundle>>,
+}
+
+type Bundle = HashMap<String, Option<String>>;
+
+/// The key of the one entry everything goes in.
+pub const BUNDLE_KEY: &str = "all-secrets";
+
+impl<S: Secrets> Bundled<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            map: Mutex::default(),
+        }
+    }
+
+    /// The loaded map, with the lock held; reads that arrive while the
+    /// first one waits on a prompt use its answer.
+    fn loaded(&self) -> Result<std::sync::MutexGuard<'_, Option<Bundle>>, SecretError> {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if map.is_none() {
+            let saved = match self.inner.get(BUNDLE_KEY)? {
+                Some(json) => serde_json::from_str(&json)
+                    .map_err(|e| SecretError(format!("saved secrets couldn't be read: {e}")))?,
+                None => HashMap::new(),
+            };
+            *map = Some(saved);
+        }
+        Ok(map)
+    }
+
+    fn write(&self, map: &Bundle) -> Result<(), SecretError> {
+        let json = serde_json::to_string(map).map_err(|e| SecretError(e.to_string()))?;
+        self.inner.set(BUNDLE_KEY, &json)
+    }
+}
+
+impl<S: Secrets> Secrets for Bundled<S> {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        let mut guard = self.loaded()?;
+        let map = guard.as_mut().expect("loaded");
+        if let Some(v) = map.get(key) {
+            return Ok(v.clone());
+        }
+        let Some(old) = self.inner.get(key)? else {
+            return Ok(None);
+        };
+        map.insert(key.to_string(), Some(old.clone()));
+        // if this fails it's read from the old entry again next time
+        let _ = self.write(map);
+        Ok(Some(old))
+    }
+
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        let mut guard = self.loaded()?;
+        let map = guard.as_mut().expect("loaded");
+        if map.get(key).is_some_and(|v| v.as_deref() == Some(value)) {
+            return Ok(());
+        }
+        let before = map.insert(key.to_string(), Some(value.to_string()));
+        self.write(map).inspect_err(|_| {
+            match before {
+                Some(v) => map.insert(key.to_string(), v),
+                None => map.remove(key),
+            };
+        })
+    }
+
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        let mut guard = self.loaded()?;
+        let map = guard.as_mut().expect("loaded");
+        if matches!(map.get(key), Some(None)) {
+            return Ok(());
+        }
+        let before = map.insert(key.to_string(), None);
+        self.write(map).inspect_err(|_| {
+            match before {
+                Some(v) => map.insert(key.to_string(), v),
+                None => map.remove(key),
+            };
+        })
+    }
+}
+
 fn store_error(e: keyring_core::Error) -> SecretError {
     let unavailable = matches!(
         e,
@@ -183,6 +275,56 @@ mod tests {
         fn delete(&self, key: &str) -> Result<(), SecretError> {
             self.inner.delete(key)
         }
+    }
+
+    #[test]
+    fn one_entry_holds_everything_and_old_ones_move_in() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let slow = Slow::default();
+        // saved one entry each by an older version
+        slow.inner.set("a/password", "pa").unwrap();
+        slow.inner.set("b/password", "pb").unwrap();
+        let store = std::sync::Arc::new(Bundled::new(slow));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let s = store.clone();
+                std::thread::spawn(move || s.get("a/password"))
+            })
+            .collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), Ok(Some("pa".into())));
+        }
+        // the bundle once, then a's old entry once
+        assert_eq!(store.inner.reads.load(SeqCst), 2);
+        assert_eq!(store.inner.writes.load(SeqCst), 1);
+
+        // a fresh launch reads only the bundle for a
+        let fresh = Bundled::new(Slow {
+            inner: MemorySecrets(Mutex::new(store.inner.inner.0.lock().unwrap().clone())),
+            ..Default::default()
+        });
+        assert_eq!(fresh.get("a/password"), Ok(Some("pa".into())));
+        assert_eq!(fresh.inner.reads.load(SeqCst), 1);
+        assert_eq!(fresh.get("b/password"), Ok(Some("pb".into())));
+        assert_eq!(fresh.inner.reads.load(SeqCst), 2, "b moves in too");
+        assert_eq!(fresh.get("b/password"), Ok(Some("pb".into())));
+        assert_eq!(fresh.get("c/password"), Ok(None));
+        assert_eq!(fresh.inner.reads.load(SeqCst), 3, "c isn't anywhere");
+
+        // unchanged isn't written; deleted doesn't come back from the old entry
+        let writes = fresh.inner.writes.load(SeqCst);
+        fresh.set("a/password", "pa").unwrap();
+        assert_eq!(fresh.inner.writes.load(SeqCst), writes);
+        fresh.delete("b/password").unwrap();
+        assert_eq!(fresh.get("b/password"), Ok(None));
+        fresh.set("c/password", "pc").unwrap();
+        let again = Bundled::new(Slow {
+            inner: MemorySecrets(Mutex::new(fresh.inner.inner.0.lock().unwrap().clone())),
+            ..Default::default()
+        });
+        assert_eq!(again.get("b/password"), Ok(None));
+        assert_eq!(again.get("c/password"), Ok(Some("pc".into())));
+        assert_eq!(again.inner.reads.load(SeqCst), 1, "all from the bundle");
     }
 
     #[test]

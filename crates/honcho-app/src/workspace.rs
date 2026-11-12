@@ -544,7 +544,14 @@ impl Workspace {
             window.focus(&dialog.focus_handle(cx));
             return;
         }
-        let dialog = cx.new(|cx| ConnectionDialog::new(window, cx));
+        // on what this tab is on, or would use, so Connect doesn't open
+        // another connection by accident
+        let q = self.active_query_tab().read(cx);
+        let current = match &q.connection {
+            Some(c) => Some(c.saved.id.clone()),
+            None => self.default_target(cx).map(|(s, _)| s.id),
+        };
+        let dialog = cx.new(|cx| ConnectionDialog::new(current.as_deref(), window, cx));
         self.subscriptions.push(cx.subscribe_in(
             &dialog,
             window,

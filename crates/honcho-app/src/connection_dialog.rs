@@ -156,7 +156,8 @@ enum PasswordChange {
 impl EventEmitter<DialogEvent> for ConnectionDialog {}
 
 impl ConnectionDialog {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Opens on `current` when it's a saved connection, else the first.
+    pub fn new(current: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let field = |placeholder: &str, cx: &mut Context<Self>| {
             cx.new(|cx| EditorView::single_line("ConnectionField", placeholder, cx))
         };
@@ -191,13 +192,12 @@ impl ConnectionDialog {
             section: Section::General,
             busy: false,
         };
-        match cx
-            .global::<Connections>()
-            .store
-            .connections()
-            .first()
-            .cloned()
-        {
+        let store = &cx.global::<Connections>().store;
+        let shown = current
+            .and_then(|id| store.get(id))
+            .or_else(|| store.connections().first())
+            .cloned();
+        match shown {
             Some(first) => this.load(first, false, window, cx),
             None => this.new_connection(window, cx),
         }
