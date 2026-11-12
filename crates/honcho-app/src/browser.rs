@@ -978,6 +978,10 @@ impl ObjectBrowser {
         Some((saved, database))
     }
 
+    pub fn is_open(&self, id: &str) -> bool {
+        self.session(id).is_some()
+    }
+
     /// Connections with a session open, in the order they're listed.
     pub fn open_connections(&self, cx: &App) -> Vec<SavedConnection> {
         cx.global::<Connections>()

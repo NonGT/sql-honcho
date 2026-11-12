@@ -92,6 +92,12 @@ impl ProjectPane {
         this
     }
 
+    /// The connection and database, once the project has connected.
+    pub fn open_target(&self, cx: &App) -> Option<(SavedConnection, String)> {
+        self.session.as_ref()?;
+        Some((self.saved(cx)?, self.project.manifest.database.clone()))
+    }
+
     /// The saved connection the manifest names.
     pub fn saved(&self, cx: &App) -> Option<SavedConnection> {
         let name = &self.project.manifest.connection;

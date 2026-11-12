@@ -617,6 +617,94 @@ fn new_tabs_open_where_the_current_tab_or_the_browser_is(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn run_without_a_connection_uses_the_open_one(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let _dir = open_unconnected(&ws, cx);
+    // the tab is "-- select 1;": it runs on what the browser has open
+    press(cx, "P-shift-enter");
+    wait_for_target(&ws, cx, "app");
+    assert!(dialog(&ws, cx).is_none(), "nothing to choose");
+    let q = query_tab(&ws, cx);
+    wait_until(cx, |cx| {
+        q.read_with(cx, |q, _| {
+            q.output_text().iter().any(|m| m.starts_with("Finished"))
+        })
+    });
+}
+
+/// Counts what reaches the store, as each read can be a Keychain prompt.
+#[derive(Default, Clone)]
+struct Counting {
+    inner: Arc<MemorySecrets>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl honcho_config::Secrets for Counting {
+    fn get(&self, key: &str) -> Result<Option<String>, honcho_config::SecretError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), honcho_config::SecretError> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> Result<(), honcho_config::SecretError> {
+        self.inner.delete(key)
+    }
+}
+
+#[gpui::test]
+fn a_saved_password_is_read_once_to_connect(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (ws, cx) = open(cx, vec![]);
+    let store = Counting::default();
+    cx.update(|_, cx| {
+        cx.global_mut::<Connections>().secrets =
+            Arc::new(honcho_config::Cached::new(store.clone()));
+    });
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    d.update(cx, |d, _| d.set_driver(DriverKind::Fake));
+    fill(cx, ["fake db", "", "", "dev", "secret", "app"]);
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    press(cx, "escape");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+
+    // a fresh launch: nothing read yet
+    let store = Counting {
+        inner: store.inner.clone(),
+        ..Default::default()
+    };
+    cx.update(|_, cx| {
+        cx.global_mut::<Connections>().secrets =
+            Arc::new(honcho_config::Cached::new(store.clone()));
+    });
+    press(cx, "P-shift-c");
+    cx.run_until_parked();
+    assert_eq!(store.reads.load(SeqCst), 0, "looking isn't reading");
+
+    // connect, which also opens it in the browser
+    press(cx, "enter");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    wait_until(cx, |cx| {
+        b.read_with(cx, |b, _| b.is_idle() && b.labels().len() > 1)
+    });
+    cx.simulate_input("select 1");
+    run(&ws, cx, "P-enter");
+    assert_eq!(store.reads.load(SeqCst), 1);
+    assert_eq!(
+        store.writes.load(SeqCst),
+        0,
+        "connect doesn't write it back"
+    );
+}
+
+#[gpui::test]
 fn the_connection_chip_offers_what_the_browser_has_open(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     let pick = |cx: &mut VisualTestContext| {

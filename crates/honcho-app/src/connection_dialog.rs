@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    PromptLevel, SharedString, Task, Window,
+    PromptLevel, SharedString, Window,
 };
 use honcho_config::{ColorTag, SavedConnection, SavedSsh};
 use honcho_db::tunnel::{self, HostKeyProblem, SshAuth, SshConfig};
@@ -137,13 +137,16 @@ pub struct ConnectionDialog {
     host_key: Option<(HostKeyProblem, SavedConnection, bool)>,
     section: Section,
     busy: bool,
-    /// The saved password is still being read from the keyring.
-    password_load: Option<Task<()>>,
+    /// The connection has saved secrets, which are kept unless new ones
+    /// are typed. They're only read from the keyring to connect: on macOS
+    /// every read can be a prompt, and just looking at a connection
+    /// shouldn't be one.
+    keeps_secrets: bool,
 }
 
 /// What a save does with the stored password.
 enum PasswordChange {
-    /// It hasn't loaded and the user typed nothing: leave it alone.
+    /// The user typed nothing over a saved one: leave it alone.
     Keep,
     Set(Option<String>),
 }
@@ -185,7 +188,7 @@ impl ConnectionDialog {
             host_key: None,
             section: Section::General,
             busy: false,
-            password_load: None,
+            keeps_secrets: false,
         };
         match cx
             .global::<Connections>()
@@ -267,53 +270,16 @@ impl ConnectionDialog {
             Self::set_field(field, &value, cx);
         }
         self.host_key = None;
-        self.password_load = (!is_new).then(|| self.load_password(saved.clone(), cx));
+        self.keeps_secrets = !is_new;
+        let hint = if is_new { "" } else { "saved, type to change" };
+        for f in [&self.fields.password, &self.fields.ssh_secret] {
+            f.update(cx, |f, cx| f.set_placeholder(hint, cx));
+        }
         self.draft = saved;
         self.is_new = is_new;
         self.driver_changed(cx);
         window.focus(&self.fields.name.focus_handle(cx));
         cx.notify();
-    }
-
-    // The keyring can sit on a system unlock prompt for as long as the user
-    // leaves it open, so it's never called on the UI thread.
-    fn load_password(&mut self, saved: SavedConnection, cx: &mut Context<Self>) -> Task<()> {
-        let secrets = cx.global::<Connections>().secrets.clone();
-        let id = saved.id.clone();
-        let read = cx.background_spawn(async move {
-            let password = saved.password(secrets.as_ref())?;
-            let ssh = match saved.ssh {
-                Some(_) => saved.ssh_secret(secrets.as_ref())?,
-                None => None,
-            };
-            Ok::<_, honcho_config::SecretError>((password, ssh))
-        });
-        cx.spawn(async move |this, cx| {
-            let result = read.await;
-            this.update(cx, |this, cx| {
-                if this.draft.id != id {
-                    return;
-                }
-                this.password_load = None;
-                match result {
-                    Ok((password, ssh)) => {
-                        for (field, value) in [
-                            (this.fields.password.clone(), password),
-                            (this.fields.ssh_secret.clone(), ssh),
-                        ] {
-                            if let Some(v) = value {
-                                if field.read(cx).text().is_empty() {
-                                    Self::set_field(&field, &v, cx);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => this.set_status(e.to_string(), true),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
     }
 
     fn driver_changed(&mut self, cx: &mut Context<Self>) {
@@ -428,7 +394,7 @@ impl ConnectionDialog {
 
     fn password_change(&self, cx: &App) -> PasswordChange {
         match self.password(cx) {
-            None if self.password_load.is_some() => PasswordChange::Keep,
+            None if self.keeps_secrets => PasswordChange::Keep,
             p => PasswordChange::Set(p),
         }
     }
@@ -439,7 +405,7 @@ impl ConnectionDialog {
 
     fn ssh_secret_change(&self, cx: &App) -> PasswordChange {
         match self.ssh_secret(cx) {
-            None if self.password_load.is_some() => PasswordChange::Keep,
+            None if self.keeps_secrets => PasswordChange::Keep,
             p => PasswordChange::Set(p),
         }
     }
@@ -649,11 +615,6 @@ impl ConnectionDialog {
         if self.busy {
             return;
         }
-        if matches!(self.password_change(cx), PasswordChange::Keep) {
-            self.set_status("Waiting for the system keyring…", false);
-            cx.notify();
-            return;
-        }
         if keep {
             self.save_then(cx, |this, saved, cx| this.connect(saved, true, cx));
         } else {
@@ -679,9 +640,24 @@ impl ConnectionDialog {
             cx.notify();
             return;
         };
-        let config = self.connect_config(&saved, cx);
-        let runtime = cx.global::<Connections>().runtime.clone();
-        let connecting = runtime.connect(driver, config, SessionOptions::default());
+        let mut config = self.connect_config(&saved, cx);
+        let state = cx.global::<Connections>();
+        let (runtime, secrets) = (state.runtime.clone(), state.secrets.clone());
+        let keeps = self.keeps_secrets;
+        let owner = saved.clone();
+        // off the UI thread, since the keyring can sit on a prompt
+        let connecting = cx.background_spawn(async move {
+            let read = |e: honcho_config::SecretError| DbError::Other(e.to_string());
+            if keeps && config.password.is_none() {
+                config.password = owner.password(secrets.as_ref()).map_err(read)?;
+            }
+            if let Some(ssh) = config.ssh.as_mut().filter(|s| keeps && s.secret.is_none()) {
+                ssh.secret = owner.ssh_secret(secrets.as_ref()).map_err(read)?;
+            }
+            runtime
+                .connect(driver, config, SessionOptions::default())
+                .await
+        });
         self.busy = true;
         self.set_status(if keep { "Connecting…" } else { "Testing…" }, false);
         cx.notify();
