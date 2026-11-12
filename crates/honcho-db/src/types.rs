@@ -160,6 +160,7 @@ pub enum QueryEvent {
     Rows(Vec<Row>),
     Done { rows_affected: Option<u64> },
     Message(Message),
+    Plan(Box<crate::Plan>),
     Finished(Result<QueryStats, DbError>),
 }
 

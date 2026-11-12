@@ -55,6 +55,11 @@ impl ResultSink {
         self.send(QueryEvent::Message(message)).await
     }
 
+    pub async fn plan(&mut self, plan: crate::Plan) -> Result<()> {
+        self.flush().await?;
+        self.send(QueryEvent::Plan(Box::new(plan))).await
+    }
+
     pub(crate) async fn finish(mut self, result: Result<QueryStats>) {
         let result = match self.flush().await {
             Ok(()) => result,

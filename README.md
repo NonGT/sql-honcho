@@ -69,6 +69,8 @@ Bindings follow VS Code's defaults on each platform; the full tables are in
     Ctrl+Space, Cmd+I / Ctrl+I   completion (it also opens while typing a name)
     Cmd+Enter / Ctrl+Enter       run the selection, or the statement at the cursor
     Cmd+Shift+Enter              run the whole tab (Ctrl+Shift+Enter)
+    Cmd+E / Ctrl+E               explain the statement at the cursor
+    Cmd+Shift+E / Ctrl+Shift+E   explain analyze: run it and show actual rows and time
     Cmd+. / Ctrl+.               cancel the running query
 
 The object browser on the left lists every saved connection down to
@@ -120,6 +122,11 @@ you're typing in.
 The statement Cmd+Enter would run is marked in the gutter whenever the tab
 is connected. On a connection tagged red, UPDATE or DELETE without WHERE asks
 first.
+
+Explain shows the plan as a tree, with each step's share of the cost (or of
+the time, when analyzed). Estimates that are off by 10x and full scans of
+big tables are flagged. Explain Analyze asks before running a statement that
+writes, and rolls its changes back. Postgres only so far.
 
 Copy with no selection copies the whole line. Pasting N lines into N cursors
 puts one line at each cursor.

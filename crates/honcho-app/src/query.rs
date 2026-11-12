@@ -10,7 +10,7 @@ use gpui::{
 use honcho_config::{ColorTag, SavedConnection};
 use honcho_core::{complete, Editor};
 use honcho_db::script;
-use honcho_db::{DbError, DriverKind, MessageLevel, ObjectRef, QueryEvent};
+use honcho_db::{DbError, DriverKind, MessageLevel, ObjectRef, QueryEvent, RunMode};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{self, Catalog, Catalogs};
@@ -18,6 +18,7 @@ use crate::connection_dialog::color_dot;
 use crate::connections::{self, ActiveConnection};
 use crate::editor_view::{self, CompletionMenu, EditorView};
 use crate::grid::{Format, ResultGrid};
+use crate::plan_view::PlanView;
 use crate::theme::{self, Theme};
 use honcho_db::routine;
 
@@ -27,6 +28,8 @@ actions!(
         RefreshSchema,
         RunStatement,
         RunAll,
+        Explain,
+        ExplainAnalyze,
         CancelQuery,
         TogglePanel,
         CloseDatabases,
@@ -49,6 +52,7 @@ pub struct Target {
     /// 0-based line of the buffer where `text` starts, to turn the server's
     /// line numbers into the editor's.
     pub first_line: u32,
+    pub mode: RunMode,
 }
 
 /// The selection if there is one, otherwise the statement at the cursor,
@@ -64,6 +68,7 @@ pub fn target(ed: &Editor, kind: DriverKind, whole: bool) -> Result<Target, &'st
             range: 0..ed.len_chars(),
             text,
             first_line: 0,
+            mode: RunMode::Execute,
         });
     }
     let sels = ed.selections();
@@ -80,6 +85,7 @@ pub fn target(ed: &Editor, kind: DriverKind, whole: bool) -> Result<Target, &'st
             text,
             range: sel.range(),
             first_line: ed.line_of(sel.start()) as u32,
+            mode: RunMode::Execute,
         });
     }
     let text = ed.text();
@@ -102,6 +108,7 @@ pub fn target(ed: &Editor, kind: DriverKind, whole: bool) -> Result<Target, &'st
         text: statement.text.to_string(),
         range: rope.byte_to_char(statement.start)..rope.byte_to_char(end),
         first_line: statement.line - 1,
+        mode: RunMode::Execute,
     })
 }
 
@@ -142,12 +149,21 @@ pub struct OutputMessage {
 #[derive(Default)]
 pub struct Output {
     pub sets: Vec<Entity<ResultGrid>>,
+    pub plan: Option<Entity<PlanView>>,
     pub messages: Vec<OutputMessage>,
-    /// Which sub-tab shows: a result set, or the messages after them.
+    /// Which sub-tab shows: a result set, then the plan, then the messages.
     pub shown: usize,
 }
 
 impl Output {
+    fn plan_ix(&self) -> Option<usize> {
+        self.plan.as_ref().map(|_| self.sets.len())
+    }
+
+    pub fn messages_ix(&self) -> usize {
+        self.sets.len() + usize::from(self.plan.is_some())
+    }
+
     fn message(&mut self, level: MessageLevel, text: impl Into<String>, line: Option<u32>) {
         self.messages.push(OutputMessage {
             level,
@@ -618,6 +634,20 @@ impl QueryTab {
     }
 
     fn run_action(&mut self, whole: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_action(whole, RunMode::Execute, window, cx);
+    }
+
+    fn explain_action(&mut self, analyze: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_action(false, RunMode::Explain { analyze }, window, cx);
+    }
+
+    fn start_action(
+        &mut self,
+        whole: bool,
+        mode: RunMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(conn) = self.connection.clone() else {
             cx.emit(TabEvent::NeedConnection);
             return;
@@ -626,7 +656,7 @@ impl QueryTab {
             return;
         }
         // running part of it could drop the object without creating it again
-        if let Some(o) = &self.origin {
+        if let (Some(o), RunMode::Execute) = (&self.origin, mode) {
             let name = routine::qualified(conn.saved.driver, &o.object);
             self.output.get_or_insert_with(Output::default);
             self.say(
@@ -638,14 +668,36 @@ impl QueryTab {
             return;
         }
         let target = match target(&self.editor.read(cx).editor, conn.saved.driver, whole) {
-            Ok(t) => t,
+            Ok(t) => Target { mode, ..t },
             Err(e) => {
                 self.output = Some(Output::default());
                 self.say(MessageLevel::Warning, e, None);
                 return;
             }
         };
-        let unfiltered = (conn.saved.color == Some(ColorTag::Red))
+        // a read-only session refuses an analyzed write itself; no need to ask
+        if let (RunMode::Explain { analyze: true }, false) = (mode, conn.saved.read_only) {
+            let red = conn.saved.color == Some(ColorTag::Red);
+            if let Some((title, detail, run)) = analyze_warning(&target.text, &conn.saved.name, red)
+            {
+                let answer = window.prompt(
+                    PromptLevel::Warning,
+                    &title,
+                    Some(&detail),
+                    // Cancel first so Enter doesn't confirm by reflex
+                    &["Cancel", run],
+                    cx,
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    if answer.await == Ok(1) {
+                        this.update(cx, |this, cx| this.run(target, cx)).ok();
+                    }
+                })
+                .detach();
+                return;
+            }
+        }
+        let unfiltered = (conn.saved.color == Some(ColorTag::Red) && mode == RunMode::Execute)
             .then(|| {
                 script::split(conn.saved.driver, &target.text)
                     .iter()
@@ -682,7 +734,7 @@ impl QueryTab {
     fn say(&mut self, level: MessageLevel, text: &str, line: Option<u32>) {
         let out = self.output.get_or_insert_with(Output::default);
         out.message(level, text, line);
-        out.shown = out.sets.len();
+        out.shown = out.messages_ix();
     }
 
     pub fn run(&mut self, target: Target, cx: &mut Context<Self>) {
@@ -739,10 +791,11 @@ impl QueryTab {
         let Some(conn) = &self.connection else {
             return;
         };
-        self.ddl_running = script::split(conn.saved.driver, &target.text)
-            .iter()
-            .any(|s| changes_schema(s.text));
-        let mut handle = conn.session.execute(target.text);
+        self.ddl_running = target.mode == RunMode::Execute
+            && script::split(conn.saved.driver, &target.text)
+                .iter()
+                .any(|s| changes_schema(s.text));
+        let mut handle = conn.session.run(target.text, target.mode);
         let cancel = handle.cancel_token();
         let first_line = target.first_line;
         self.output = Some(Output::default());
@@ -814,6 +867,9 @@ impl QueryTab {
                 };
                 out.message(m.level, text, None);
             }
+            QueryEvent::Plan(plan) => {
+                out.plan = Some(cx.new(|_| PlanView::new(*plan)));
+            }
             QueryEvent::Finished(Ok(stats)) => {
                 out.message(
                     MessageLevel::Info,
@@ -848,7 +904,7 @@ impl QueryTab {
                 };
                 let out = self.output.get_or_insert_with(Output::default);
                 out.message(MessageLevel::Error, text, line);
-                out.shown = out.sets.len();
+                out.shown = out.messages_ix();
                 if let DbError::ConnectionLost(reason) = &e {
                     self.lost = Some(reason.clone());
                     if self.auto_reconnect() {
@@ -1506,10 +1562,47 @@ impl QueryTab {
         }
     }
 
+    fn shown_plan(&self) -> Option<Entity<PlanView>> {
+        let out = self.output.as_ref()?;
+        (out.plan_ix() == Some(out.shown)).then(|| out.plan.clone())?
+    }
+
+    fn copy_plan(&mut self, cx: &mut Context<Self>) {
+        if let Some(plan) = self.shown_plan() {
+            let text = plan.read(cx).plan.raw.clone();
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
+    fn save_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(plan) = self.shown_plan() else {
+            return;
+        };
+        let plan = &plan.read(cx).plan;
+        let name = format!("plan.{}", plan.format.extension());
+        let text = plan.raw.clone();
+        self.save_as(name, move |_| Some(text), cx);
+    }
+
     fn export(&mut self, format: Format, cx: &mut Context<Self>) {
         let Some(grid) = self.shown_grid() else {
             return;
         };
+        let name = format!("result.{}", format.extension());
+        self.save_as(
+            name,
+            move |cx| grid.read_with(cx, |g, _| g.export_all(format)).ok(),
+            cx,
+        );
+    }
+
+    /// Asks where, then writes what `text` gives.
+    fn save_as(
+        &mut self,
+        name: String,
+        text: impl FnOnce(&mut gpui::AsyncApp) -> Option<String> + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let dir = directories::UserDirs::new()
             .and_then(|d| {
                 d.download_dir()
@@ -1517,13 +1610,12 @@ impl QueryTab {
                     .or(Some(d.home_dir().to_path_buf()))
             })
             .unwrap_or_default();
-        let name = format!("result.{}", format.extension());
         let path = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(path))) = path.await else {
                 return;
             };
-            let Ok(text) = grid.read_with(cx, |g, _| g.export_all(format)) else {
+            let Some(text) = text(cx) else {
                 return;
             };
             let shown = path.display().to_string();
@@ -1548,7 +1640,7 @@ impl QueryTab {
 
     fn render_output(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let out = self.output.as_ref()?;
-        let shown = out.shown.min(out.sets.len());
+        let shown = out.shown.min(out.messages_ix());
         let tab = |ix: usize, label: String, active: bool| {
             div()
                 .id(("output-tab", ix))
@@ -1595,10 +1687,13 @@ impl QueryTab {
                 )
             })
             .collect();
+        if let Some(ix) = out.plan_ix() {
+            tabs.push(tab(ix, "Plan".into(), shown == ix));
+        }
         tabs.push(tab(
-            out.sets.len(),
+            out.messages_ix(),
             "Messages".into(),
-            shown == out.sets.len(),
+            shown == out.messages_ix(),
         ));
 
         let small = |id: &'static str, label: &'static str| {
@@ -1612,6 +1707,7 @@ impl QueryTab {
                 .child(label)
         };
         let has_grid = shown < out.sets.len();
+        let has_plan = out.plan_ix() == Some(shown);
         let actions = div()
             .flex()
             .flex_none()
@@ -1640,15 +1736,26 @@ impl QueryTab {
                         }),
                     )
             })
+            .when(has_plan, |d| {
+                d.child(
+                    small("copy-plan", "Copy plan")
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_plan(cx))),
+                )
+                .child(
+                    small("save-plan", "Save plan")
+                        .on_click(cx.listener(|this, _, _, cx| this.save_plan(cx))),
+                )
+            })
             .child(
                 small("toggle-panel", if self.panel_collapsed { "▴" } else { "▾" })
                     .ml_2()
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
             );
 
-        let body = match out.sets.get(shown) {
-            Some(grid) => grid.clone().into_any_element(),
-            None => self.render_messages(out, cx).into_any_element(),
+        let body = match (out.sets.get(shown), &out.plan) {
+            (Some(grid), _) => grid.clone().into_any_element(),
+            (None, Some(plan)) if has_plan => plan.clone().into_any_element(),
+            _ => self.render_messages(out, cx).into_any_element(),
         };
         let height = if self.panel_collapsed {
             PANEL_BAR
@@ -1780,6 +1887,50 @@ impl QueryTab {
     }
 }
 
+/// What Explain Analyze would do that the user should agree to first: the
+/// title, the detail and the label of the button that runs it.
+fn analyze_warning(
+    sql: &str,
+    connection: &str,
+    red: bool,
+) -> Option<(String, String, &'static str)> {
+    let plain = "Explain without Analyze shows the plan without running anything.";
+    if script::write_reason(sql).is_none() {
+        return red.then(|| {
+            (
+                format!("Explain Analyze runs this query on {connection}."),
+                format!(
+                    "It takes as long and loads the server as much as running it does.\n\n{plain}"
+                ),
+                "Run",
+            )
+        });
+    }
+    let kind = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or("statement")
+        .to_ascii_uppercase();
+    let every_row = match script::unfiltered_write(sql) {
+        Some(_) => " It has no WHERE, so that is every row of the table.",
+        None => "",
+    };
+    Some((
+        format!("Explain Analyze runs this {kind} on {connection} for real."),
+        format!(
+            "Its changes are rolled back afterwards, but until then:\n\
+             • the rows it changes stay locked, and other sessions writing \
+             them wait.{every_row}\n\
+             • it takes as long and loads the server as much as running it does.\n\n\
+             Rolling back doesn't undo everything:\n\
+             • sequence values it uses aren't given back.\n\
+             • anything that reaches outside the database still happens.\n\n\
+             {plain}"
+        ),
+        "Run and Roll Back",
+    ))
+}
+
 const DEFINER_HINT: &str = "The DEFINER clause names another user, which takes extra \
                             privileges. Remove it to create the routine as yourself.";
 
@@ -1869,6 +2020,12 @@ impl Render for QueryTab {
             .on_action(
                 cx.listener(|this, _: &RunAll, window, cx| this.run_action(true, window, cx)),
             )
+            .on_action(
+                cx.listener(|this, _: &Explain, window, cx| this.explain_action(false, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ExplainAnalyze, window, cx| {
+                this.explain_action(true, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CancelQuery, _, cx| this.cancel(cx)))
             .child(self.render_toolbar(cx))
             .child(
@@ -1892,6 +2049,22 @@ mod tests {
         let mut ed = Editor::new(text);
         ed.set_cursor(cursor);
         ed
+    }
+
+    #[test]
+    fn analyze_asks_about_writes_and_about_reads_on_red_connections() {
+        let (title, detail, run) = analyze_warning("delete from t", "prod", false).unwrap();
+        assert_eq!(title, "Explain Analyze runs this DELETE on prod for real.");
+        assert!(detail.contains("every row"));
+        assert!(detail.contains("sequence"));
+        assert_eq!(run, "Run and Roll Back");
+        let (_, detail, _) =
+            analyze_warning("update t set a = 1 where id = 2", "prod", false).unwrap();
+        assert!(!detail.contains("every row"));
+        assert!(analyze_warning("select 1", "dev", false).is_none());
+        let (title, _, run) = analyze_warning("select 1", "prod", true).unwrap();
+        assert_eq!(title, "Explain Analyze runs this query on prod.");
+        assert_eq!(run, "Run");
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod mysql;
+pub mod plan;
 pub mod postgres;
 pub mod project;
 pub mod routine;
@@ -25,7 +26,8 @@ mod value;
 
 pub use driver::{Canceller, Connection, Driver};
 pub use error::DbError;
-pub use runtime::{DbRuntime, QueryHandle, Session, SessionOptions};
+pub use plan::{Plan, PlanFormat, PlanNode};
+pub use runtime::{DbRuntime, QueryHandle, RunMode, Session, SessionOptions};
 pub use sink::ResultSink;
 pub use types::*;
 pub use value::Value;

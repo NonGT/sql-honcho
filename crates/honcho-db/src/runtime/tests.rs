@@ -95,6 +95,7 @@ async fn multiple_result_sets_and_messages_keep_order() {
             QueryEvent::Rows(_) => "rows",
             QueryEvent::Done { .. } => "done",
             QueryEvent::Message(_) => "message",
+            QueryEvent::Plan(_) => "plan",
             QueryEvent::Finished(_) => "finished",
         })
         .collect();
@@ -486,4 +487,65 @@ async fn read_only_sessions_refuse_scripts_with_writes() {
     let events = collect(s.execute("select 2")).await;
     assert!(finished(&events).is_ok());
     assert_eq!(rows_of(&events), [0, 1]);
+}
+
+fn plan_of(events: &[QueryEvent]) -> Option<&crate::Plan> {
+    events.iter().find_map(|e| match e {
+        QueryEvent::Plan(p) => Some(&**p),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn explain_sends_a_plan_instead_of_rows() {
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt).await;
+    let events = collect(s.run("select 3", RunMode::Explain { analyze: true })).await;
+    assert!(finished(&events).is_ok(), "{events:?}");
+    assert!(rows_of(&events).is_empty());
+    let plan = plan_of(&events).unwrap();
+    assert!(plan.analyzed);
+    assert_eq!(plan.root.operation, "Hash Join");
+
+    let events = collect(s.run("select 1; select 2", RunMode::Explain { analyze: false })).await;
+    assert!(plan_of(&events).is_none());
+    assert_eq!(
+        finished(&events),
+        &Err(DbError::Other(
+            "Explain takes one statement at a time.".into()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn explain_can_be_cancelled() {
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt).await;
+    let handle = s.run("sleep 10000", RunMode::Explain { analyze: true });
+    handle.cancel();
+    let events = collect(handle).await;
+    assert_eq!(finished(&events), &Err(DbError::Cancelled));
+}
+
+#[tokio::test]
+async fn read_only_sessions_explain_writes_but_dont_analyze_them() {
+    let rt = DbRuntime::new().unwrap();
+    let config = ConnectConfig {
+        read_only: true,
+        ..config("dev")
+    };
+    let s = rt
+        .connect(
+            Arc::new(FakeDriver::default()),
+            config,
+            SessionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let events = collect(s.run("update 3", RunMode::Explain { analyze: false })).await;
+    assert!(plan_of(&events).is_some());
+    let events = collect(s.run("update 3", RunMode::Explain { analyze: true })).await;
+    assert!(matches!(finished(&events), Err(DbError::ReadOnly { .. })));
+    let events = collect(s.run("select 3", RunMode::Explain { analyze: true })).await;
+    assert!(plan_of(&events).is_some());
 }

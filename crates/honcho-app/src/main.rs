@@ -8,6 +8,7 @@ mod find;
 mod grid;
 mod keymap;
 mod palette;
+mod plan_view;
 mod prompt;
 mod query;
 

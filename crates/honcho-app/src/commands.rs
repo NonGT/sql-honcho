@@ -109,6 +109,8 @@ pub fn menus(p: Platform) -> Vec<MenuSpec> {
                 -,
                 ("Run Statement or Selection", query::RunStatement),
                 ("Run All", query::RunAll),
+                ("Explain", query::Explain),
+                ("Explain Analyze", query::ExplainAnalyze),
                 ("Cancel Query", query::CancelQuery),
                 ("Toggle Results", query::TogglePanel),
                 ("Refresh Completions", query::RefreshSchema),
