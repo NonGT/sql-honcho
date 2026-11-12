@@ -18,11 +18,26 @@ pub struct PlanView {
     pub plan: Plan,
     collapsed: HashSet<Path>,
     selected: Path,
+    /// Columns some step has a figure for; SQLite has none at all.
+    est_rows: bool,
+    measure: bool,
 }
 
 impl PlanView {
     pub fn new(plan: Plan) -> Self {
+        fn any(n: &PlanNode, f: &dyn Fn(&PlanNode) -> bool) -> bool {
+            f(n) || n.children.iter().any(|c| any(c, f))
+        }
+        let analyzed = plan.analyzed;
         Self {
+            est_rows: any(&plan.root, &|n| n.est_rows.is_some()),
+            measure: any(&plan.root, &|n| {
+                if analyzed {
+                    n.actual_ms.is_some()
+                } else {
+                    n.est_cost.is_some()
+                }
+            }),
             plan,
             collapsed: HashSet::new(),
             selected: Vec::new(),
@@ -143,12 +158,16 @@ impl PlanView {
             .when(!selected, |d| d.hover(|d| d.bg(Theme::current_line())))
             .child(operation)
             .child(object_cell().text_color(Theme::muted()).child(object))
-            .child(number(n.est_rows.map(count).unwrap_or_default(), None))
+            .when(self.est_rows, |d| {
+                d.child(number(n.est_rows.map(count).unwrap_or_default(), None))
+            })
             .when(analyzed, |d| {
                 d.child(number(actual, misestimated.then(Theme::warning)))
             })
-            .child(number(measure.unwrap_or_default(), None))
-            .child(bar(share))
+            .when(self.measure, |d| {
+                d.child(number(measure.unwrap_or_default(), None))
+                    .child(bar(share))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -296,10 +315,12 @@ impl Render for PlanView {
             .border_color(Theme::border())
             .child(div().flex_1().min_w(px(140.)).child("Operation"))
             .child(object_cell().child("Object"))
-            .child(header("Est. rows", 72.))
+            .when(self.est_rows, |d| d.child(header("Est. rows", 72.)))
             .when(analyzed, |d| d.child(header("Rows", 72.)))
-            .child(header(if analyzed { "Time" } else { "Cost" }, 72.))
-            .child(cell(BAR + 36.).child("Share"));
+            .when(self.measure, |d| {
+                d.child(header(if analyzed { "Time" } else { "Cost" }, 72.))
+                    .child(cell(BAR + 36.).child("Share"))
+            });
         let totals = (!self.plan.totals.is_empty()).then(|| {
             div()
                 .px_2()
