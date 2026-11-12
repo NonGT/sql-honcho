@@ -1245,7 +1245,8 @@ impl QueryTab {
     /// Explain next to Run; Explain Analyze runs the statement, so it sits
     /// in the menu under ▾ rather than a click away.
     fn render_explain(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let enabled = self.can_explain() && self.running.is_none();
+        // without a connection a click asks for one, like Run
+        let enabled = (self.connection.is_none() || self.can_explain()) && self.running.is_none();
         let part = |id: &'static str| {
             div()
                 .id(id)

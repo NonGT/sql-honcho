@@ -2003,8 +2003,6 @@ fn explain_shows_the_plan_and_asks_before_analyzing_a_write(cx: &mut TestAppCont
 #[gpui::test]
 fn the_explain_button_and_its_menu(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
-    connect_fake(&ws, cx, None);
-    cx.simulate_input("select 3");
     let click = |cx: &mut VisualTestContext, sel: &'static str| {
         let at = cx
             .debug_bounds(sel)
@@ -2013,6 +2011,14 @@ fn the_explain_button_and_its_menu(cx: &mut TestAppContext) {
         cx.simulate_click(at, Default::default());
         cx.run_until_parked();
     };
+    // with no connection it asks for one, as Run does
+    click(cx, "tab-explain");
+    assert!(dialog(&ws, cx).is_some(), "the connections dialog opens");
+    press(cx, "escape");
+    assert!(dialog(&ws, cx).is_none());
+
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 3");
     click(cx, "tab-explain");
     wait_until(cx, |cx| shown_plan(&ws, cx).is_some());
 
