@@ -778,6 +778,39 @@ fn a_new_window_reconnects_to_the_last_connection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_dialog_opens_on_the_tabs_connection(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    fill(cx, ["first", "db", "", "app", "", ""]);
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    press(cx, "escape");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+
+    // a second connection, which the tab connects to
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    d.update_in(cx, |d, window, cx| {
+        d.new_connection(window, cx);
+        d.set_driver(DriverKind::Fake);
+    });
+    fill(cx, ["fake db", "", "", "dev", "", "app"]);
+    press(cx, "enter");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+    wait_for_target(&ws, cx, "app");
+    let id =
+        query_tab(&ws, cx).read_with(cx, |q, _| q.connection.as_ref().unwrap().saved.id.clone());
+
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    assert_eq!(
+        d.read_with(cx, |d, _| d.selected_id().map(String::from)),
+        Some(id)
+    );
+}
+
+#[gpui::test]
 fn the_connection_chip_offers_what_the_browser_has_open(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     let pick = |cx: &mut VisualTestContext| {

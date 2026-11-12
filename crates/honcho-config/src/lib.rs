@@ -11,7 +11,7 @@ use honcho_db::tunnel::{SshAuth, SshConfig};
 use honcho_db::{ConnectConfig, DriverKind, TlsConfig};
 use serde::{Deserialize, Serialize};
 
-pub use secrets::{Cached, Keyring, MemorySecrets, SecretError, Secrets};
+pub use secrets::{Bundled, Cached, Keyring, MemorySecrets, SecretError, Secrets};
 
 const FILE_VERSION: u32 = 1;
 

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{App, Global, Hsla, Task};
-use honcho_config::{Cached, ColorTag, ConnectionStore, Keyring, SavedConnection, Secrets};
+use honcho_config::{
+    Bundled, Cached, ColorTag, ConnectionStore, Keyring, SavedConnection, Secrets,
+};
 use honcho_db::{ConnectConfig, DbError, DbRuntime, Driver, DriverKind, Session, SessionOptions};
 
 use crate::theme::c;
@@ -29,10 +31,21 @@ impl Connections {
         let runtime = DbRuntime::new().expect("couldn't start the database runtime");
         cx.set_global(Connections {
             store,
-            secrets: Arc::new(Cached::new(Keyring)),
+            secrets: platform_secrets(),
             runtime: Arc::new(runtime),
             load_error,
         });
+    }
+}
+
+/// On macOS each Keychain item asks separately, so every secret goes in
+/// one. Elsewhere one entry per secret is fine, and Windows caps an entry
+/// at 2.5KB.
+fn platform_secrets() -> Arc<dyn Secrets> {
+    if cfg!(target_os = "macos") {
+        Arc::new(Bundled::new(Keyring))
+    } else {
+        Arc::new(Cached::new(Keyring))
     }
 }
 
