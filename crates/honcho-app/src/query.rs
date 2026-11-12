@@ -4,9 +4,9 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, anchored, deferred, div, prelude::*, px, App, Context, CursorStyle, Entity,
-    EventEmitter, FocusHandle, Focusable, MouseButton, Pixels, PromptLevel, SharedString,
-    Subscription, Task, Window,
+    actions, anchored, canvas, deferred, div, point, prelude::*, px, App, Context, CursorStyle,
+    Entity, EventEmitter, FocusHandle, Focusable, MouseButton, PathBuilder, Pixels, PromptLevel,
+    SharedString, Subscription, Task, Window,
 };
 use honcho_config::{ColorTag, SavedConnection};
 use honcho_core::{complete, Editor};
@@ -1475,7 +1475,8 @@ impl QueryTab {
                         chip("tab-run")
                             .border_1()
                             .border_color(Theme::border())
-                            .child("▶ Run")
+                            .child(play_icon())
+                            .child("Run")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 window.focus(&this.editor.focus_handle(cx));
                                 this.run_action(false, window, cx)
@@ -2218,6 +2219,27 @@ impl Render for QueryTab {
             .children(self.render_databases(cx))
             .children(self.render_connections(cx))
     }
+}
+
+/// Drawn rather than "▶" because the glyph's height and baseline change with
+/// the font, which left it off centre next to the label.
+fn play_icon() -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        |b, _, window, _| {
+            let mut path = PathBuilder::fill();
+            path.move_to(point(b.left(), b.top()));
+            path.line_to(point(b.right(), b.top() + b.size.height / 2.));
+            path.line_to(point(b.left(), b.bottom()));
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, Theme::text());
+            }
+        },
+    )
+    .w(px(7.))
+    .h(px(8.))
+    .flex_none()
 }
 
 #[cfg(test)]
