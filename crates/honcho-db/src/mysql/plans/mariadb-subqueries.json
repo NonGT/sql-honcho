@@ -1,0 +1,139 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.156152215
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.016758998,
+    "r_loops": 1,
+    "r_total_time_ms": 0.091952589,
+    "filesort": {
+      "sort_key": "(subquery#2) desc",
+      "r_loops": 1,
+      "r_total_time_ms": 0.005099189,
+      "r_used_priority_queue": false,
+      "r_output_rows": 2,
+      "r_buffer_size": "376",
+      "r_sort_mode": "sort_key,rowid",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "<subquery3>",
+              "access_type": "ALL",
+              "possible_keys": ["distinct_key"],
+              "loops": 1,
+              "r_loops": 1,
+              "rows": 3,
+              "r_rows": 2,
+              "cost": 0.011357804,
+              "r_table_time_ms": 0.009529632,
+              "r_other_time_ms": 0.005767935,
+              "filtered": 100,
+              "r_filtered": 100,
+              "materialized": {
+                "unique": 1,
+                "materialization": {
+                  "r_strategy": "undefined",
+                  "query_block": {
+                    "select_id": 3,
+                    "cost": 0.013242474,
+                    "r_loops": 1,
+                    "r_total_time_ms": 0.041838428,
+                    "having_condition": "sum(orders.amount) > 1",
+                    "nested_loop": [
+                      {
+                        "table": {
+                          "table_name": "orders",
+                          "access_type": "index",
+                          "key": "user_id",
+                          "key_length": "4",
+                          "used_key_parts": ["user_id"],
+                          "loops": 1,
+                          "r_loops": 1,
+                          "rows": 3,
+                          "r_rows": 3,
+                          "cost": 0.0113438,
+                          "r_table_time_ms": 0.020563943,
+                          "r_other_time_ms": 0.008401123,
+                          "r_engine_stats": {
+                            "pages_accessed": 4
+                          },
+                          "filtered": 100,
+                          "r_filtered": 100
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "table": {
+              "table_name": "u",
+              "access_type": "eq_ref",
+              "possible_keys": ["PRIMARY"],
+              "key": "PRIMARY",
+              "key_length": "4",
+              "used_key_parts": ["id"],
+              "ref": ["<subquery3>.user_id"],
+              "loops": 3,
+              "r_loops": 2,
+              "rows": 1,
+              "r_rows": 1,
+              "cost": 0.00350252,
+              "r_table_time_ms": 0.002591391,
+              "r_other_time_ms": 0.015590144,
+              "r_engine_stats": {
+                "pages_accessed": 2
+              },
+              "filtered": 100,
+              "r_filtered": 100
+            }
+          }
+        ],
+        "subqueries": [
+          {
+            "subquery_cache": {
+              "r_loops": 2,
+              "r_hit_ratio": 0,
+              "query_block": {
+                "select_id": 2,
+                "cost": 0.001792605,
+                "r_loops": 2,
+                "r_total_time_ms": 0.004179663,
+                "nested_loop": [
+                  {
+                    "table": {
+                      "table_name": "x",
+                      "access_type": "ref",
+                      "possible_keys": ["user_id"],
+                      "key": "user_id",
+                      "key_length": "4",
+                      "used_key_parts": ["user_id"],
+                      "ref": ["app.u.id"],
+                      "loops": 1,
+                      "r_loops": 2,
+                      "rows": 1,
+                      "r_rows": 1.5,
+                      "cost": 0.001792605,
+                      "r_table_time_ms": 0.002131628,
+                      "r_other_time_ms": 0.001128509,
+                      "r_engine_stats": {
+                        "pages_accessed": 2
+                      },
+                      "filtered": 100,
+                      "r_filtered": 100,
+                      "using_index": true
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "update": true,
+      "table_name": "orders",
+      "access_type": "range",
+      "possible_keys": [
+        "user_id"
+      ],
+      "key": "user_id",
+      "used_key_parts": [
+        "user_id"
+      ],
+      "key_length": "4",
+      "ref": [
+        "const"
+      ],
+      "rows_examined_per_scan": 1,
+      "filtered": "100.00",
+      "attached_condition": "(`app`.`orders`.`user_id` = 2)"
+    }
+  }
+}

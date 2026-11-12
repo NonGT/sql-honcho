@@ -1,0 +1,68 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.06750156
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.016744994,
+    "r_loops": 1,
+    "r_total_time_ms": 0.051159077,
+    "nested_loop": [
+      {
+        "read_sorted_file": {
+          "r_rows": 2,
+          "filesort": {
+            "sort_key": "o.amount",
+            "r_loops": 1,
+            "r_total_time_ms": 0.03573612,
+            "r_used_priority_queue": false,
+            "r_output_rows": 2,
+            "r_buffer_size": "28KiB",
+            "r_sort_mode": "sort_key,addon_fields",
+            "table": {
+              "table_name": "o",
+              "access_type": "ALL",
+              "possible_keys": ["user_id"],
+              "loops": 1,
+              "r_loops": 1,
+              "rows": 3,
+              "r_rows": 3,
+              "cost": 0.0113438,
+              "r_table_time_ms": 0.010198378,
+              "r_other_time_ms": 0.005099189,
+              "r_engine_stats": {
+                "pages_accessed": 1
+              },
+              "filtered": 100,
+              "r_filtered": 66.66666667,
+              "attached_condition": "o.amount > 10"
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "u",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["app.o.user_id"],
+          "loops": 3,
+          "r_loops": 2,
+          "rows": 1,
+          "r_rows": 1,
+          "cost": 0.00350252,
+          "r_table_time_ms": 0.0037199,
+          "r_other_time_ms": 0.004848409,
+          "r_engine_stats": {
+            "pages_accessed": 2
+          },
+          "filtered": 100,
+          "r_filtered": 100
+        }
+      }
+    ]
+  }
+}
