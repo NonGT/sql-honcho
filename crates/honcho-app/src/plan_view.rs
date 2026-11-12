@@ -9,7 +9,7 @@ use honcho_db::{Plan, PlanNode};
 use crate::theme::Theme;
 
 const INDENT: f32 = 14.;
-const BAR: f32 = 64.;
+const BAR: f32 = 40.;
 
 /// A node, as the child indexes leading to it from the root.
 type Path = Vec<usize>;
@@ -245,14 +245,14 @@ fn number(text: String, color: Option<Hsla>) -> gpui::Div {
 
 fn bar(share: Option<f64>) -> gpui::Div {
     let Some(share) = share else {
-        return cell(BAR + 40.);
+        return cell(BAR + 36.);
     };
     let color = if share >= 0.3 {
         Theme::warning()
     } else {
         Theme::accent()
     };
-    cell(BAR + 40.)
+    cell(BAR + 36.)
         .flex()
         .items_center()
         .gap_1()
@@ -299,7 +299,7 @@ impl Render for PlanView {
             .child(header("Est. rows", 72.))
             .when(analyzed, |d| d.child(header("Rows", 72.)))
             .child(header(if analyzed { "Time" } else { "Cost" }, 72.))
-            .child(cell(BAR + 40.).child("Share"));
+            .child(cell(BAR + 36.).child("Share"));
         let totals = (!self.plan.totals.is_empty()).then(|| {
             div()
                 .px_2()
