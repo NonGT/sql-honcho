@@ -397,3 +397,120 @@ it!(project_round_trip, |s| {
     let events = run(&s, &sql).await;
     assert_eq!(rows_of(&events), vec![vec![Value::Int(15)]], "{sql}");
 });
+
+async fn explain(s: &Session, sql: &str, analyze: bool) -> crate::Result<crate::Plan> {
+    let mut handle = s.run(sql, crate::RunMode::Explain { analyze });
+    let mut plan = None;
+    while let Some(e) = handle.next().await {
+        match e {
+            QueryEvent::Plan(p) => plan = Some(*p),
+            QueryEvent::Finished(Err(e)) => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(plan.expect("a plan"))
+}
+
+fn objects(plan: &crate::Plan) -> Vec<String> {
+    fn walk(n: &crate::PlanNode, out: &mut Vec<String>) {
+        out.extend(n.object.clone());
+        n.children.iter().for_each(|c| walk(c, out));
+    }
+    let mut out = Vec::new();
+    walk(&plan.root, &mut out);
+    out.sort();
+    out
+}
+
+it!(explains_a_join_and_switches_showplan_off, |s| {
+    let sql = "SELECT u.email, o.amount FROM dbo.orders o JOIN dbo.users u ON u.id = o.user_id";
+    let plan = explain(&s, sql, false).await.unwrap();
+    assert!(!plan.analyzed);
+    assert_eq!(objects(&plan), ["dbo.orders o", "dbo.users u"]);
+    // a plain query gets rows again, not a plan
+    let events = run(&s, "SELECT 1 AS one").await;
+    assert_eq!(rows_of(&events), vec![vec![Value::Int(1)]]);
+
+    let plan = explain(&s, sql, true).await.unwrap();
+    assert!(plan.analyzed);
+    assert!(plan.root.actual_rows.is_some(), "{plan:#?}");
+    let events = run(&s, "SELECT 1 AS one").await;
+    assert_eq!(rows_of(&events), vec![vec![Value::Int(1)]]);
+});
+
+it!(explain_errors_leave_showplan_off, |s| {
+    let err = explain(&s, "SELECT\n nope FROM dbo.orders", false).await;
+    match err {
+        Err(DbError::Query { line, .. }) => assert_eq!(line, Some(2)),
+        other => panic!("{other:?}"),
+    }
+    let events = run(&s, "SELECT 1 AS one").await;
+    assert_eq!(rows_of(&events), vec![vec![Value::Int(1)]]);
+});
+
+it!(analyze_rolls_back_what_it_ran, |s| {
+    let count = "SELECT count(*) FROM dbo.orders";
+    let before = rows_of(&run(&s, count).await);
+    explain(&s, "DELETE FROM dbo.orders", true).await.unwrap();
+    assert_eq!(rows_of(&run(&s, count).await), before);
+    assert!(!s.in_transaction().await.unwrap());
+
+    run(&s, "BEGIN TRANSACTION").await;
+    explain(&s, "UPDATE dbo.orders SET amount = amount + 1", true)
+        .await
+        .unwrap();
+    assert!(s.in_transaction().await.unwrap());
+    run(&s, "ROLLBACK").await;
+});
+
+it!(cancelling_explain_leaves_statistics_off, |s| {
+    // the plan XML outgrows a packet, so the server sends part of it
+    // and holds the rest until the WAITFOR is over
+    let handle = s.run(
+        "SELECT u.email FROM dbo.users u WAITFOR DELAY '00:00:30'",
+        crate::RunMode::Explain { analyze: true },
+    );
+    let token = handle.cancel_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        token.cancel();
+    });
+    let mut handle = handle;
+    let mut last = None;
+    while let Some(e) = handle.next().await {
+        last = Some(e);
+    }
+    assert_eq!(last, Some(QueryEvent::Finished(Err(DbError::Cancelled))));
+    let events = run(&s, "SELECT 1 AS one").await;
+    assert_eq!(rows_of(&events), vec![vec![Value::Int(1)]], "{events:?}");
+});
+
+it!(cancel_leaves_the_connection_in_step, |s| {
+    run(&s, "BEGIN TRANSACTION").await;
+    let handle = s.execute("WAITFOR DELAY '00:00:30'");
+    let token = handle.cancel_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        token.cancel();
+    });
+    let mut handle = handle;
+    let mut last = None;
+    while let Some(e) = handle.next().await {
+        last = Some(e);
+    }
+    assert_eq!(last, Some(QueryEvent::Finished(Err(DbError::Cancelled))));
+    // each query gets its own answer, not the one before it
+    let events = run(&s, "ROLLBACK TRANSACTION").await;
+    assert!(
+        matches!(events.last(), Some(QueryEvent::Finished(Ok(_)))),
+        "{events:?}"
+    );
+    assert_eq!(
+        rows_of(&run(&s, "SELECT 1 AS one").await),
+        vec![vec![Value::Int(1)]]
+    );
+    assert_eq!(
+        rows_of(&run(&s, "SELECT 2 AS two").await),
+        vec![vec![Value::Int(2)]]
+    );
+});

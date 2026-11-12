@@ -186,6 +186,7 @@ impl Connection for SqliteConnection {
             schemas: false,
             // attached databases are reachable as db.table
             cross_database: true,
+            explain: false,
         }
     }
 

@@ -1,6 +1,7 @@
 //! SQL Server and Azure SQL, over tiberius.
 
 mod convert;
+mod explain;
 mod split;
 
 use std::sync::Mutex;
@@ -14,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::script::Statement;
 use crate::types::*;
-use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink};
+use crate::{Canceller, Connection, DbError, Driver, Plan, Result, ResultSink};
 
 pub use split::split;
 
@@ -286,6 +287,7 @@ impl Connection for SqlServerConnection {
         Capabilities {
             schemas: true,
             cross_database: true,
+            explain: true,
         }
     }
 
@@ -298,8 +300,58 @@ impl Connection for SqlServerConnection {
         Ok(())
     }
 
+    async fn explain(&mut self, sql: &str, analyze: bool) -> Result<Plan> {
+        let token = self.cancel.lock().unwrap().clone();
+        let batches = split(sql);
+        let statement = batches
+            .iter()
+            .find(|s| !s.text.trim().is_empty())
+            .ok_or_else(|| DbError::Other("Nothing to explain.".into()))?;
+        // ANALYZE runs the statement; undo it, keeping the user's own
+        // transaction if there is one
+        let (open, close) = match analyze {
+            false => (None, None),
+            true if self.in_transaction().await? => (
+                Some("SAVE TRANSACTION honcho_explain"),
+                Some("ROLLBACK TRANSACTION honcho_explain"),
+            ),
+            true => (Some("BEGIN TRANSACTION"), Some("ROLLBACK TRANSACTION")),
+        };
+        let setting = if analyze {
+            "STATISTICS XML"
+        } else {
+            "SHOWPLAN_XML"
+        };
+        let client = self.client()?;
+        // each SET has to be a batch of its own
+        exec(client, &format!("SET {setting} ON")).await?;
+        let result = async {
+            if let Some(open) = open {
+                exec(client, open).await?;
+            }
+            let plans = plan_xml(client, statement, &token).await;
+            if let Some(close) = close {
+                let undone = exec(client, close).await;
+                if plans.is_ok() {
+                    undone?;
+                }
+            }
+            plans
+        }
+        .await;
+        // left on, every later query would answer with a plan instead
+        let off = exec(client, &format!("SET {setting} OFF")).await;
+        let plans = result?;
+        off?;
+        explain::parse_all(&plans, analyze)
+    }
+
     fn statements<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
         split(sql).iter().flat_map(split::statements).collect()
+    }
+
+    fn batches<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
+        split(sql)
     }
 
     fn canceller(&self) -> Option<Box<dyn Canceller>> {
@@ -738,6 +790,69 @@ async fn run(
         }
         None if token.is_cancelled() => Err(DbError::Cancelled),
         None => first_error.map_or(Ok(()), Err),
+    }
+}
+
+async fn exec(client: &mut Client, sql: &str) -> Result<()> {
+    client
+        .simple_query(sql)
+        .await
+        .map_err(query_error)?
+        .into_results()
+        .await
+        .map_err(query_error)
+        .map(drop)
+}
+
+/// Runs the statement and keeps only the plans among its results; with
+/// STATISTICS XML its own rows come first and are read and dropped.
+async fn plan_xml(
+    client: &mut Client,
+    statement: &Statement<'_>,
+    token: &CancellationToken,
+) -> Result<Vec<String>> {
+    let mut plans = Vec::new();
+    let mut first_error = None;
+    let cancelled = {
+        let mut stream = client
+            .simple_batch(statement.text)
+            .await
+            .map_err(query_error)?;
+        let mut is_plan = false;
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = token.cancelled() => break true,
+                item = stream.next() => item,
+            };
+            match item {
+                None => break false,
+                Some(Err(e)) => return Err(query_error(e)),
+                Some(Ok(BatchItem::Metadata(meta))) => {
+                    is_plan = meta
+                        .columns()
+                        .first()
+                        .is_some_and(|c| c.name() == explain::PLAN_COLUMN);
+                }
+                Some(Ok(BatchItem::Row(row))) if is_plan => match row.into_iter().next() {
+                    Some(tiberius::ColumnData::Xml(Some(x))) => plans.push(x.to_string()),
+                    Some(tiberius::ColumnData::String(Some(s))) => plans.push(s.to_string()),
+                    _ => {}
+                },
+                Some(Ok(BatchItem::Error(e))) => {
+                    first_error.get_or_insert_with(|| server_error(&e, statement.line));
+                }
+                Some(Ok(_)) => {}
+            }
+        }
+    };
+    if cancelled {
+        client.cancel_query().await.map_err(query_error)?;
+        return Err(DbError::Cancelled);
+    }
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(plans),
     }
 }
 

@@ -176,6 +176,7 @@ impl Connection for FakeConnection {
         Capabilities {
             schemas: false,
             cross_database: self.cross_database,
+            explain: true,
         }
     }
 

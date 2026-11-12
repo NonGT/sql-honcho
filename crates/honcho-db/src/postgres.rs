@@ -400,6 +400,7 @@ impl Connection for PostgresConnection {
         Capabilities {
             schemas: true,
             cross_database: false,
+            explain: true,
         }
     }
 

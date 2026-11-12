@@ -4,8 +4,9 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, div, prelude::*, px, App, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
-    Focusable, MouseButton, Pixels, PromptLevel, SharedString, Subscription, Task, Window,
+    actions, anchored, deferred, div, prelude::*, px, App, Context, CursorStyle, Entity,
+    EventEmitter, FocusHandle, Focusable, MouseButton, Pixels, PromptLevel, SharedString,
+    Subscription, Task, Window,
 };
 use honcho_config::{ColorTag, SavedConnection};
 use honcho_core::{complete, Editor};
@@ -237,6 +238,8 @@ pub struct QueryTab {
     pub origin: Option<Origin>,
     /// The current run is an Apply of `origin`.
     applying: bool,
+    /// The menu under the Explain button is open.
+    explain_menu: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -277,6 +280,7 @@ impl QueryTab {
             ddl_running: false,
             origin: None,
             applying: false,
+            explain_menu: false,
             _subs: subs,
         }
     }
@@ -638,6 +642,8 @@ impl QueryTab {
     }
 
     fn explain_action(&mut self, analyze: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // from the toolbar button, typing should still go to the editor
+        window.focus(&self.editor.focus_handle(cx));
         self.start_action(false, RunMode::Explain { analyze }, window, cx);
     }
 
@@ -1198,6 +1204,135 @@ impl QueryTab {
             .collect()
     }
 
+    fn can_explain(&self) -> bool {
+        self.connection
+            .as_ref()
+            .is_some_and(|c| c.session.capabilities().explain)
+    }
+
+    /// Explain next to Run; Explain Analyze runs the statement, so it sits
+    /// in the menu under ▾ rather than a click away.
+    fn render_explain(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let enabled = self.can_explain() && self.running.is_none();
+        let part = |id: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex()
+                .items_center()
+                .h(px(22.))
+                .px_2()
+                .border_1()
+                .border_color(Theme::border())
+                .when(enabled, |d| {
+                    d.cursor_pointer().hover(|d| d.bg(Theme::border()))
+                })
+                .when(!enabled, |d| d.text_color(Theme::muted()))
+        };
+        let why = self
+            .connection
+            .as_ref()
+            .filter(|c| !c.session.capabilities().explain)
+            .map(|c| {
+                SharedString::from(format!(
+                    "Explain isn't available for {} yet",
+                    crate::connections::driver_name(c.saved.driver)
+                ))
+            });
+        let tip = move |d: gpui::Stateful<gpui::Div>| match why.clone() {
+            Some(text) => d.tooltip(move |_, cx| cx.new(|_| Tip(text.clone())).into()),
+            None => d,
+        };
+        let p = crate::keymap::Platform::current();
+        let item = |id: &'static str, label: &'static str, action: Box<dyn gpui::Action>| {
+            let shortcut = crate::commands::shortcut(&*action, p);
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex()
+                .gap_6()
+                .px_3()
+                .py_0p5()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|d| d.bg(Theme::accent_dim()))
+                .child(div().flex_1().child(label))
+                .children(shortcut.map(|s| div().text_color(Theme::muted()).child(s)))
+        };
+        let menu = div()
+            .occlude()
+            .min_w(px(220.))
+            .p_1()
+            .bg(Theme::panel())
+            .border_1()
+            .border_color(Theme::border())
+            .rounded_md()
+            .shadow_lg()
+            .text_size(px(12.))
+            .text_color(Theme::text())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.explain_menu = false;
+                cx.notify();
+            }))
+            .child(
+                item("explain-plain", "Explain", Box::new(Explain)).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.explain_menu = false;
+                        this.explain_action(false, window, cx);
+                    }),
+                ),
+            )
+            .child(
+                item(
+                    "explain-analyze",
+                    "Explain Analyze…",
+                    Box::new(ExplainAnalyze),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.explain_menu = false;
+                        this.explain_action(true, window, cx);
+                    }),
+                ),
+            );
+        div()
+            .relative()
+            .flex()
+            .items_center()
+            .child(tip(part("tab-explain")
+                .rounded_l_sm()
+                .child("Explain")
+                .when(enabled, |d| {
+                    d.on_click(
+                        cx.listener(|this, _, window, cx| this.explain_action(false, window, cx)),
+                    )
+                })))
+            .child(tip(part("tab-explain-menu")
+                .rounded_r_sm()
+                .border_l_0()
+                .px_1()
+                .child("▾")
+                .when(enabled, |d| {
+                    d.on_click(cx.listener(|this, _, _, cx| {
+                        this.explain_menu = !this.explain_menu;
+                        cx.notify();
+                    }))
+                })))
+            .when(self.explain_menu && enabled, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_full()
+                        .right_0()
+                        .child(deferred(anchored().child(menu)).with_priority(1)),
+                )
+            })
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let chip = |id: &'static str| {
             div()
@@ -1309,6 +1444,7 @@ impl QueryTab {
                             ),
                     )
                 })
+                .when(self.origin.is_none(), |d| d.child(self.render_explain(cx)))
                 .when(self.origin.is_none(), |d| {
                     d.child(
                         chip("tab-run")
@@ -1316,6 +1452,7 @@ impl QueryTab {
                             .border_color(Theme::border())
                             .child("▶ Run")
                             .on_click(cx.listener(|this, _, window, cx| {
+                                window.focus(&this.editor.focus_handle(cx));
                                 this.run_action(false, window, cx)
                             })),
                     )
@@ -1929,6 +2066,23 @@ fn analyze_warning(
         ),
         "Run and Roll Back",
     ))
+}
+
+struct Tip(SharedString);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .bg(Theme::panel())
+            .border_1()
+            .border_color(Theme::border())
+            .rounded_sm()
+            .text_size(px(11.5))
+            .text_color(Theme::text())
+            .child(self.0.clone())
+    }
 }
 
 const DEFINER_HINT: &str = "The DEFINER clause names another user, which takes extra \

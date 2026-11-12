@@ -152,6 +152,7 @@ impl Connection for MySqlConnection {
         Capabilities {
             schemas: false,
             cross_database: true,
+            explain: true,
         }
     }
 

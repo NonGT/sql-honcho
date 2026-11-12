@@ -123,13 +123,15 @@ The statement Cmd+Enter would run is marked in the gutter whenever the tab
 is connected. On a connection tagged red, UPDATE or DELETE without WHERE asks
 first.
 
+The Explain button sits next to Run, with Explain Analyze under its arrow.
 Explain shows the plan as a tree, with each step's share of the cost (or of
 the time, when analyzed). Estimates that are off by 10x and full scans of
 big tables are flagged. Explain Analyze asks before running a statement that
 writes, and rolls its changes back. On MySQL and MariaDB it refuses a write
 that touches a table whose engine can't roll back, such as MyISAM or Aria.
-Explain works on Postgres, MySQL (Analyze needs 8.3 or later) and MariaDB
-so far.
+SQL Server plans can be saved as .sqlplan and opened in SSMS. Explain works
+on Postgres, MySQL (Analyze needs 8.3 or later), MariaDB and SQL Server so
+far.
 
 Copy with no selection copies the whole line. Pasting N lines into N cursors
 puts one line at each cursor.
