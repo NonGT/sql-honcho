@@ -1,8 +1,13 @@
 //! A query plan as a tree table, with the selected node's details beside it.
 
+use std::cell::Cell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
-use gpui::{div, prelude::*, px, AnyElement, Context, Hsla, MouseButton, SharedString, Window};
+use gpui::{
+    canvas, div, prelude::*, px, AnyElement, Bounds, Context, CursorStyle, DispatchPhase, Hsla,
+    MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Window,
+};
 use honcho_db::plan::count;
 use honcho_db::{Plan, PlanNode};
 
@@ -10,6 +15,8 @@ use crate::theme::Theme;
 
 const INDENT: f32 = 14.;
 const BAR: f32 = 40.;
+/// The details column never gets narrower than this, nor wider than half the view.
+pub const DETAILS_MIN: Pixels = px(260.);
 
 /// A node, as the child indexes leading to it from the root.
 type Path = Vec<usize>;
@@ -21,6 +28,10 @@ pub struct PlanView {
     /// Columns some step has a figure for; SQLite has none at all.
     est_rows: bool,
     measure: bool,
+    details_width: Rc<Cell<Pixels>>,
+    /// Pointer x and width when a drag of the details edge started.
+    drag: Option<(Pixels, Pixels)>,
+    bounds: Bounds<Pixels>,
 }
 
 impl PlanView {
@@ -41,7 +52,29 @@ impl PlanView {
             plan,
             collapsed: HashSet::new(),
             selected: Vec::new(),
+            details_width: Rc::new(Cell::new(DETAILS_MIN)),
+            drag: None,
+            bounds: Bounds::default(),
         }
+    }
+
+    pub fn with_details_width(mut self, width: Rc<Cell<Pixels>>) -> Self {
+        self.details_width = width;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn details_width(&self) -> Pixels {
+        self.clamp_details(self.details_width.get())
+    }
+
+    #[cfg(test)]
+    pub fn width(&self) -> Pixels {
+        self.bounds.size.width
+    }
+
+    fn clamp_details(&self, w: Pixels) -> Pixels {
+        w.min(self.bounds.size.width / 2.).max(DETAILS_MIN)
     }
 
     fn node(&self, path: &[usize]) -> Option<&PlanNode> {
@@ -335,9 +368,50 @@ impl Render for PlanView {
             .into_iter()
             .map(|(p, n)| self.render_row(p, n, cx))
             .collect();
+        let width = self.clamp_details(self.details_width.get());
+        let this = cx.entity().downgrade();
         div()
             .size_full()
+            .relative()
             .flex()
+            .child(
+                canvas(
+                    {
+                        let this = this.clone();
+                        move |b, _, cx| {
+                            this.update(cx, |v, _| v.bounds = b).ok();
+                        }
+                    },
+                    move |_, _, window, _| {
+                        // on the window, so the drag follows the pointer out of the view
+                        let view = this.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            view.update(cx, |v, cx| {
+                                let Some((x, w)) = v.drag else { return };
+                                if e.pressed_button != Some(MouseButton::Left) {
+                                    v.drag = None;
+                                    return;
+                                }
+                                let w = v.clamp_details(w + x - e.position.x);
+                                v.details_width.set(w);
+                                cx.notify();
+                            })
+                            .ok();
+                        });
+                        let view = this.clone();
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Bubble {
+                                view.update(cx, |v, _| v.drag = None).ok();
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(
                 div()
                     .flex_1()
@@ -358,14 +432,45 @@ impl Render for PlanView {
             )
             .child(
                 div()
-                    .id("plan-details")
+                    .relative()
                     .flex_none()
-                    .w(px(260.))
-                    .p_2()
+                    .w(width)
                     .border_l_1()
                     .border_color(Theme::border())
-                    .overflow_y_scroll()
-                    .child(self.render_details()),
+                    .child(
+                        div()
+                            .id("plan-details")
+                            .size_full()
+                            .p_2()
+                            .overflow_y_scroll()
+                            .child(self.render_details()),
+                    )
+                    // the left edge drags to resize; a double click puts it back
+                    .child(
+                        div()
+                            .id("plan-details-edge")
+                            .debug_selector(|| "plan-details-edge".into())
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(-3.))
+                            .w(px(6.))
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    if e.click_count == 2 {
+                                        this.details_width.set(DETAILS_MIN);
+                                        this.drag = None;
+                                        cx.notify();
+                                    } else {
+                                        let w = this.clamp_details(this.details_width.get());
+                                        this.drag = Some((e.position.x, w));
+                                    }
+                                }),
+                            ),
+                    ),
             )
     }
 }

@@ -1869,6 +1869,46 @@ fn shown_plan(
 }
 
 #[gpui::test]
+fn plan_details_drag_wider_up_to_half(cx: &mut TestAppContext) {
+    use crate::plan_view::DETAILS_MIN;
+    use gpui::{point, px, Modifiers, MouseButton};
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 3");
+    run(&ws, cx, "P-e");
+    let plan = shown_plan(&ws, cx).expect("the plan tab shows");
+    let width = |cx: &mut VisualTestContext| plan.read_with(cx, |p, _| p.details_width());
+    assert_eq!(width(cx), DETAILS_MIN);
+
+    // from the edge's centre, by dx
+    let drag = |cx: &mut VisualTestContext, dx: gpui::Pixels| {
+        let edge = cx
+            .debug_bounds("plan-details-edge")
+            .expect("the edge is drawn");
+        let (x, y) = (edge.center().x, edge.center().y);
+        cx.simulate_mouse_down(point(x, y), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(point(x + dx, y), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(point(x + dx, y), MouseButton::Left, Modifiers::none());
+    };
+    drag(cx, px(-50.));
+    assert_eq!(width(cx), DETAILS_MIN + px(50.));
+    // out past the view on the left stops at half of it
+    let half = plan.read_with(cx, |p, _| p.width()) / 2.;
+    drag(cx, px(-3000.));
+    assert_eq!(width(cx), half);
+    drag(cx, px(3000.));
+    assert_eq!(width(cx), DETAILS_MIN);
+
+    // the next explain keeps the width
+    drag(cx, px(-40.));
+    let kept = width(cx);
+    run(&ws, cx, "P-e");
+    let again = shown_plan(&ws, cx).unwrap();
+    assert_ne!(again.entity_id(), plan.entity_id());
+    assert_eq!(again.read_with(cx, |p, _| p.details_width()), kept);
+}
+
+#[gpui::test]
 fn explain_shows_the_plan_and_asks_before_analyzing_a_write(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     connect_fake(&ws, cx, None);

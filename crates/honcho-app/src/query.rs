@@ -1,6 +1,8 @@
 //! A tab's connection and the queries run from it.
 
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -227,6 +229,8 @@ pub struct QueryTab {
     panel_collapsed: bool,
     /// Pointer y and panel height when a resize drag started.
     panel_drag: Option<(Pixels, Pixels)>,
+    /// Width of the plan's details column, kept from one explain to the next.
+    plan_width: Rc<Cell<Pixels>>,
     /// Revision, cursor and length when the editor last changed, to tell
     /// typing from other edits and moves.
     last_edit: (u64, usize, usize),
@@ -274,6 +278,7 @@ impl QueryTab {
             panel_height: PANEL_HEIGHT,
             panel_collapsed: false,
             panel_drag: None,
+            plan_width: Rc::new(Cell::new(crate::plan_view::DETAILS_MIN)),
             last_edit: (0, 0, 0),
             completing: false,
             catalog: None,
@@ -882,7 +887,8 @@ impl QueryTab {
                 out.message(m.level, text, None);
             }
             QueryEvent::Plan(plan) => {
-                out.plan = Some(cx.new(|_| PlanView::new(*plan)));
+                let width = self.plan_width.clone();
+                out.plan = Some(cx.new(|_| PlanView::new(*plan).with_details_width(width)));
             }
             QueryEvent::Finished(Ok(stats)) => {
                 out.message(
