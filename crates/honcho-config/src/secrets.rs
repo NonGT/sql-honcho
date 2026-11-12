@@ -53,6 +53,11 @@ impl<S: Secrets> Secrets for Cached<S> {
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        // saving a connection writes its password back unchanged, and on
+        // macOS rewriting a Keychain item prompts just like reading it
+        if cache.get(key).is_some_and(|v| v == value) {
+            return Ok(());
+        }
         self.inner.set(key, value)?;
         cache.insert(key.to_string(), value.to_string());
         Ok(())
@@ -156,11 +161,12 @@ impl Secrets for MemorySecrets {
 mod tests {
     use super::*;
 
-    /// Counts reads, each taking a while like a prompt does.
+    /// Counts reads and writes, each read taking a while like a prompt does.
     #[derive(Default)]
     struct Slow {
         inner: MemorySecrets,
         reads: std::sync::atomic::AtomicUsize,
+        writes: std::sync::atomic::AtomicUsize,
     }
 
     impl Secrets for Slow {
@@ -170,6 +176,8 @@ mod tests {
             self.inner.get(key)
         }
         fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.set(key, value)
         }
         fn delete(&self, key: &str) -> Result<(), SecretError> {
@@ -195,8 +203,14 @@ mod tests {
         let reads = |c: &Cached<Slow>| c.inner.reads.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(reads(&cached), 1);
 
+        // writing back what was read leaves the store alone
+        cached.set("c/password", "pw").unwrap();
+        let writes = |c: &Cached<Slow>| c.inner.writes.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(writes(&cached), 0);
+
         // a new value replaces the old without another read
         cached.set("c/password", "new").unwrap();
+        assert_eq!(writes(&cached), 1);
         assert_eq!(cached.get("c/password"), Ok(Some("new".into())));
         cached.delete("c/password").unwrap();
         assert_eq!(cached.get("c/password"), Ok(None));

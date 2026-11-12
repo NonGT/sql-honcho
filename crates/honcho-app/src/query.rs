@@ -116,8 +116,11 @@ pub fn target(ed: &Editor, kind: DriverKind, whole: bool) -> Result<Target, &'st
 }
 
 pub enum TabEvent {
-    /// Run was asked for without a connection.
+    /// Run or Explain was asked for without a connection: use one that's
+    /// already open, or ask.
     NeedConnection,
+    /// "Other connection…" in the list: the connections dialog.
+    OtherConnection,
     /// An Apply went through: the database's objects changed.
     Applied {
         conn_id: String,
@@ -205,6 +208,9 @@ pub struct QueryTab {
     pub editor: Entity<EditorView>,
     pub connection: Option<ActiveConnection>,
     pub database: Option<String>,
+    /// Bumped when the tab switches database, so an older answer to "which
+    /// database is this" arriving late doesn't undo the switch.
+    database_gen: u64,
     databases: Option<Vec<String>>,
     /// Highlighted row in the open database list.
     database_ix: usize,
@@ -221,6 +227,9 @@ pub struct QueryTab {
     /// Why the connection is gone, when it is.
     pub lost: Option<String>,
     reconnecting: bool,
+    /// Run or Explain (whole tab, mode) asked for before there was a
+    /// connection, to go ahead once there is one.
+    pending: Option<(bool, RunMode)>,
     /// A run is waiting on a ping or a reconnect before it starts.
     preparing: bool,
     /// The editor state the run target was worked out for.
@@ -264,6 +273,7 @@ impl QueryTab {
             editor,
             connection: None,
             database: None,
+            database_gen: 0,
             databases: None,
             database_ix: 0,
             database_focus: cx.focus_handle(),
@@ -276,6 +286,7 @@ impl QueryTab {
             output: None,
             lost: None,
             reconnecting: false,
+            pending: None,
             preparing: false,
             target_key: None,
             panel_height: PANEL_HEIGHT,
@@ -606,9 +617,13 @@ impl QueryTab {
             return;
         };
         let (session, conn_id) = (conn.session.clone(), conn.saved.id.clone());
+        let gen = self.database_gen;
         cx.spawn(async move |this, cx| {
             if let Ok(db) = session.current_database().await {
                 this.update(cx, |this, cx| {
+                    if this.database_gen != gen {
+                        return;
+                    }
                     if announce {
                         cx.emit(TabEvent::Connected {
                             conn_id,
@@ -664,6 +679,7 @@ impl QueryTab {
         cx: &mut Context<Self>,
     ) {
         let Some(conn) = self.connection.clone() else {
+            self.pending = Some((whole, mode));
             cx.emit(TabEvent::NeedConnection);
             return;
         };
@@ -1033,6 +1049,7 @@ impl QueryTab {
                         }
                     }
                     Err(e) => {
+                        this.pending = None;
                         this.say(MessageLevel::Error, &format!("Couldn't connect: {e}"), None)
                     }
                 }
@@ -1177,6 +1194,7 @@ impl QueryTab {
             return;
         };
         let session = conn.session.clone();
+        self.database_gen += 1;
         cx.spawn(async move |this, cx| {
             let result = session.use_database(name.clone()).await;
             this.update(cx, |this, cx| {
@@ -1546,6 +1564,7 @@ impl QueryTab {
 
     fn close_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connections = None;
+        self.pending = None;
         window.focus(&self.editor.focus_handle(cx));
         cx.notify();
     }
@@ -1562,11 +1581,18 @@ impl QueryTab {
     /// Opens a session on the picked entry; past the end means the dialog.
     pub fn pick_connection(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let picked = self.connections.as_ref().and_then(|l| l.get(ix).cloned());
+        let pending = self.pending.take();
         self.close_connections(window, cx);
+        self.pending = pending;
         match picked {
             Some((saved, database)) => self.switch_to(saved, database, window, cx),
-            None => cx.emit(TabEvent::NeedConnection),
+            None => cx.emit(TabEvent::OtherConnection),
         }
+    }
+
+    /// Drops a Run or Explain that was waiting on a connection.
+    pub fn forget_pending(&mut self) {
+        self.pending = None;
     }
 
     #[cfg(test)]
@@ -2218,6 +2244,14 @@ impl Render for QueryTab {
         }
         if std::mem::take(&mut self.focus_connections) {
             window.focus(&self.connection_focus);
+        }
+        // a Run or Explain that was waiting, now there's a connection
+        if self.connection.is_some() && !self.reconnecting {
+            if let Some((whole, mode)) = self.pending.take() {
+                cx.defer_in(window, move |this, window, cx| {
+                    this.start_action(whole, mode, window, cx)
+                });
+            }
         }
         let max_panel = window.viewport_size().height - px(200.);
         div()

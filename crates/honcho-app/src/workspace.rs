@@ -548,11 +548,13 @@ impl Workspace {
             &dialog,
             window,
             |this, _, event: &DialogEvent, window, cx| {
-                if let DialogEvent::Connected(conn) = event {
-                    let conn = (**conn).clone();
-                    this.active_query_tab()
-                        .clone()
-                        .update(cx, |q, cx| q.set_connection(conn, cx));
+                let q = this.active_query_tab().clone();
+                match event {
+                    DialogEvent::Connected(conn) => {
+                        let conn = (**conn).clone();
+                        q.update(cx, |q, cx| q.set_connection(conn, cx));
+                    }
+                    _ => q.update(cx, |q, _| q.forget_pending()),
                 }
                 this.connection_dialog = None;
                 // names, colors and the list itself may have changed
@@ -588,20 +590,29 @@ impl Workspace {
         self.subscriptions.push(cx.subscribe_in(
             &query,
             window,
-            |this, _, event: &TabEvent, window, cx| match event {
-                TabEvent::NeedConnection => this.open_connections(window, cx),
-                TabEvent::Applied { conn_id, database } => {
-                    if let Some(db) = database {
-                        this.browser
-                            .update(cx, |b, cx| b.reload_database(conn_id, db, cx));
+            |this, _, event: &TabEvent, window, cx| {
+                match event {
+                    TabEvent::NeedConnection => match this.default_target(cx) {
+                        Some((saved, database)) => this
+                            .active_query_tab()
+                            .clone()
+                            .update(cx, |q, cx| q.open_saved(saved, database, false, cx)),
+                        None => this.pick_connection(window, cx),
+                    },
+                    TabEvent::OtherConnection => this.open_connections(window, cx),
+                    TabEvent::Applied { conn_id, database } => {
+                        if let Some(db) = database {
+                            this.browser
+                                .update(cx, |b, cx| b.reload_database(conn_id, db, cx));
+                        }
                     }
+                    TabEvent::OpenScript(text) => this.new_tab(text.clone(), None, window, cx),
+                    TabEvent::Connected { conn_id, database } => {
+                        this.browser
+                            .update(cx, |b, cx| b.reveal(conn_id, database.as_deref(), cx));
+                    }
+                    TabEvent::PickConnection => this.pick_connection(window, cx),
                 }
-                TabEvent::OpenScript(text) => this.new_tab(text.clone(), None, window, cx),
-                TabEvent::Connected { conn_id, database } => {
-                    this.browser
-                        .update(cx, |b, cx| b.reveal(conn_id, database.as_deref(), cx));
-                }
-                TabEvent::PickConnection => this.pick_connection(window, cx),
             },
         ));
         self.query_tabs.insert(editor.entity_id(), query);
@@ -710,6 +721,40 @@ impl Workspace {
         self.active_query_tab()
             .clone()
             .update(cx, |q, cx| q.open_saved(saved, None, false, cx));
+    }
+
+    /// What a tab with no connection uses when it's asked to run: the
+    /// connection selected in the browser, or the project's, or the one
+    /// connection open anywhere. None when that's not clear.
+    fn default_target(&self, cx: &App) -> Option<(SavedConnection, Option<String>)> {
+        let browser = self.browser.read(cx);
+        if let Some((saved, db)) = browser.selected_target(cx) {
+            if browser.is_open(&saved.id) {
+                return Some((saved, db));
+            }
+        }
+        if let Some((saved, db)) = self
+            .project
+            .as_ref()
+            .and_then(|p| p.read(cx).open_target(cx))
+        {
+            return Some((saved, Some(db)));
+        }
+        let mut open: Vec<(SavedConnection, Option<String>)> = browser
+            .open_connections(cx)
+            .into_iter()
+            .map(|s| (s, None))
+            .collect();
+        for q in self.query_tabs.values() {
+            let q = q.read(cx);
+            if let Some(c) = &q.connection {
+                open.push((c.saved.clone(), q.database.clone()));
+            }
+        }
+        let first = open.first()?;
+        open.iter()
+            .all(|(s, _)| s.id == first.0.id)
+            .then(|| first.clone())
     }
 
     /// Offers the connections open in the browser, each on the database
