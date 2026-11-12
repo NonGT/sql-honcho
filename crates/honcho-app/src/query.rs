@@ -1229,14 +1229,16 @@ impl QueryTab {
                 })
                 .when(!enabled, |d| d.text_color(Theme::muted()))
         };
-        let why = (!self.can_explain()).then(|| {
-            let driver = self
-                .connection
-                .as_ref()
-                .map(|c| format!("{:?}", c.saved.driver))
-                .unwrap_or_default();
-            SharedString::from(format!("Explain isn't available for {driver} yet"))
-        });
+        let why = self
+            .connection
+            .as_ref()
+            .filter(|c| !c.session.capabilities().explain)
+            .map(|c| {
+                SharedString::from(format!(
+                    "Explain isn't available for {:?} yet",
+                    c.saved.driver
+                ))
+            });
         let tip = move |d: gpui::Stateful<gpui::Div>| match why.clone() {
             Some(text) => d.tooltip(move |_, cx| cx.new(|_| Tip(text.clone())).into()),
             None => d,
