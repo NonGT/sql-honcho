@@ -17,7 +17,13 @@ pub trait Secrets: Send + Sync {
 
 /// The OS credential store: Keychain, Windows Credential Manager, or the
 /// Secret Service on Linux.
-pub struct Keyring;
+///
+/// Values read are kept for the life of the app: each read can be a Keychain
+/// prompt on macOS, and a connection reads its password every time it opens.
+#[derive(Default)]
+pub struct Keyring {
+    cache: Mutex<HashMap<String, String>>,
+}
 
 impl Keyring {
     fn entry(key: &str) -> Result<keyring_core::Entry, SecretError> {
@@ -47,18 +53,33 @@ fn platform_store() -> keyring_core::Result<std::sync::Arc<keyring_core::Credent
 
 impl Secrets for Keyring {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        if let Some(v) = self.cache.lock().unwrap().get(key) {
+            return Ok(Some(v.clone()));
+        }
         match Self::entry(key)?.get_password() {
-            Ok(v) => Ok(Some(v)),
+            Ok(v) => {
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .insert(key.to_string(), v.clone());
+                Ok(Some(v))
+            }
             Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(store_error(e)),
         }
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
-        Self::entry(key)?.set_password(value).map_err(store_error)
+        Self::entry(key)?.set_password(value).map_err(store_error)?;
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+        Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretError> {
+        self.cache.lock().unwrap().remove(key);
         match Self::entry(key)?.delete_credential() {
             Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(store_error(e)),
@@ -116,11 +137,14 @@ mod tests {
     #[ignore]
     fn keyring_round_trip() {
         let key = format!("test-{}/password", uuid::Uuid::new_v4());
-        assert_eq!(Keyring.get(&key), Ok(None));
-        Keyring.set(&key, "ความลับ").unwrap();
-        assert_eq!(Keyring.get(&key), Ok(Some("ความลับ".into())));
-        Keyring.delete(&key).unwrap();
-        assert_eq!(Keyring.get(&key), Ok(None));
-        Keyring.delete(&key).unwrap();
+        let k = Keyring::default();
+        assert_eq!(k.get(&key), Ok(None));
+        k.set(&key, "ความลับ").unwrap();
+        assert_eq!(k.get(&key), Ok(Some("ความลับ".into())));
+        // a fresh one reads the store, not the cache
+        assert_eq!(Keyring::default().get(&key), Ok(Some("ความลับ".into())));
+        k.delete(&key).unwrap();
+        assert_eq!(k.get(&key), Ok(None));
+        k.delete(&key).unwrap();
     }
 }
