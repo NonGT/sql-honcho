@@ -51,6 +51,9 @@ pub struct ProjectPane {
     outcome: Option<(String, bool)>,
     selected: Option<usize>,
     menu: Option<(usize, Point<Pixels>)>,
+    /// The entries are from this session's comparison, not the last one
+    /// saved; only then can they be pulled or applied.
+    fresh: bool,
 }
 
 impl EventEmitter<ProjectEvent> for ProjectPane {}
@@ -87,7 +90,12 @@ impl ProjectPane {
             outcome: None,
             selected: None,
             menu: None,
+            fresh: false,
         };
+        // what it was last time, while it's compared again
+        if let Some(entries) = this.project.last_status() {
+            this.entries = entries;
+        }
         this.refresh(cx);
         this
     }
@@ -157,7 +165,14 @@ impl ProjectPane {
                 this.update(cx, |this, cx| {
                     match result {
                         Ok(entries) => {
+                            let project = this.project.clone();
+                            let saved = entries.clone();
+                            cx.background_spawn(async move {
+                                let _ = project.save_status(&saved);
+                            })
+                            .detach();
                             this.entries = entries;
+                            this.fresh = true;
                             this.state = State::Idle;
                         }
                         Err(e) => {
@@ -177,6 +192,9 @@ impl ProjectPane {
 
     /// Writes the server's version of these entries into their files.
     pub fn pull(&mut self, which: Vec<usize>, cx: &mut Context<Self>) {
+        if !self.fresh {
+            return;
+        }
         let driver = self
             .saved(cx)
             .map(|s| s.driver)
@@ -199,6 +217,9 @@ impl ProjectPane {
     /// Runs these entries' files against the database, in order, carrying
     /// on past failures.
     pub fn apply(&mut self, which: Vec<usize>, cx: &mut Context<Self>) {
+        if !self.fresh {
+            return;
+        }
         let Some(saved) = self.saved(cx) else {
             return;
         };
@@ -428,6 +449,11 @@ impl ProjectPane {
     }
 
     #[cfg(test)]
+    pub fn is_fresh(&self) -> bool {
+        self.fresh
+    }
+
+    #[cfg(test)]
     pub fn outcome(&self) -> Option<&str> {
         self.outcome.as_ref().map(|(s, _)| s.as_str())
     }
@@ -564,10 +590,11 @@ impl Render for ProjectPane {
                 actions.push(("Open file", MenuAction::Open));
             }
             actions.push(("Compare with server", MenuAction::Compare));
-            if e.server.is_some() {
+            let fresh = self.fresh && !busy;
+            if e.server.is_some() && fresh {
                 actions.push(("Pull from server", MenuAction::Pull));
             }
-            if e.file.is_some() {
+            if e.file.is_some() && fresh {
                 actions.push(("Apply to server…", MenuAction::Apply));
             }
             Some(
@@ -672,12 +699,16 @@ impl Render for ProjectPane {
                             button("project-refresh", "Refresh")
                                 .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                         )
-                        .child(button("project-pull", "Pull").on_click(
-                            cx.listener(|this, _, window, cx| this.pull_changes(window, cx)),
-                        ))
-                        .child(button("project-apply", "Apply").on_click(
-                            cx.listener(|this, _, window, cx| this.apply_changes(window, cx)),
-                        ))
+                        .when(self.fresh, |d| {
+                            d.child(button("project-pull", "Pull").on_click(
+                                cx.listener(|this, _, window, cx| this.pull_changes(window, cx)),
+                            ))
+                            .child(
+                                button("project-apply", "Apply").on_click(cx.listener(
+                                    |this, _, window, cx| this.apply_changes(window, cx),
+                                )),
+                            )
+                        })
                     })),
             )
             .children(state.map(|(text, err)| {

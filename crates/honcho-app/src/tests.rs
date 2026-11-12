@@ -1556,6 +1556,44 @@ fn completes_tables_and_alias_columns(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn completion_knows_last_times_names_straight_away(cx: &mut TestAppContext) {
+    use honcho_core::complete::Schema;
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("SELECT * FROM orders o WHERE o.");
+    wait_for_menu(&ws, cx, "id");
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+
+    // as after a restart: no catalog in memory, nothing asked yet
+    let saved = cx.update(|_, cx| {
+        cx.set_global(crate::catalog::Catalogs::default());
+        cx.global::<Connections>().store.connections()[0].clone()
+    });
+    let catalog = cx.update(|_, cx| crate::catalog::Catalogs::get(&saved, cx));
+    catalog.read_with(cx, |c, _| {
+        let v = c.view(Some("app"));
+        assert!(v.objects("app").unwrap().iter().any(|o| o.name == "orders"));
+        assert_eq!(v.columns("app", None, "orders").unwrap().len(), 3);
+        assert!(v.databases().is_some());
+        assert!(c.is_stale());
+    });
+    // what was used is fetched again
+    catalog.update(cx, |c, cx| c.revalidate(cx));
+    wait_until(cx, |cx| catalog.read_with(cx, |c, _| !c.is_stale()));
+    catalog.read_with(cx, |c, _| {
+        assert_eq!(
+            c.view(Some("app"))
+                .columns("app", None, "orders")
+                .unwrap()
+                .len(),
+            3
+        )
+    });
+}
+
+#[gpui::test]
 fn keywords_complete_without_a_connection(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     cx.simulate_input("sel");
@@ -2047,6 +2085,33 @@ fn project_pulls_compares_and_opens_files(cx: &mut TestAppContext) {
 
 fn text_of_tab_is(ws: &Entity<Workspace>, cx: &mut VisualTestContext, needle: &str) -> bool {
     text(ws, cx).contains(needle)
+}
+
+#[gpui::test]
+fn a_project_shows_its_last_comparison_while_it_compares(cx: &mut TestAppContext) {
+    use honcho_db::project::Status::*;
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let (dir, pane) = open_project(&ws, cx, "fake db");
+    let before = statuses(&pane, cx);
+    assert_eq!(before[0], ("order_total".to_string(), ServerOnly));
+    cx.run_until_parked();
+
+    // opened again: the old rows straight away, but nothing to pull or
+    // apply until they've been compared again
+    let project = honcho_db::project::Project::open(dir.path()).unwrap();
+    ws.update_in(cx, |ws, window, cx| {
+        ws.show_project_for_test(project, window, cx)
+    });
+    let pane = ws.read_with(cx, |ws, _| ws.project().unwrap().clone());
+    assert_eq!(statuses(&pane, cx), before);
+    assert!(pane.read_with(cx, |p, _| p.is_busy() && !p.is_fresh()));
+    pane.update(cx, |p, cx| p.pull(vec![0], cx));
+    assert!(!dir.path().join("functions/order_total.sql").exists());
+
+    wait_until(cx, |cx| pane.read_with(cx, |p, _| !p.is_busy()));
+    assert!(pane.read_with(cx, |p, _| p.is_fresh()));
+    assert_eq!(statuses(&pane, cx), before);
 }
 
 #[gpui::test]

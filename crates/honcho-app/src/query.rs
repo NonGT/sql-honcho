@@ -403,10 +403,13 @@ impl QueryTab {
             .as_ref()
             .and_then(|c| c.read(cx).lost().map(str::to_string));
         if let Some(catalog) = &catalog {
-            if !result.missing.is_empty() {
-                let missing = result.missing.clone();
-                catalog.update(cx, |c, cx| c.fetch(&missing, cx));
-            }
+            let missing = result.missing.clone();
+            catalog.update(cx, |c, cx| {
+                if !missing.is_empty() {
+                    c.fetch(&missing, cx);
+                }
+                c.revalidate(cx);
+            });
         }
         self.editor.update(cx, |e, cx| {
             let rope = e.editor.rope();

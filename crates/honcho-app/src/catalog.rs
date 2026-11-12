@@ -2,9 +2,12 @@
 //! needed. Each connection's catalog has its own session so completion
 //! never waits behind a query running in a tab.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::time::Duration;
 
-use gpui::{App, AppContext, Context, Entity, Global};
+use gpui::{App, AppContext, Context, Entity, Global, Task};
 use honcho_config::SavedConnection;
 use honcho_core::complete::{Dialect, Kind, Need, Schema, SchemaColumn, SchemaObject};
 use honcho_db::{DriverKind, ObjectKind, ObjectRef, Scope, Session};
@@ -25,7 +28,9 @@ impl Catalogs {
         if let Some(c) = cx.global::<Catalogs>().0.get(&saved.id) {
             return c.clone();
         }
-        let catalog = cx.new(|_| Catalog::new(saved.clone()));
+        let file =
+            connections::cache_dir("completion-cache", cx).join(format!("{}.json", saved.id));
+        let catalog = cx.new(|_| Catalog::new(saved.clone(), file));
         cx.global_mut::<Catalogs>()
             .0
             .insert(saved.id.clone(), catalog.clone());
@@ -56,11 +61,49 @@ pub struct Catalog {
     reconnected: bool,
     /// Why completion is down to keywords, when the connection is gone.
     lost: Option<String>,
+    file: PathBuf,
+    /// Loaded from the last session's cache and not fetched again yet.
+    stale: HashSet<Need>,
+    /// Stale pieces completion just used, to fetch again.
+    touched: RefCell<Vec<Need>>,
+    save: Option<Task<()>>,
+}
+
+/// The catalog as saved between launches. Names and types only.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Cache {
+    server: String,
+    databases: Option<Vec<String>>,
+    objects: Vec<(String, Vec<CachedObject>)>,
+    columns: Vec<(TableKey, Vec<(String, String)>)>,
+}
+
+/// Schema, name, kind, detail.
+type CachedObject = (Option<String>, String, char, Option<String>);
+/// Database, schema, table.
+type TableKey = (String, Option<String>, String);
+
+fn kind_code(k: Kind) -> char {
+    match k {
+        Kind::View => 'v',
+        Kind::Procedure => 'p',
+        Kind::Function => 'f',
+        _ => 't',
+    }
+}
+
+fn code_kind(c: char) -> Kind {
+    match c {
+        'v' => Kind::View,
+        'p' => Kind::Procedure,
+        'f' => Kind::Function,
+        _ => Kind::Table,
+    }
 }
 
 impl Catalog {
-    fn new(saved: SavedConnection) -> Self {
-        Self {
+    fn new(saved: SavedConnection, file: PathBuf) -> Self {
+        let mut this = Self {
             saved,
             conn: Conn::Closed,
             databases: None,
@@ -70,7 +113,130 @@ impl Catalog {
             queued: Vec::new(),
             reconnected: false,
             lost: None,
+            file,
+            stale: HashSet::new(),
+            touched: RefCell::default(),
+            save: None,
+        };
+        this.warm();
+        this
+    }
+
+    /// Fills in what was known last time, to complete with straight away.
+    fn warm(&mut self) {
+        let Some(cache) = std::fs::read_to_string(&self.file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Cache>(&t).ok())
+            .filter(|c| c.server == connections::server_of(&self.saved))
+        else {
+            return;
+        };
+        if let Some(d) = cache.databases {
+            self.databases = Some(d);
+            self.stale.insert(Need::Databases);
         }
+        for (db, objects) in cache.objects {
+            let objects = objects
+                .into_iter()
+                .map(|(schema, name, kind, detail)| SchemaObject {
+                    schema,
+                    name,
+                    kind: code_kind(kind),
+                    detail,
+                })
+                .collect();
+            self.stale.insert(Need::Objects(db.clone()));
+            self.objects.insert(db, objects);
+        }
+        for ((db, schema, table), columns) in cache.columns {
+            let columns = columns
+                .into_iter()
+                .map(|(name, data_type)| SchemaColumn { name, data_type })
+                .collect();
+            self.stale
+                .insert(Need::Columns(db.clone(), schema.clone(), table.clone()));
+            self.columns.insert((db, schema, table), columns);
+        }
+    }
+
+    /// Writes what's known, a moment after the last piece arrived.
+    fn save_cache(&mut self, cx: &mut Context<Self>) {
+        self.save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let Ok((file, Ok(json))) = this.update(cx, |this, _| {
+                let cache = Cache {
+                    server: connections::server_of(&this.saved),
+                    databases: this.databases.clone(),
+                    objects: this
+                        .objects
+                        .iter()
+                        .map(|(db, o)| {
+                            let o = o
+                                .iter()
+                                .map(|o| {
+                                    (
+                                        o.schema.clone(),
+                                        o.name.clone(),
+                                        kind_code(o.kind),
+                                        o.detail.clone(),
+                                    )
+                                })
+                                .collect();
+                            (db.clone(), o)
+                        })
+                        .collect(),
+                    columns: this
+                        .columns
+                        .iter()
+                        .map(|(k, c)| {
+                            let c = c
+                                .iter()
+                                .map(|c| (c.name.clone(), c.data_type.clone()))
+                                .collect();
+                            (k.clone(), c)
+                        })
+                        .collect(),
+                };
+                (this.file.clone(), serde_json::to_string(&cache))
+            }) else {
+                return;
+            };
+            cx.background_spawn(async move {
+                let Some(dir) = file.parent() else { return };
+                let _ = std::fs::create_dir_all(dir);
+                let tmp = file.with_extension("tmp");
+                if std::fs::write(&tmp, json).is_ok() {
+                    let _ = std::fs::rename(&tmp, &file);
+                }
+            })
+            .await;
+        }));
+    }
+
+    /// Fetches again whatever completion just used from last time's cache.
+    pub fn revalidate(&mut self, cx: &mut Context<Self>) {
+        let touched: Vec<Need> = self
+            .touched
+            .take()
+            .into_iter()
+            .filter(|n| self.stale.remove(n))
+            .collect();
+        if !touched.is_empty() {
+            self.fetch(&touched, cx);
+        }
+    }
+
+    fn touch(&self, need: Need) {
+        if self.stale.contains(&need) {
+            self.touched.borrow_mut().push(need);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_stale(&self) -> bool {
+        !self.stale.is_empty()
     }
 
     /// Forgets everything, e.g. after DDL ran or on request.
@@ -79,6 +245,8 @@ impl Catalog {
         self.objects.clear();
         self.columns.clear();
         self.asked.clear();
+        self.stale.clear();
+        self.touched.take();
         // and a lost connection gets another go
         if matches!(self.conn, Conn::Failed) {
             self.conn = Conn::Closed;
@@ -219,8 +387,12 @@ impl Catalog {
                         this.columns.insert((db, schema, t), c);
                     }
                     // a table that doesn't exist yet, say: leave it asked
-                    _ => {}
+                    _ => {
+                        cx.notify();
+                        return;
+                    }
                 }
+                this.save_cache(cx);
                 cx.notify();
             })
             .ok();
@@ -304,11 +476,15 @@ impl Schema for View<'_> {
     }
 
     fn databases(&self) -> Option<&[String]> {
-        self.catalog?.databases.as_deref()
+        let catalog = self.catalog?;
+        catalog.touch(Need::Databases);
+        catalog.databases.as_deref()
     }
 
     fn objects(&self, database: &str) -> Option<&[SchemaObject]> {
-        self.catalog?.objects.get(database).map(Vec::as_slice)
+        let catalog = self.catalog?;
+        catalog.touch(Need::Objects(database.to_string()));
+        catalog.objects.get(database).map(Vec::as_slice)
     }
 
     fn columns(
@@ -320,23 +496,23 @@ impl Schema for View<'_> {
         let catalog = self.catalog?;
         let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
         // names in SQL are often typed in another case than the server's
-        catalog
-            .columns
-            .get(&(
-                database.to_string(),
-                schema.map(str::to_string),
-                table.to_string(),
-            ))
-            .or_else(|| {
-                catalog.columns.iter().find_map(|((d, s, t), c)| {
-                    let schema_matches = match (s, schema) {
-                        (Some(a), Some(b)) => same(a, b),
-                        (None, None) => true,
-                        _ => false,
-                    };
-                    (same(d, database) && schema_matches && same(t, table)).then_some(c)
-                })
+        let key = (
+            database.to_string(),
+            schema.map(str::to_string),
+            table.to_string(),
+        );
+        let found = catalog.columns.get_key_value(&key).or_else(|| {
+            catalog.columns.iter().find(|((d, s, t), _)| {
+                let schema_matches = match (s, schema) {
+                    (Some(a), Some(b)) => same(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                same(d, database) && schema_matches && same(t, table)
             })
-            .map(Vec::as_slice)
+        })?;
+        let (d, s, t) = found.0.clone();
+        catalog.touch(Need::Columns(d, s, t));
+        Some(found.1.as_slice())
     }
 }

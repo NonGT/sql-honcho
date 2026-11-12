@@ -38,6 +38,43 @@ impl Connections {
     }
 }
 
+/// What a connection's caches were made from; a change means they're of
+/// some other server or database.
+pub fn server_of(saved: &SavedConnection) -> String {
+    serde_json::json!([
+        saved.driver,
+        saved.host,
+        saved.port,
+        saved.user,
+        saved.database,
+        saved.ssh
+    ])
+    .to_string()
+}
+
+/// Where a kind of per-connection cache goes, next to connections.json.
+pub fn cache_dir(kind: &str, cx: &App) -> std::path::PathBuf {
+    cx.global::<Connections>().store.path().with_file_name(kind)
+}
+
+/// Deletes the caches of connections that aren't saved any more.
+pub fn forget_caches(saved: &std::collections::HashSet<String>, cx: &App) {
+    for kind in ["browser-cache", "completion-cache"] {
+        let Ok(files) = std::fs::read_dir(cache_dir(kind, cx)) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let name = f.file_name().to_string_lossy().to_string();
+            if name
+                .strip_suffix(".json")
+                .is_some_and(|id| !saved.contains(id))
+            {
+                let _ = std::fs::remove_file(f.path());
+            }
+        }
+    }
+}
+
 /// On macOS each Keychain item asks separately, so every secret goes in
 /// one. Elsewhere one entry per secret is fine, and Windows caps an entry
 /// at 2.5KB.
