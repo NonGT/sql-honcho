@@ -1090,7 +1090,7 @@ impl ObjectBrowser {
             return;
         };
         // saved for another server or database
-        if cache.server != server_of(&saved) {
+        if cache.server != connections::server_of(&saved) {
             return;
         }
         for (path, items) in cache.nodes {
@@ -1126,7 +1126,7 @@ impl ObjectBrowser {
                         })
                         .collect();
                     serde_json::to_string(&Cache {
-                        server: server_of(&saved),
+                        server: connections::server_of(&saved),
                         nodes,
                     })
                     .ok()
@@ -1360,28 +1360,8 @@ struct Cache {
     nodes: Vec<(Path, Vec<Item>)>,
 }
 
-/// What the cache was loaded from; a change means it's of something else.
-fn server_of(saved: &SavedConnection) -> String {
-    serde_json::json!([
-        saved.driver,
-        saved.host,
-        saved.port,
-        saved.user,
-        saved.database,
-        saved.ssh
-    ])
-    .to_string()
-}
-
-fn cache_dir(cx: &App) -> std::path::PathBuf {
-    cx.global::<Connections>()
-        .store
-        .path()
-        .with_file_name("browser-cache")
-}
-
 fn cache_file(id: &str, cx: &App) -> std::path::PathBuf {
-    cache_dir(cx).join(format!("{id}.json"))
+    connections::cache_dir("browser-cache", cx).join(format!("{id}.json"))
 }
 
 enum Fetched {
@@ -1798,17 +1778,7 @@ impl ObjectBrowser {
             .filter(|id| !ids.contains(*id))
             .cloned()
             .collect();
-        if let Ok(files) = std::fs::read_dir(cache_dir(cx)) {
-            for f in files.flatten() {
-                let name = f.file_name().to_string_lossy().to_string();
-                if name
-                    .strip_suffix(".json")
-                    .is_some_and(|id| !ids.contains(id))
-                {
-                    let _ = std::fs::remove_file(f.path());
-                }
-            }
-        }
+        connections::forget_caches(&ids, cx);
         for id in gone {
             if let Some(Conn::Open(s)) = self.conns.remove(&id) {
                 cx.background_spawn(async move { s.close().await }).detach();

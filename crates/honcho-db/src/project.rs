@@ -23,6 +23,7 @@ use crate::{DbError, DriverKind, ObjectKind, ObjectRef, QueryEvent, Result, Scop
 
 pub const MANIFEST: &str = "sql-honcho.json";
 const STATE_DIR: &str = ".sql-honcho";
+const LAST_STATUS: &str = "last-status.json";
 const BASELINE: &str = "baseline.json";
 
 pub const KINDS: [ObjectKind; 4] = [
@@ -149,13 +150,35 @@ impl Project {
             .unwrap_or_default()
     }
 
-    fn save_baseline(&self, mut baseline: Baseline) -> Result<()> {
+    /// The last comparison, to show while it's done again. Stale by
+    /// nature: never pull or apply from it.
+    pub fn last_status(&self) -> Option<Vec<Entry>> {
+        let path = self.root.join(STATE_DIR).join(LAST_STATUS);
+        let (database, entries): (String, Vec<Entry>) =
+            serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+        (database == self.manifest.database).then_some(entries)
+    }
+
+    pub fn save_status(&self, entries: &[Entry]) -> Result<()> {
+        let dir = self.state_dir()?;
+        let path = dir.join(LAST_STATUS);
+        let text = serde_json::to_string(&(&self.manifest.database, entries))
+            .map_err(|e| DbError::Other(e.to_string()))?;
+        fs::write(&path, text).map_err(|e| io(&path, e))
+    }
+
+    fn state_dir(&self) -> Result<PathBuf> {
         let dir = self.root.join(STATE_DIR);
         fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
         let ignore = dir.join(".gitignore");
         if !ignore.exists() {
             fs::write(&ignore, "*\n").map_err(|e| io(&ignore, e))?;
         }
+        Ok(dir)
+    }
+
+    fn save_baseline(&self, mut baseline: Baseline) -> Result<()> {
+        let dir = self.state_dir()?;
         baseline.database = self.manifest.database.clone();
         let path = dir.join(BASELINE);
         let text = serde_json::to_string_pretty(&baseline).expect("baseline serialises");
@@ -303,7 +326,7 @@ pub fn normalise(text: &str, kind: ObjectKind) -> String {
     format!("{name}{}", tidy(&create[end..]))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Same,
     /// The file changed since it was last pulled or applied.
@@ -320,7 +343,7 @@ pub enum Status {
     ServerOnly,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     pub object: ObjectRef,
     /// Relative to the project root.
