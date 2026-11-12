@@ -103,7 +103,8 @@ impl PlanView {
         };
         let operation = div()
             .flex_1()
-            .min_w_0()
+            .min_w(px(140.))
+            .overflow_hidden()
             .flex()
             .items_center()
             .gap_1()
@@ -141,7 +142,7 @@ impl PlanView {
             .when(selected, |d| d.bg(Theme::selection()))
             .when(!selected, |d| d.hover(|d| d.bg(Theme::current_line())))
             .child(operation)
-            .child(cell(220.).text_color(Theme::muted()).child(object))
+            .child(object_cell().text_color(Theme::muted()).child(object))
             .child(number(n.est_rows.map(count).unwrap_or_default(), None))
             .when(analyzed, |d| {
                 d.child(number(actual, misestimated.then(Theme::warning)))
@@ -226,8 +227,16 @@ fn cell(width: f32) -> gpui::Div {
         .whitespace_nowrap()
 }
 
+fn object_cell() -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w(px(60.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+}
+
 fn number(text: String, color: Option<Hsla>) -> gpui::Div {
-    cell(80.)
+    cell(72.)
         .flex()
         .justify_end()
         .when_some(color, |d, c| d.text_color(c))
@@ -285,16 +294,12 @@ impl Render for PlanView {
             .text_color(Theme::muted())
             .border_b_1()
             .border_color(Theme::border())
-            .child(div().flex_1().child("Operation"))
-            .child(cell(220.).child("Object"))
-            .child(header("Est. rows", 80.))
-            .when(analyzed, |d| d.child(header("Rows", 80.)))
-            .child(header(if analyzed { "Time" } else { "Cost" }, 80.))
-            .child(cell(BAR + 40.).child(if analyzed {
-                "Share of time"
-            } else {
-                "Share of cost"
-            }));
+            .child(div().flex_1().min_w(px(140.)).child("Operation"))
+            .child(object_cell().child("Object"))
+            .child(header("Est. rows", 72.))
+            .when(analyzed, |d| d.child(header("Rows", 72.)))
+            .child(header(if analyzed { "Time" } else { "Cost" }, 72.))
+            .child(cell(BAR + 40.).child("Share"));
         let totals = (!self.plan.totals.is_empty()).then(|| {
             div()
                 .px_2()
@@ -316,6 +321,7 @@ impl Render for PlanView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .children(totals)
@@ -333,7 +339,7 @@ impl Render for PlanView {
                 div()
                     .id("plan-details")
                     .flex_none()
-                    .w(px(300.))
+                    .w(px(260.))
                     .p_2()
                     .border_l_1()
                     .border_color(Theme::border())
