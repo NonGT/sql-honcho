@@ -461,3 +461,63 @@ it!(project_round_trip, |s| {
     let events = run(&s, &sql).await;
     assert_eq!(rows_of(&events), vec![vec![Value::Int(15)]], "{sql}");
 });
+
+async fn explain(s: &Session, sql: &str, analyze: bool) -> crate::Result<crate::Plan> {
+    let mut handle = s.run(sql, crate::RunMode::Explain { analyze });
+    let mut plan = None;
+    while let Some(e) = handle.next().await {
+        match e {
+            QueryEvent::Plan(p) => plan = Some(*p),
+            QueryEvent::Finished(Err(e)) => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(plan.expect("a plan"))
+}
+
+it!(explains_a_join, |s| {
+    let sql = "SELECT u.email, o.amount FROM orders o JOIN users u ON u.id = o.user_id;";
+    let plan = explain(&s, sql, false).await.unwrap();
+    assert!(!plan.analyzed);
+    let mut objects = Vec::new();
+    fn walk(n: &crate::PlanNode, out: &mut Vec<String>) {
+        out.extend(n.object.clone());
+        n.children.iter().for_each(|c| walk(c, out));
+    }
+    walk(&plan.root, &mut objects);
+    objects.sort();
+    assert_eq!(objects, ["orders o", "users u"]);
+
+    let plan = explain(&s, sql, true).await.unwrap();
+    assert!(plan.analyzed);
+    assert!(plan.root.actual_ms.is_some());
+    assert!(plan.totals.iter().any(|(k, _)| k == "Execution Time"));
+});
+
+it!(analyze_rolls_back_what_it_ran, |s| {
+    let count = "SELECT count(*) FROM orders";
+    let before = rows_of(&run(&s, count).await);
+    explain(&s, "DELETE FROM orders", true).await.unwrap();
+    assert_eq!(rows_of(&run(&s, count).await), before);
+    assert!(!s.in_transaction().await.unwrap());
+
+    // inside the user's transaction: only the explained part is undone
+    run(&s, "BEGIN; CREATE TEMP TABLE kept (x int)").await;
+    explain(&s, "INSERT INTO kept VALUES (1)", true)
+        .await
+        .unwrap();
+    let err = explain(&s, "INSERT INTO kept VALUES ('x')", true).await;
+    assert!(matches!(err, Err(DbError::Query { .. })), "{err:?}");
+    assert!(s.in_transaction().await.unwrap());
+    let events = run(&s, "SELECT count(*) FROM kept").await;
+    assert_eq!(rows_of(&events), vec![vec![Value::Int(0)]], "{events:?}");
+    run(&s, "ROLLBACK").await;
+});
+
+it!(explain_errors_point_at_the_line, |s| {
+    let err = explain(&s, "SELECT\n  nope\nFROM orders", false).await;
+    match err {
+        Err(DbError::Query { line, .. }) => assert_eq!(line, Some(2)),
+        other => panic!("{other:?}"),
+    }
+});

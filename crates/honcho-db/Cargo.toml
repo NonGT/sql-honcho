@@ -15,7 +15,7 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2"
 tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono", "sql-browser-tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }

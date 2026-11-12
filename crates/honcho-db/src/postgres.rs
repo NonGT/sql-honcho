@@ -7,6 +7,7 @@
 //! metadata comes from side connections.
 
 mod convert;
+mod explain;
 mod split;
 mod tls;
 
@@ -24,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::script::Statement;
 use crate::types::*;
-use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink};
+use crate::{Canceller, Connection, DbError, Driver, Plan, Result, ResultSink};
 
 pub use split::split;
 
@@ -417,6 +418,50 @@ impl Connection for PostgresConnection {
         result
     }
 
+    async fn explain(&mut self, sql: &str, analyze: bool) -> Result<Plan> {
+        let token = self.cancel.lock().unwrap().clone();
+        let statements = split(sql);
+        let statement = statements
+            .iter()
+            .find(|s| !s.text.trim().is_empty())
+            .ok_or_else(|| DbError::Other("Nothing to explain.".into()))?;
+        let text = explain::sql(statement.text.trim_end().trim_end_matches(';'), analyze);
+        // ANALYZE runs the statement; its changes are rolled back, and a
+        // savepoint keeps the user's own transaction alive if it fails
+        let (open, close) = match analyze {
+            false => (None, None),
+            true if self.in_transaction().await? => (
+                Some("SAVEPOINT honcho_explain"),
+                Some("ROLLBACK TO SAVEPOINT honcho_explain; RELEASE SAVEPOINT honcho_explain"),
+            ),
+            true => (Some("BEGIN"), Some("ROLLBACK")),
+        };
+        if let Some(open) = open {
+            self.client()?
+                .simple_query(open)
+                .await
+                .map_err(plain_error)?;
+        }
+        let at = Statement {
+            text: &text,
+            ..*statement
+        };
+        let result = plan_text(&self.main, &at, &token).await;
+        if let Some(close) = close {
+            let undone = self
+                .client()?
+                .simple_query(close)
+                .await
+                .map_err(plain_error);
+            if result.is_ok() {
+                undone?;
+            }
+        }
+        // notices raised while it ran would otherwise turn up after the next query
+        while self.main.notices.try_recv().is_ok() {}
+        explain::parse(&result?, analyze)
+    }
+
     fn statements<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
         split(sql)
     }
@@ -773,6 +818,34 @@ async fn run(
         return Err(DbError::Cancelled);
     }
     Ok(())
+}
+
+/// The plan EXPLAIN sends, one line per row.
+async fn plan_text(
+    pg: &Pg,
+    statement: &Statement<'_>,
+    token: &CancellationToken,
+) -> Result<String> {
+    let query = pg.client.simple_query(statement.text);
+    tokio::pin!(query);
+    let result = tokio::select! {
+        biased;
+        _ = token.cancelled() => {
+            let _ = pg.client.cancel_token().cancel_query(pg.tls.clone()).await;
+            let _ = query.await;
+            return Err(DbError::Cancelled);
+        }
+        result = &mut query => result,
+    };
+    let messages = result.map_err(|e| statement_error(e, statement))?;
+    let lines: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| match m {
+            SimpleQueryMessage::Row(r) => r.get(0),
+            _ => None,
+        })
+        .collect();
+    Ok(lines.join("\n"))
 }
 
 /// Whether the statement's count is rows it changed, rather than nothing
