@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{App, Global, Hsla, Task};
-use honcho_config::{ColorTag, ConnectionStore, Keyring, SavedConnection, Secrets};
+use honcho_config::{Cached, ColorTag, ConnectionStore, Keyring, SavedConnection, Secrets};
 use honcho_db::{ConnectConfig, DbError, DbRuntime, Driver, DriverKind, Session, SessionOptions};
 
 use crate::theme::c;
@@ -29,7 +29,7 @@ impl Connections {
         let runtime = DbRuntime::new().expect("couldn't start the database runtime");
         cx.set_global(Connections {
             store,
-            secrets: Arc::new(Keyring::default()),
+            secrets: Arc::new(Cached::new(Keyring)),
             runtime: Arc::new(runtime),
             load_error,
         });

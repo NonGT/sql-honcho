@@ -17,12 +17,52 @@ pub trait Secrets: Send + Sync {
 
 /// The OS credential store: Keychain, Windows Credential Manager, or the
 /// Secret Service on Linux.
-///
-/// Values read are kept for the life of the app: each read can be a Keychain
-/// prompt on macOS, and a connection reads its password every time it opens.
-#[derive(Default)]
-pub struct Keyring {
+pub struct Keyring;
+
+/// Keeps what another store returns for the life of the app. On macOS each
+/// Keychain read can be a prompt, and opening a connection reads its
+/// password from several places at once (the tab, the browser, completion).
+pub struct Cached<S> {
+    inner: S,
+    /// Held across a read of the inner store, so reads that arrive while one
+    /// is waiting on a prompt use its answer rather than asking again.
     cache: Mutex<HashMap<String, String>>,
+}
+
+impl<S: Secrets> Cached<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            cache: Mutex::default(),
+        }
+    }
+}
+
+impl<S: Secrets> Secrets for Cached<S> {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = cache.get(key) {
+            return Ok(Some(v.clone()));
+        }
+        let v = self.inner.get(key)?;
+        if let Some(v) = &v {
+            cache.insert(key.to_string(), v.clone());
+        }
+        Ok(v)
+    }
+
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.set(key, value)?;
+        cache.insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), SecretError> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.remove(key);
+        self.inner.delete(key)
+    }
 }
 
 impl Keyring {
@@ -53,33 +93,18 @@ fn platform_store() -> keyring_core::Result<std::sync::Arc<keyring_core::Credent
 
 impl Secrets for Keyring {
     fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
-        if let Some(v) = self.cache.lock().unwrap().get(key) {
-            return Ok(Some(v.clone()));
-        }
         match Self::entry(key)?.get_password() {
-            Ok(v) => {
-                self.cache
-                    .lock()
-                    .unwrap()
-                    .insert(key.to_string(), v.clone());
-                Ok(Some(v))
-            }
+            Ok(v) => Ok(Some(v)),
             Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(store_error(e)),
         }
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
-        Self::entry(key)?.set_password(value).map_err(store_error)?;
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), value.to_string());
-        Ok(())
+        Self::entry(key)?.set_password(value).map_err(store_error)
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretError> {
-        self.cache.lock().unwrap().remove(key);
         match Self::entry(key)?.delete_credential() {
             Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(store_error(e)),
@@ -131,18 +156,64 @@ impl Secrets for MemorySecrets {
 mod tests {
     use super::*;
 
+    /// Counts reads, each taking a while like a prompt does.
+    #[derive(Default)]
+    struct Slow {
+        inner: MemorySecrets,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Secrets for Slow {
+        fn get(&self, key: &str) -> Result<Option<String>, SecretError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> Result<(), SecretError> {
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> Result<(), SecretError> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[test]
+    fn reads_at_the_same_time_ask_once() {
+        let slow = Slow::default();
+        slow.inner.set("c/password", "pw").unwrap();
+        let cached = std::sync::Arc::new(Cached::new(slow));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let c = cached.clone();
+                std::thread::spawn(move || c.get("c/password"))
+            })
+            .collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), Ok(Some("pw".into())));
+        }
+        assert_eq!(cached.get("c/password"), Ok(Some("pw".into())));
+        let reads = |c: &Cached<Slow>| c.inner.reads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(reads(&cached), 1);
+
+        // a new value replaces the old without another read
+        cached.set("c/password", "new").unwrap();
+        assert_eq!(cached.get("c/password"), Ok(Some("new".into())));
+        cached.delete("c/password").unwrap();
+        assert_eq!(cached.get("c/password"), Ok(None));
+        assert_eq!(reads(&cached), 2);
+    }
+
     // Touches the real credential store, so run it by hand:
     // cargo test -p honcho-config -- --ignored
     #[test]
     #[ignore]
     fn keyring_round_trip() {
         let key = format!("test-{}/password", uuid::Uuid::new_v4());
-        let k = Keyring::default();
+        let k = Cached::new(Keyring);
         assert_eq!(k.get(&key), Ok(None));
         k.set(&key, "ความลับ").unwrap();
         assert_eq!(k.get(&key), Ok(Some("ความลับ".into())));
-        // a fresh one reads the store, not the cache
-        assert_eq!(Keyring::default().get(&key), Ok(Some("ความลับ".into())));
+        assert_eq!(Keyring.get(&key), Ok(Some("ความลับ".into())));
         k.delete(&key).unwrap();
         assert_eq!(k.get(&key), Ok(None));
         k.delete(&key).unwrap();
