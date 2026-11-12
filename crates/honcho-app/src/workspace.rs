@@ -118,6 +118,7 @@ impl Workspace {
             }
         }
         this.open_paths(paths, window, cx);
+        this.reconnect_tabs(cx);
 
         let handle = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -590,29 +591,28 @@ impl Workspace {
         self.subscriptions.push(cx.subscribe_in(
             &query,
             window,
-            |this, _, event: &TabEvent, window, cx| {
-                match event {
-                    TabEvent::NeedConnection => match this.default_target(cx) {
-                        Some((saved, database)) => this
-                            .active_query_tab()
-                            .clone()
-                            .update(cx, |q, cx| q.open_saved(saved, database, false, cx)),
-                        None => this.pick_connection(window, cx),
-                    },
-                    TabEvent::OtherConnection => this.open_connections(window, cx),
-                    TabEvent::Applied { conn_id, database } => {
-                        if let Some(db) = database {
-                            this.browser
-                                .update(cx, |b, cx| b.reload_database(conn_id, db, cx));
-                        }
+            |this, q, event: &TabEvent, window, cx| match event {
+                TabEvent::NeedConnection => match this.default_target(cx) {
+                    Some((saved, database)) => {
+                        q.update(cx, |q, cx| q.open_saved(saved, database, false, cx))
                     }
-                    TabEvent::OpenScript(text) => this.new_tab(text.clone(), None, window, cx),
-                    TabEvent::Connected { conn_id, database } => {
+                    None => this.pick_connection(window, cx),
+                },
+                TabEvent::OtherConnection => this.open_connections(window, cx),
+                TabEvent::Applied { conn_id, database } => {
+                    if let Some(db) = database {
                         this.browser
-                            .update(cx, |b, cx| b.reveal(conn_id, database.as_deref(), cx));
+                            .update(cx, |b, cx| b.reload_database(conn_id, db, cx));
                     }
-                    TabEvent::PickConnection => this.pick_connection(window, cx),
                 }
+                TabEvent::OpenScript(text) => this.new_tab(text.clone(), None, window, cx),
+                TabEvent::Connected { conn_id, database } => {
+                    this.browser
+                        .update(cx, |b, cx| b.reveal(conn_id, database.as_deref(), cx));
+                    let path = q.read(cx).editor.read(cx).path.clone();
+                    remember_tab(path.as_deref(), conn_id, database.as_deref(), cx);
+                }
+                TabEvent::PickConnection => this.pick_connection(window, cx),
             },
         ));
         self.query_tabs.insert(editor.entity_id(), query);
@@ -1566,6 +1566,69 @@ impl Workspace {
             )
             .child("To start one, right-click a database in the Database tab and pick Save to project folder….")
     }
+}
+
+impl Workspace {
+    /// Puts the tabs open at launch back on what they were connected to:
+    /// a file on what it last ran against, other tabs on the last
+    /// connection used. Each gets its own session.
+    fn reconnect_tabs(&mut self, cx: &mut Context<Self>) {
+        let state = tab_state(cx);
+        for q in self.query_tabs.values() {
+            let path = q.read(cx).editor.read(cx).path.clone();
+            let remembered = path
+                .and_then(|p| state["files"].get(p.to_string_lossy().as_ref()).cloned())
+                .unwrap_or_else(|| state["last"].clone());
+            let Some(id) = remembered["connection"].as_str() else {
+                continue;
+            };
+            let database = remembered["database"].as_str().map(str::to_string);
+            let saved = cx
+                .global::<connections::Connections>()
+                .store
+                .connections()
+                .iter()
+                .find(|c| c.id == id)
+                .cloned();
+            if let Some(saved) = saved.filter(|s| connections::driver(s.driver).is_some()) {
+                q.update(cx, |q, cx| {
+                    if q.connection.is_none() {
+                        q.open_saved(saved, database, false, cx)
+                    }
+                });
+            }
+        }
+    }
+}
+
+fn tab_state_path(cx: &App) -> PathBuf {
+    cx.global::<connections::Connections>()
+        .store
+        .path()
+        .with_file_name("tabs.json")
+}
+
+fn tab_state(cx: &App) -> serde_json::Value {
+    std::fs::read_to_string(tab_state_path(cx))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Records where a tab connected, for the next launch.
+fn remember_tab(path: Option<&Path>, conn_id: &str, database: Option<&str>, cx: &App) {
+    let mut state = tab_state(cx);
+    let entry = serde_json::json!({ "connection": conn_id, "database": database });
+    if let Some(p) = path {
+        if !state["files"].is_object() {
+            state["files"] = serde_json::json!({});
+        }
+        state["files"][p.to_string_lossy().as_ref()] = entry.clone();
+    }
+    state["last"] = entry;
+    // written here rather than in the background, so two connects in a row
+    // can't finish out of order and keep the older one
+    let _ = std::fs::write(tab_state_path(cx), state.to_string());
 }
 
 fn project_state_path(cx: &App) -> PathBuf {

@@ -705,6 +705,79 @@ fn a_saved_password_is_read_once_to_connect(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_saved_password_is_kept_cleared_or_replaced(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (ws, cx) = open(cx, vec![]);
+    let store = Counting::default();
+    cx.update(|_, cx| {
+        cx.global_mut::<Connections>().secrets =
+            Arc::new(honcho_config::Cached::new(store.clone()));
+    });
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    fill(cx, ["shop", "db", "", "app", "old pw", ""]);
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    let saved_pw = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let c = cx.global::<Connections>().store.connections()[0].clone();
+            honcho_config::Secrets::get(store.inner.as_ref(), &c.password_key()).unwrap()
+        })
+    };
+    assert_eq!(saved_pw(cx).as_deref(), Some("old pw"));
+    press(cx, "escape");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+
+    // shown again: a stand-in, not a read
+    let reads = store.reads.load(SeqCst);
+    let save_again = |cx: &mut VisualTestContext, password_keys: &str| {
+        press(cx, "P-shift-c");
+        let d = dialog(&ws, cx).unwrap();
+        // name, host, port, user, then the password
+        press(cx, "tab tab tab tab");
+        press(cx, password_keys);
+        d.update(cx, |d, cx| d.save(cx));
+        cx.run_until_parked();
+        assert_eq!(status(&d, cx).as_deref(), Some("Saved."));
+        press(cx, "escape");
+        wait_until(cx, |cx| dialog(&ws, cx).is_none());
+    };
+    save_again(cx, "end");
+    assert_eq!(store.reads.load(SeqCst), reads, "untouched isn't read");
+    assert_eq!(saved_pw(cx).as_deref(), Some("old pw"));
+
+    // typing replaces it
+    press(cx, "P-shift-c");
+    press(cx, "tab tab tab tab end");
+    cx.simulate_input("x");
+    let d = dialog(&ws, cx).unwrap();
+    d.update(cx, |d, cx| d.save(cx));
+    cx.run_until_parked();
+    press(cx, "escape");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+    assert_eq!(saved_pw(cx).as_deref(), Some("x"));
+
+    // clearing it all leaves no password
+    save_again(cx, "P-a backspace");
+    assert_eq!(saved_pw(cx), None);
+}
+
+#[gpui::test]
+fn a_new_window_reconnects_to_the_last_connection(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    wait_for_target(&ws, cx, "app");
+    pick_database(&ws, cx, "analytics");
+    wait_for_target(&ws, cx, "analytics");
+
+    // the next launch, with the same saved state
+    let next = ws.update_in(cx, |_, window, cx| {
+        cx.new(|cx| Workspace::new(vec![], window, cx))
+    });
+    wait_for_target(&next, cx, "analytics");
+}
+
+#[gpui::test]
 fn the_connection_chip_offers_what_the_browser_has_open(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     let pick = |cx: &mut VisualTestContext| {
