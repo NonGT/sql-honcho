@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
-    ContentMask, Context, CursorStyle, Element, ElementId, Entity, FocusHandle, Focusable,
+    ContentMask, Context, CursorStyle, Element, ElementId, Entity, FocusHandle, Focusable, Font,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, ShapedLine,
     SharedString, Style, TextRun, Window,
@@ -160,6 +160,8 @@ pub struct ResultGrid {
     pub selection: Option<CellRange>,
     drag: Drag,
     metrics: Option<Metrics>,
+    /// The font cells were last drawn in, for fitting a column to them.
+    font: Option<(Font, Pixels)>,
     viewer: Option<Entity<EditorView>>,
 }
 
@@ -177,6 +179,7 @@ impl ResultGrid {
             selection: None,
             drag: Drag::None,
             metrics: None,
+            font: None,
             viewer: None,
         }
     }
@@ -398,6 +401,65 @@ impl ResultGrid {
         Hit::Cell(row, col)
     }
 
+    /// Widens or narrows a column to its header and longest value, as a
+    /// double click on a header edge does.
+    pub fn fit_column(&mut self, col: usize, window: &mut Window) {
+        let Some((font, font_size)) = self.font.clone() else {
+            return;
+        };
+        // shaping every row is slow on big results; in a monospace font the
+        // longest texts are the widest ones
+        let mut texts: Vec<String> = self.rows.iter().map(|r| cell_text(&r[col])).collect();
+        texts.sort_by_key(|t| std::cmp::Reverse(t.chars().count()));
+        texts.truncate(20);
+        let text_system = window.text_system().clone();
+        let width = |text: &str| {
+            let run = TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: Theme::text(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            text_system
+                .shape_line(
+                    SharedString::from(text.to_string()),
+                    font_size,
+                    &[run],
+                    None,
+                )
+                .width
+        };
+        let header = width(&self.columns[col].name) + PAD + SORT_BUTTON;
+        let cells = texts
+            .iter()
+            .map(|t| width(t) + PAD * 2.)
+            .fold(px(0.), |a, w| a.max(w));
+        // never past the view, so the column stays on screen whole
+        let max = self
+            .metrics
+            .map(|m| m.bounds.size.width - m.row_number_width)
+            .unwrap_or(px(800.))
+            .max(MIN_WIDTH);
+        self.widths[col] = header.max(cells).max(MIN_WIDTH).min(max);
+    }
+
+    #[cfg(test)]
+    pub fn width(&self, col: usize) -> Pixels {
+        self.widths[col]
+    }
+
+    /// Where the right edge of a column's header is on screen.
+    #[cfg(test)]
+    pub fn header_edge(&self, col: usize) -> Point<Pixels> {
+        let m = self.metrics.expect("drawn");
+        point(
+            m.bounds.left() + m.row_number_width - self.scroll.x + self.col_left(col + 1),
+            m.bounds.top() + HEADER_HEIGHT / 2.,
+        )
+    }
+
     fn last_row(&self) -> usize {
         self.rows.len().saturating_sub(1)
     }
@@ -432,6 +494,12 @@ impl ResultGrid {
                     self.clamp_scroll();
                 }
                 self.drag = Drag::ScrollX(e.position.x, self.scroll.x);
+            }
+            Hit::Header {
+                col, edge: true, ..
+            } if e.click_count == 2 => {
+                self.drag = Drag::None;
+                self.fit_column(col, window);
             }
             Hit::Header {
                 col, edge: true, ..
@@ -798,6 +866,20 @@ struct Text {
     line: ShapedLine,
 }
 
+/// A value as a cell shows it: one line, cut short.
+fn cell_text(v: &Value) -> String {
+    let mut text: String = v
+        .display(SHOWN_CHARS)
+        .chars()
+        .take(SHOWN_CHARS)
+        .map(|ch| if ch == '\n' || ch == '\r' { '⏎' } else { ch })
+        .collect();
+    if text.is_empty() {
+        text.push(' ');
+    }
+    text
+}
+
 struct Prepaint {
     quads: Vec<(Bounds<Pixels>, Hsla)>,
     /// Painted over the cells: header and row number backgrounds.
@@ -872,6 +954,7 @@ impl Element for GridElement {
         self.grid.update(cx, |grid, _| {
             let digits = grid.rows.len().max(1).to_string().len();
             let rn_w = em * (digits as f32 + 2.);
+            grid.font = Some((font.clone(), font_size));
             grid.metrics = Some(Metrics {
                 bounds,
                 row_number_width: rn_w,
@@ -937,15 +1020,7 @@ impl Element for GridElement {
                 let row = grid.row(r);
                 for &(c, x, w) in &cols {
                     let v = &row[c];
-                    let mut text: String = v
-                        .display(SHOWN_CHARS)
-                        .chars()
-                        .take(SHOWN_CHARS)
-                        .map(|ch| if ch == '\n' || ch == '\r' { '⏎' } else { ch })
-                        .collect();
-                    if text.is_empty() {
-                        text.push(' ');
-                    }
+                    let text = cell_text(v);
                     let color = if v.is_null() {
                         Theme::muted()
                     } else {

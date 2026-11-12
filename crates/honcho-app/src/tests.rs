@@ -883,6 +883,35 @@ fn grid_sorts_and_copies_a_block(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn double_click_on_a_header_edge_fits_the_column(cx: &mut TestAppContext) {
+    use gpui::{px, Modifiers, MouseButton};
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 5");
+    run(&ws, cx, "P-enter");
+    let grid = first_grid(&ws, cx);
+    let width = |cx: &mut VisualTestContext, c| grid.read_with(cx, |g, _| g.width(c));
+    assert_eq!(width(cx, 1), px(150.));
+
+    let at = grid.read_with(cx, |g, _| g.header_edge(1));
+    cx.simulate_click(at, Modifiers::none());
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    // "row 4" and the header fit in much less than the default
+    let fitted = width(cx, 1);
+    assert!(fitted < px(100.) && fitted > px(40.), "{fitted:?}");
+    // the other column and the selection are left alone
+    assert_eq!(width(cx, 0), px(150.));
+    assert!(grid.read_with(cx, |g, _| g.selection.is_none()));
+}
+
+#[gpui::test]
 fn copy_buttons_and_the_viewer(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     connect_fake(&ws, cx, None);
