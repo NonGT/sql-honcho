@@ -2349,7 +2349,7 @@ version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbc773e24e02d4ddd8395fd30dc147524273a83e54e0f312d986ea30de5f5646"
 dependencies = [
- "roxmltree",
+ "roxmltree 0.20.0",
 ]
 
 [[package]]
@@ -3222,6 +3222,7 @@ dependencies = [
  "directories",
  "futures-util",
  "mysql_async",
+ "roxmltree 0.21.2",
  "rusqlite",
  "russh",
  "rustls",
@@ -5817,6 +5818,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "rsa"
 version = "0.10.0-rc.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7226,7 +7236,7 @@ dependencies = [
 [[package]]
 name = "tiberius"
 version = "0.13.0"
-source = "git+https://github.com/NonGT/tiberius?rev=af18274c5e3b97436deb24aac45195af3273e889#af18274c5e3b97436deb24aac45195af3273e889"
+source = "git+https://github.com/NonGT/tiberius?rev=402184e62ec1f5402febe97c0a49f5a649213bb0#402184e62ec1f5402febe97c0a49f5a649213bb0"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -7261,7 +7271,7 @@ dependencies = [
 [[package]]
 name = "tiberius-macros"
 version = "0.1.0"
-source = "git+https://github.com/NonGT/tiberius?rev=af18274c5e3b97436deb24aac45195af3273e889#af18274c5e3b97436deb24aac45195af3273e889"
+source = "git+https://github.com/NonGT/tiberius?rev=402184e62ec1f5402febe97c0a49f5a649213bb0#402184e62ec1f5402febe97c0a49f5a649213bb0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7800,7 +7810,7 @@ dependencies = [
  "kurbo",
  "log",
  "pico-args",
- "roxmltree",
+ "roxmltree 0.20.0",
  "rustybuzz 0.20.1",
  "simplecss",
  "siphasher",

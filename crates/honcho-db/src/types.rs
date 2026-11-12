@@ -269,4 +269,6 @@ pub struct Capabilities {
     /// One connection can query across databases (MySQL, SQL Server).
     /// Without it, switching databases means a new connection.
     pub cross_database: bool,
+    /// [`Connection::explain`](crate::Connection::explain) works.
+    pub explain: bool,
 }

@@ -450,7 +450,7 @@ fn refuse_writes(conn: &dyn Connection, sql: &str) -> Option<DbError> {
 }
 
 fn more_than_one(conn: &dyn Connection, sql: &str) -> Option<DbError> {
-    let statements = conn.statements(sql);
+    let statements = conn.batches(sql);
     let real = statements
         .iter()
         .filter(|s| !s.text.trim().is_empty())

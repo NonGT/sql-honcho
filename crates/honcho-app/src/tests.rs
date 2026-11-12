@@ -1898,3 +1898,33 @@ fn explain_shows_the_plan_and_asks_before_analyzing_a_write(cx: &mut TestAppCont
     run(&ws, cx, "P-enter");
     assert!(shown_plan(&ws, cx).is_none());
 }
+
+#[gpui::test]
+fn the_explain_button_and_its_menu(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 3");
+    let click = |cx: &mut VisualTestContext, sel: &'static str| {
+        let at = cx
+            .debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{sel} shows"))
+            .center();
+        cx.simulate_click(at, Default::default());
+        cx.run_until_parked();
+    };
+    click(cx, "tab-explain");
+    wait_until(cx, |cx| shown_plan(&ws, cx).is_some());
+
+    press(cx, "P-a");
+    cx.simulate_input("update 3");
+    assert!(text(&ws, cx).contains("update 3"), "the editor keeps focus");
+    click(cx, "tab-explain-menu");
+    click(cx, "explain-analyze");
+    wait_until(cx, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("explain-analyze").is_none(),
+        "the menu closes"
+    );
+}

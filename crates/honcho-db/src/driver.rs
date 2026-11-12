@@ -42,6 +42,12 @@ pub trait Connection: Send {
         vec![Statement::whole(sql)]
     }
 
+    /// The pieces the server takes one at a time, for explaining one of
+    /// them: the statements, except where a batch is the unit (SQL Server).
+    fn batches<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
+        self.statements(sql)
+    }
+
     /// Something that can interrupt the next `execute` from another task.
     /// Taken right before each run.
     fn canceller(&self) -> Option<Box<dyn Canceller>>;
