@@ -5,7 +5,7 @@ use crate::types::{
     Capabilities, ColumnInfo, ConnectConfig, DriverKind, IndexInfo, ObjectKind, ObjectRef,
     RoutineParam, Scope,
 };
-use crate::{Result, ResultSink};
+use crate::{Plan, Result, ResultSink};
 
 #[async_trait]
 pub trait Driver: Send + Sync {
@@ -32,6 +32,12 @@ pub trait Connection: Send {
 
     /// The statements of the SQL, for checking read-only sessions. Drivers
     /// that send scripts whole needn't override it.
+    /// The plan for one statement. With `analyze` the statement runs, and
+    /// a driver that can undo its changes does.
+    async fn explain(&mut self, _sql: &str, _analyze: bool) -> Result<Plan> {
+        Err(crate::DbError::Unsupported("explain"))
+    }
+
     fn statements<'a>(&self, sql: &'a str) -> Vec<Statement<'a>> {
         vec![Statement::whole(sql)]
     }

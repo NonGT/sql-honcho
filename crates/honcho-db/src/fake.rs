@@ -11,6 +11,9 @@
 //! - `lose`: fail as if the connection dropped
 //! - `begin`, `commit`: open and close a transaction
 //!
+//! Explaining anything gives the plan from [`plan`]; `sleep MS` and
+//! `error TEXT` work there too.
+//!
 //! Connecting as user `bad` fails authentication; user `slow` never finishes
 //! connecting; user `flaky` can't connect while [`REFUSE_FLAKY`] is set.
 //! User `pg` gets a connection that, like Postgres, can't reach across
@@ -24,7 +27,9 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::types::*;
-use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink, Value};
+use crate::{
+    Canceller, Connection, DbError, Driver, Plan, PlanFormat, PlanNode, Result, ResultSink, Value,
+};
 
 /// Makes user `flaky` unable to connect, to test what happens when a
 /// reconnect fails.
@@ -105,6 +110,50 @@ const TYPES_ROW: &[TypeCase] = &[
 /// The row the `types` command returns.
 pub fn types_row() -> Vec<Value> {
     TYPES_ROW.iter().map(|(_, _, v)| v()).collect()
+}
+
+/// A join of a full scan of `orders` and an index lookup in `users`.
+pub fn plan(analyze: bool) -> Plan {
+    let actual = |rows: f64, ms: f64| PlanNode {
+        actual_rows: analyze.then_some(rows),
+        loops: analyze.then_some(1.0),
+        actual_ms: analyze.then_some(ms),
+        ..Default::default()
+    };
+    let orders = PlanNode {
+        operation: "Seq Scan".into(),
+        object: Some("orders".into()),
+        condition: Some("(amount > 10)".into()),
+        est_rows: Some(50_000.0),
+        est_cost: Some(900.0),
+        full_scan: true,
+        details: vec![("Parent Relationship".into(), "Outer".into())],
+        ..actual(48_000.0, 30.0)
+    };
+    let users = PlanNode {
+        operation: "Index Scan".into(),
+        object: Some("users".into()),
+        index: Some("users_pkey".into()),
+        est_rows: Some(1.0),
+        est_cost: Some(0.5),
+        ..actual(1.0, 4.0)
+    };
+    let root = PlanNode {
+        operation: "Hash Join".into(),
+        condition: Some("(orders.user_id = users.id)".into()),
+        est_rows: Some(1200.0),
+        est_cost: Some(1000.0),
+        children: vec![orders, users],
+        ..actual(9840.0, 40.0)
+    };
+    let totals = vec![("Planning Time".into(), "0.100 ms".into())];
+    Plan::new(
+        root,
+        analyze,
+        totals,
+        "{\"fake\": true}".into(),
+        PlanFormat::Json,
+    )
 }
 
 fn objects_in(database: &str) -> Vec<ObjectRef> {
@@ -190,6 +239,24 @@ impl Connection for FakeConnection {
             }
         }
         Ok(())
+    }
+
+    async fn explain(&mut self, sql: &str, analyze: bool) -> Result<Plan> {
+        let cancel = self.cancel.lock().unwrap().clone();
+        let statement = sql.trim().trim_end_matches(';');
+        let (cmd, arg) = statement.split_once(' ').unwrap_or((statement, ""));
+        match cmd {
+            "error" => return Err(DbError::query(arg)),
+            "sleep" => {
+                let ms = arg.trim().parse().unwrap_or(0);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                    _ = cancel.cancelled() => return Err(DbError::Cancelled),
+                }
+            }
+            _ => {}
+        }
+        Ok(plan(analyze))
     }
 
     fn statements<'a>(&self, sql: &'a str) -> Vec<crate::script::Statement<'a>> {

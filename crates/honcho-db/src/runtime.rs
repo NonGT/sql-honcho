@@ -141,9 +141,20 @@ impl Default for SessionOptions {
     }
 }
 
+/// How a run uses its SQL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunMode {
+    Execute,
+    /// Sends back a plan instead of results.
+    Explain {
+        analyze: bool,
+    },
+}
+
 enum Command {
     Execute {
         sql: String,
+        mode: RunMode,
         events: mpsc::Sender<QueryEvent>,
         cancel: CancellationToken,
     },
@@ -183,10 +194,16 @@ impl Session {
 
     /// Queue SQL to run. Events arrive on the handle, ending with `Finished`.
     pub fn execute(&self, sql: impl Into<String>) -> QueryHandle {
+        self.run(sql, RunMode::Execute)
+    }
+
+    /// Queue SQL to run in the given mode; `execute` is `RunMode::Execute`.
+    pub fn run(&self, sql: impl Into<String>, mode: RunMode) -> QueryHandle {
         let (events_tx, events) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let command = Command::Execute {
             sql: sql.into(),
+            mode,
             events: events_tx,
             cancel: cancel.clone(),
         };
@@ -322,6 +339,7 @@ async fn run_session(
         match command {
             Command::Execute {
                 sql,
+                mode,
                 events,
                 cancel,
             } => {
@@ -335,7 +353,14 @@ async fn run_session(
                     sink.finish(Err(DbError::Cancelled)).await;
                     continue;
                 }
-                if read_only {
+                if let RunMode::Explain { .. } = mode {
+                    if let Some(e) = more_than_one(conn.as_ref(), &sql) {
+                        sink.finish(Err(e)).await;
+                        continue;
+                    }
+                }
+                // an estimated plan never runs the statement
+                if read_only && mode != (RunMode::Explain { analyze: false }) {
                     if let Some(e) = refuse_writes(conn.as_ref(), &sql) {
                         sink.finish(Err(e)).await;
                         continue;
@@ -345,7 +370,15 @@ async fn run_session(
                 let canceller = conn.canceller();
                 let started = Instant::now();
                 let outcome = {
-                    let run = conn.execute(&sql, &mut sink);
+                    let run = async {
+                        match mode {
+                            RunMode::Execute => conn.execute(&sql, &mut sink).await,
+                            RunMode::Explain { analyze } => {
+                                let plan = conn.explain(&sql, analyze).await?;
+                                sink.plan(plan).await
+                            }
+                        }
+                    };
                     tokio::pin!(run);
                     tokio::select! {
                         biased;
@@ -414,6 +447,15 @@ fn refuse_writes(conn: &dyn Connection, sql: &str) -> Option<DbError> {
             line: s.line,
         })
     })
+}
+
+fn more_than_one(conn: &dyn Connection, sql: &str) -> Option<DbError> {
+    let statements = conn.statements(sql);
+    let real = statements
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .count();
+    (real > 1).then(|| DbError::Other("Explain takes one statement at a time.".into()))
 }
 
 // Stop taking work first, then answer whatever was already queued, so a
