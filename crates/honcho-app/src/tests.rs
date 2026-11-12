@@ -1885,7 +1885,12 @@ fn explain_shows_the_plan_and_asks_before_analyzing_a_write(cx: &mut TestAppCont
     cx.simulate_input("update 3");
     press(cx, "P-shift-e");
     wait_until(cx, |cx| cx.has_pending_prompt());
-    cx.simulate_prompt_answer("Run");
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!query_tab(&ws, cx).read_with(cx, |q, _| q.is_running()));
+    press(cx, "P-shift-e");
+    wait_until(cx, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Run and Roll Back");
     wait_until(cx, |cx| {
         shown_plan(&ws, cx).is_some_and(|p| p.read_with(cx, |p, _| p.plan.analyzed))
     });

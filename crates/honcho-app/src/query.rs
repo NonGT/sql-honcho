@@ -675,16 +675,17 @@ impl QueryTab {
                 return;
             }
         };
-        if let RunMode::Explain { analyze: true } = mode {
-            if script::write_reason(&target.text).is_some() {
+        // a read-only session refuses an analyzed write itself; no need to ask
+        if let (RunMode::Explain { analyze: true }, false) = (mode, conn.saved.read_only) {
+            let red = conn.saved.color == Some(ColorTag::Red);
+            if let Some((title, detail, run)) = analyze_warning(&target.text, &conn.saved.name, red)
+            {
                 let answer = window.prompt(
                     PromptLevel::Warning,
-                    "Explain Analyze runs the statement.",
-                    Some(
-                        "Its changes are rolled back afterwards, but sequences and \
-                         anything outside the database keep theirs.",
-                    ),
-                    &["Cancel", "Run"],
+                    &title,
+                    Some(&detail),
+                    // Cancel first so Enter doesn't confirm by reflex
+                    &["Cancel", run],
                     cx,
                 );
                 cx.spawn_in(window, async move |this, cx| {
@@ -1886,6 +1887,50 @@ impl QueryTab {
     }
 }
 
+/// What Explain Analyze would do that the user should agree to first: the
+/// title, the detail and the label of the button that runs it.
+fn analyze_warning(
+    sql: &str,
+    connection: &str,
+    red: bool,
+) -> Option<(String, String, &'static str)> {
+    let plain = "Explain without Analyze shows the plan without running anything.";
+    if script::write_reason(sql).is_none() {
+        return red.then(|| {
+            (
+                format!("Explain Analyze runs this query on {connection}."),
+                format!(
+                    "It takes as long and loads the server as much as running it does.\n\n{plain}"
+                ),
+                "Run",
+            )
+        });
+    }
+    let kind = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or("statement")
+        .to_ascii_uppercase();
+    let every_row = match script::unfiltered_write(sql) {
+        Some(_) => " It has no WHERE, so that is every row of the table.",
+        None => "",
+    };
+    Some((
+        format!("Explain Analyze runs this {kind} on {connection} for real."),
+        format!(
+            "Its changes are rolled back afterwards, but until then:\n\
+             • the rows it changes stay locked, and other sessions writing \
+             them wait.{every_row}\n\
+             • it takes as long and loads the server as much as running it does.\n\n\
+             Rolling back doesn't undo everything:\n\
+             • sequence values it uses aren't given back.\n\
+             • anything that reaches outside the database still happens.\n\n\
+             {plain}"
+        ),
+        "Run and Roll Back",
+    ))
+}
+
 const DEFINER_HINT: &str = "The DEFINER clause names another user, which takes extra \
                             privileges. Remove it to create the routine as yourself.";
 
@@ -2004,6 +2049,22 @@ mod tests {
         let mut ed = Editor::new(text);
         ed.set_cursor(cursor);
         ed
+    }
+
+    #[test]
+    fn analyze_asks_about_writes_and_about_reads_on_red_connections() {
+        let (title, detail, run) = analyze_warning("delete from t", "prod", false).unwrap();
+        assert_eq!(title, "Explain Analyze runs this DELETE on prod for real.");
+        assert!(detail.contains("every row"));
+        assert!(detail.contains("sequence"));
+        assert_eq!(run, "Run and Roll Back");
+        let (_, detail, _) =
+            analyze_warning("update t set a = 1 where id = 2", "prod", false).unwrap();
+        assert!(!detail.contains("every row"));
+        assert!(analyze_warning("select 1", "dev", false).is_none());
+        let (title, _, run) = analyze_warning("select 1", "prod", true).unwrap();
+        assert_eq!(title, "Explain Analyze runs this query on prod.");
+        assert_eq!(run, "Run");
     }
 
     #[test]
