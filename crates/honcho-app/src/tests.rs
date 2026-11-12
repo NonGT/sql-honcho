@@ -1928,3 +1928,31 @@ fn the_explain_button_and_its_menu(cx: &mut TestAppContext) {
         "the menu closes"
     );
 }
+
+#[gpui::test]
+fn sqlite_explains_but_has_no_analyze(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = sqlite_file(dir.path());
+    let (ws, cx) = open(cx, vec![path]);
+    let q = query_tab(&ws, cx);
+    wait_until(cx, |cx| q.read_with(cx, |q, _| q.connection.is_some()));
+    cx.simulate_input("select name from items where id = 1");
+    run(&ws, cx, "P-e");
+    let plan = shown_plan(&ws, cx).expect("the plan tab shows");
+    assert_eq!(
+        plan.read_with(cx, |p, _| p.shown_operations()),
+        ["SEARCH USING INTEGER PRIMARY KEY"]
+    );
+
+    // refused up front, without asking first
+    press(cx, "P-a");
+    cx.simulate_input("delete from items");
+    let messages = run(&ws, cx, "P-shift-e");
+    assert!(!cx.has_pending_prompt());
+    assert!(
+        messages
+            .iter()
+            .any(|m| m == "SQLite has no Explain Analyze. Explain shows the plan."),
+        "{messages:?}"
+    );
+}

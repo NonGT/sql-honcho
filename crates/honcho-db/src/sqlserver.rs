@@ -288,6 +288,7 @@ impl Connection for SqlServerConnection {
             schemas: true,
             cross_database: true,
             explain: true,
+            explain_analyze: true,
         }
     }
 

@@ -129,9 +129,9 @@ the time, when analyzed). Estimates that are off by 10x and full scans of
 big tables are flagged. Explain Analyze asks before running a statement that
 writes, and rolls its changes back. On MySQL and MariaDB it refuses a write
 that touches a table whose engine can't roll back, such as MyISAM or Aria.
-SQL Server plans can be saved as .sqlplan and opened in SSMS. Explain works
-on Postgres, MySQL (Analyze needs 8.3 or later), MariaDB and SQL Server so
-far.
+SQL Server plans can be saved as .sqlplan and opened in SSMS. Analyze needs
+MySQL 8.3 or later, and SQLite has no Analyze: its plan is EXPLAIN QUERY
+PLAN, which lists the steps without costs or row estimates.
 
 Copy with no selection copies the whole line. Pasting N lines into N cursors
 puts one line at each cursor.
