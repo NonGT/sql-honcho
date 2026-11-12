@@ -77,7 +77,7 @@ pub enum BrowserEvent {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Item {
     Connection(Box<SavedConnection>),
     Database(String),
@@ -237,6 +237,13 @@ pub struct ObjectBrowser {
     pending: HashMap<String, Vec<(Path, Action)>>,
     /// The pane's width, set by dragging its edge.
     pub width: Pixels,
+    /// Loaded from the last session's cache and not fetched again yet.
+    stale: HashSet<Path>,
+    /// Stale nodes being fetched; they keep showing what they had.
+    refreshing: HashSet<Path>,
+    /// Connections whose cache has been read.
+    warmed: HashSet<String>,
+    cache_saves: HashMap<String, Task<()>>,
 }
 
 impl EventEmitter<BrowserEvent> for ObjectBrowser {}
@@ -260,6 +267,10 @@ impl ObjectBrowser {
             reconnected: HashSet::new(),
             pending: HashMap::new(),
             width: DEFAULT_WIDTH,
+            stale: HashSet::new(),
+            refreshing: HashSet::new(),
+            warmed: HashSet::new(),
+            cache_saves: HashMap::new(),
         };
         this.rebuild(cx);
         this
@@ -331,11 +342,19 @@ impl ObjectBrowser {
                     .as_ref()
                     .is_some_and(|s| search_children(s, &path, &item, cx).is_some()));
         let children = expanded.then(|| self.children_of(&path, &item, cx));
-        let note = match (&children, &item) {
-            (Some(None), Item::Connection(c)) => match self.conns.get(&c.id) {
-                Some(Conn::Failed(e)) => Some((e.clone(), true)),
-                _ => Some(("Loading…".into(), false)),
+        let failed = match (&item, expanded) {
+            (Item::Connection(c), true) => match self.conns.get(&c.id) {
+                Some(Conn::Failed(e)) => Some(e.clone()),
+                _ => None,
             },
+            _ => None,
+        };
+        let note = match (&children, &item) {
+            _ if failed.is_some() => failed.map(|e| (e, true)),
+            (Some(Some(Ok(_))), _) if self.refreshing.contains(&path) => {
+                Some(("updating…".into(), false))
+            }
+            (Some(None), Item::Connection(_)) => Some(("Loading…".into(), false)),
             (Some(None), _) => Some(("Loading…".into(), false)),
             (Some(Some(Err(e))), _) => Some((e.clone(), true)),
             (Some(Some(Ok(items))), _) if items.is_empty() => Some(("Empty".into(), false)),
@@ -371,13 +390,24 @@ impl ObjectBrowser {
 
     /// Loads a node's children unless they're cached; `force` refetches.
     fn load(&mut self, path: Path, item: Item, force: bool, cx: &mut Context<Self>) {
-        if !force && self.children.contains_key(&path) {
+        let conn_id = path[0].trim_start_matches("c:").to_string();
+        self.warm(&conn_id, cx);
+        let stale = self.stale.contains(&path);
+        if !force
+            && self.children.contains_key(&path)
+            && (!stale || self.refreshing.contains(&path))
+        {
             return;
         }
-        let conn_id = path[0].trim_start_matches("c:").to_string();
+        // a group is filled by its database, never on its own
+        if !force && stale && matches!(item, Item::Group(..)) {
+            return;
+        }
         if let Item::Connection(saved) = &item {
             if force || !matches!(self.conns.get(&conn_id), Some(Conn::Open(_))) {
-                self.children.remove(&path);
+                if force {
+                    self.children.remove(&path);
+                }
                 self.open_connection(*saved.clone(), cx);
                 return;
             }
@@ -385,29 +415,25 @@ impl ObjectBrowser {
         let Some(session) = self.session(&conn_id) else {
             return;
         };
-        self.children.insert(path.clone(), Children::Loading);
+        if stale {
+            self.refreshing.insert(path.clone());
+        } else {
+            self.children.insert(path.clone(), Children::Loading);
+        }
         cx.spawn(async move |this, cx| {
             let loaded = fetch(&session, &item).await;
             this.update(cx, |this, cx| {
+                this.refreshing.remove(&path);
                 if loaded.is_ok() {
                     this.reconnected.remove(&conn_id);
+                    this.stale.remove(&path);
+                    this.save_cache(&conn_id, cx);
                 }
                 match loaded {
                     Ok(Fetched::Items(items)) => {
                         this.children.insert(path.clone(), Children::Loaded(items));
                     }
-                    Ok(Fetched::Database(groups)) => {
-                        // one query fills the database and every group under it
-                        let db = path.clone();
-                        let mut items = Vec::new();
-                        for (group, objects) in groups {
-                            let mut p = db.clone();
-                            p.push(group.segment());
-                            items.push(group);
-                            this.children.insert(p, Children::Loaded(objects));
-                        }
-                        this.children.insert(db, Children::Loaded(items));
-                    }
+                    Ok(Fetched::Database(groups)) => this.fill_groups(&path, groups),
                     Err(e) if e.is_fatal() && this.reconnect(&conn_id, cx) => {
                         // the reopened session reloads every open node,
                         // this one included
@@ -434,6 +460,20 @@ impl ObjectBrowser {
         .detach();
     }
 
+    /// One query fills a database (or schema) and every group under it.
+    fn fill_groups(&mut self, at: &Path, groups: Vec<(Item, Vec<Item>)>) {
+        let mut items = Vec::new();
+        for (group, objects) in groups {
+            let mut p = at.clone();
+            p.push(group.segment());
+            items.push(group);
+            self.stale.remove(&p);
+            self.children.insert(p, Children::Loaded(objects));
+        }
+        self.stale.remove(at);
+        self.children.insert(at.clone(), Children::Loaded(items));
+    }
+
     /// Children that were left expanded load as soon as their parent has,
     /// which brings a remembered subtree back one level at a time.
     fn load_open_children(&mut self, parent: &Path, cx: &mut Context<Self>) {
@@ -450,7 +490,7 @@ impl ObjectBrowser {
             .filter(|(p, _)| self.expanded.contains(p))
             .collect();
         for (path, item) in open {
-            if self.children.contains_key(&path) {
+            if self.children.contains_key(&path) && !self.stale.contains(&path) {
                 // a database fills its groups itself; go one further
                 self.load_open_children(&path, cx);
             } else {
@@ -494,7 +534,13 @@ impl ObjectBrowser {
         }
         self.conns.insert(id.clone(), Conn::Opening);
         if !keep {
-            self.children.retain(|p, _| p[0] != format!("c:{id}"));
+            // what was loaded keeps showing until it's fetched again
+            let root = format!("c:{id}");
+            self.children
+                .retain(|p, c| p[0] != root || matches!(c, Children::Loaded(_)));
+            self.stale
+                .extend(self.children.keys().filter(|p| p[0] == root).cloned());
+            self.refreshing.retain(|p| p[0] != root);
         }
         let opening = connections::open_session(saved.clone(), None, cx);
         cx.spawn(async move |this, cx| {
@@ -508,7 +554,9 @@ impl ObjectBrowser {
                         }
                         if keep {
                             for (path, item) in this.cut_off(&id, cx) {
-                                this.children.remove(&path);
+                                if !this.refreshing.remove(&path) {
+                                    this.children.remove(&path);
+                                }
                                 this.load(path, item, false, cx);
                             }
                         } else {
@@ -554,8 +602,10 @@ impl ObjectBrowser {
                         }
                         // the tree stays; the nodes that were waiting say why
                         for (path, _) in this.cut_off(&id, cx) {
-                            this.children
-                                .insert(path, Children::Failed(message.clone()));
+                            if !this.refreshing.remove(&path) {
+                                this.children
+                                    .insert(path, Children::Failed(message.clone()));
+                            }
                         }
                         this.conns.insert(id, Conn::Failed(message));
                     }
@@ -572,7 +622,9 @@ impl ObjectBrowser {
         let root = format!("c:{id}");
         self.children
             .iter()
-            .filter(|(p, c)| p[0] == root && matches!(c, Children::Loading))
+            .filter(|(p, c)| {
+                p[0] == root && (matches!(c, Children::Loading) || self.refreshing.contains(*p))
+            })
             .filter_map(|(p, _)| Some((p.clone(), self.item_at(p, cx)?)))
             .collect()
     }
@@ -770,14 +822,10 @@ impl ObjectBrowser {
                 return;
             };
             this.update(cx, |this, cx| {
-                let mut items = Vec::new();
-                for (group, objects) in groups {
-                    let mut p = path.clone();
-                    p.push(group.segment());
-                    items.push(group);
-                    this.children.insert(p, Children::Loaded(objects));
+                this.fill_groups(&path, groups);
+                if let Some(id) = path[0].strip_prefix("c:") {
+                    this.save_cache(id, cx);
                 }
-                this.children.insert(path, Children::Loaded(items));
                 this.rebuild(cx);
             })
             .ok();
@@ -1026,6 +1074,86 @@ impl ObjectBrowser {
         cx.notify();
     }
 
+    /// Puts what a connection showed last time into the tree, to show
+    /// while it's fetched again.
+    fn warm(&mut self, id: &str, cx: &App) {
+        if !self.warmed.insert(id.to_string()) {
+            return;
+        }
+        let Some(saved) = self.saved(id, cx) else {
+            return;
+        };
+        let Some(cache) = std::fs::read_to_string(cache_file(id, cx))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Cache>(&t).ok())
+        else {
+            return;
+        };
+        // saved for another server or database
+        if cache.server != server_of(&saved) {
+            return;
+        }
+        for (path, items) in cache.nodes {
+            if path.first().map(String::as_str) != Some(&format!("c:{id}"))
+                || self.children.contains_key(&path)
+            {
+                continue;
+            }
+            self.stale.insert(path.clone());
+            self.children.insert(path, Children::Loaded(items));
+        }
+    }
+
+    /// Writes what a connection has loaded, a moment after the last load
+    /// so a subtree coming back writes once.
+    fn save_cache(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        let file = cache_file(&id, cx);
+        let task = cx.spawn({
+            let id = id.clone();
+            async move |this, cx| {
+                cx.background_executor().timer(CACHE_DELAY).await;
+                let Ok(Some(json)) = this.update(cx, |this, cx| {
+                    let saved = this.saved(&id, cx)?;
+                    let root = format!("c:{id}");
+                    let nodes = this
+                        .children
+                        .iter()
+                        .filter(|(p, _)| p[0] == root)
+                        .filter_map(|(p, c)| match c {
+                            Children::Loaded(items) => Some((p.clone(), items.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    serde_json::to_string(&Cache {
+                        server: server_of(&saved),
+                        nodes,
+                    })
+                    .ok()
+                }) else {
+                    return;
+                };
+                cx.background_spawn(async move {
+                    let Some(dir) = file.parent() else { return };
+                    let _ = std::fs::create_dir_all(dir);
+                    let tmp = file.with_extension("tmp");
+                    if std::fs::write(&tmp, json).is_ok() {
+                        let _ = std::fs::rename(&tmp, &file);
+                    }
+                })
+                .await;
+            }
+        });
+        self.cache_saves.insert(id, task);
+    }
+
+    #[cfg(test)]
+    pub fn is_cached(&self, label: &str) -> bool {
+        self.rows
+            .iter()
+            .any(|r| r.item.label() == label && self.stale.contains(&r.path[..r.path.len() - 1]))
+    }
+
     fn save_expanded(&self, cx: &App) {
         let path = cx
             .global::<Connections>()
@@ -1220,6 +1348,40 @@ fn groups_found(found: &[ObjectRef], at: &Scope) -> Vec<Item> {
             (n > 0).then(|| Item::Group(at.clone(), k, n))
         })
         .collect()
+}
+
+const CACHE_DELAY: Duration = Duration::from_millis(500);
+
+/// What a connection's tree held, kept between launches. Names and
+/// definitions only; no data or secrets.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Cache {
+    server: String,
+    nodes: Vec<(Path, Vec<Item>)>,
+}
+
+/// What the cache was loaded from; a change means it's of something else.
+fn server_of(saved: &SavedConnection) -> String {
+    serde_json::json!([
+        saved.driver,
+        saved.host,
+        saved.port,
+        saved.user,
+        saved.database,
+        saved.ssh
+    ])
+    .to_string()
+}
+
+fn cache_dir(cx: &App) -> std::path::PathBuf {
+    cx.global::<Connections>()
+        .store
+        .path()
+        .with_file_name("browser-cache")
+}
+
+fn cache_file(id: &str, cx: &App) -> std::path::PathBuf {
+    cache_dir(cx).join(format!("{id}.json"))
 }
 
 enum Fetched {
@@ -1636,6 +1798,17 @@ impl ObjectBrowser {
             .filter(|id| !ids.contains(*id))
             .cloned()
             .collect();
+        if let Ok(files) = std::fs::read_dir(cache_dir(cx)) {
+            for f in files.flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                if name
+                    .strip_suffix(".json")
+                    .is_some_and(|id| !ids.contains(id))
+                {
+                    let _ = std::fs::remove_file(f.path());
+                }
+            }
+        }
         for id in gone {
             if let Some(Conn::Open(s)) = self.conns.remove(&id) {
                 cx.background_spawn(async move { s.close().await }).detach();
@@ -1679,6 +1852,7 @@ impl ObjectBrowser {
             .values()
             .any(|c| matches!(c, Children::Loading))
             && !self.conns.values().any(|c| matches!(c, Conn::Opening))
+            && self.refreshing.is_empty()
     }
 }
 

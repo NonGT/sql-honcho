@@ -169,7 +169,9 @@ pub struct QueryStats {
     pub elapsed: Duration,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum ObjectKind {
     Table,
     View,
@@ -188,7 +190,7 @@ impl ObjectKind {
 
 /// Identifies a database object. `schema` is `None` on servers where the
 /// database is the schema (MySQL).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRef {
     pub database: Option<String>,
     pub schema: Option<String>,
@@ -220,7 +222,7 @@ impl ObjectRef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
@@ -245,7 +247,7 @@ pub struct RoutineParam {
     pub data_type: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexInfo {
     pub name: String,
     /// In index order.
@@ -255,7 +257,7 @@ pub struct IndexInfo {
 }
 
 /// Where to list objects. Unset fields mean the connection's current one.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Scope {
     pub database: Option<String>,
     pub schema: Option<String>,

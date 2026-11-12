@@ -1423,6 +1423,35 @@ fn object_browser_loads_as_nodes_open(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_tree_shows_what_it_had_last_time_while_it_loads(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    browse(&ws, cx, "Tables (2)");
+    browse(&ws, cx, "orders");
+    browse(&ws, cx, "Columns");
+    let before = browser_labels(&ws, cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+
+    // the next launch shows the same tree as soon as the connection opens,
+    // before anything comes back from the server
+    let next = ws.update_in(cx, |_, window, cx| {
+        cx.new(|cx| Workspace::new(vec![], window, cx))
+    });
+    let b = next.read_with(cx, |ws, _| ws.browser().clone());
+    b.update(cx, |b, cx| b.expand("fake db", cx));
+    assert_eq!(b.read_with(cx, |b, _| b.labels()), before);
+    assert!(b.read_with(cx, |b, _| b.is_cached("amount")));
+
+    // then it's fetched again
+    wait_until(cx, |cx| b.read_with(cx, |b, _| b.is_idle()));
+    assert_eq!(b.read_with(cx, |b, _| b.labels()), before);
+    assert!(!b.read_with(cx, |b, _| b.is_cached("amount")));
+    assert!(b.read_with(cx, |b, _| b.notes()).is_empty());
+}
+
+#[gpui::test]
 fn double_click_opens_a_connected_tab(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     connect_fake(&ws, cx, None);

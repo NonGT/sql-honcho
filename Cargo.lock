@@ -6735,6 +6735,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "rusqlite",
+ "serde",
  "serde_json",
  "similar",
  "tempfile",
