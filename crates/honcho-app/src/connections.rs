@@ -29,7 +29,7 @@ impl Connections {
         let runtime = DbRuntime::new().expect("couldn't start the database runtime");
         cx.set_global(Connections {
             store,
-            secrets: Arc::new(Keyring),
+            secrets: Arc::new(Keyring::default()),
             runtime: Arc::new(runtime),
             load_error,
         });
