@@ -137,12 +137,14 @@ pub struct ConnectionDialog {
     host_key: Option<(HostKeyProblem, SavedConnection, bool)>,
     section: Section,
     busy: bool,
-    /// The connection has saved secrets, which are kept unless new ones
-    /// are typed. They're only read from the keyring to connect: on macOS
-    /// every read can be a prompt, and just looking at a connection
-    /// shouldn't be one.
-    keeps_secrets: bool,
 }
+
+/// Stands in a secret field for what's saved, so the keyring is only read
+/// to connect: on macOS every read can be a prompt, and just looking at a
+/// connection shouldn't be one. The field is masked and won't copy, so
+/// these never show; editing it at all replaces the saved secret.
+const SAVED_CHAR: char = '\u{E000}';
+const SAVED: &str = "\u{E000}\u{E000}\u{E000}\u{E000}\u{E000}\u{E000}\u{E000}\u{E000}";
 
 /// What a save does with the stored password.
 enum PasswordChange {
@@ -188,7 +190,6 @@ impl ConnectionDialog {
             host_key: None,
             section: Section::General,
             busy: false,
-            keeps_secrets: false,
         };
         match cx
             .global::<Connections>()
@@ -270,10 +271,11 @@ impl ConnectionDialog {
             Self::set_field(field, &value, cx);
         }
         self.host_key = None;
-        self.keeps_secrets = !is_new;
-        let hint = if is_new { "" } else { "saved, type to change" };
-        for f in [&self.fields.password, &self.fields.ssh_secret] {
-            f.update(cx, |f, cx| f.set_placeholder(hint, cx));
+        if !is_new {
+            Self::set_field(&self.fields.password, SAVED, cx);
+            if saved.ssh.is_some() {
+                Self::set_field(&self.fields.ssh_secret, SAVED, cx);
+            }
         }
         self.draft = saved;
         self.is_new = is_new;
@@ -388,25 +390,36 @@ impl ConnectionDialog {
         })
     }
 
-    fn password(&self, cx: &App) -> Option<String> {
-        Some(self.fields.password.read(cx).text()).filter(|p| !p.is_empty())
+    fn secret_change(field: &Entity<EditorView>, cx: &App) -> PasswordChange {
+        let text = field.read(cx).text();
+        if text == SAVED {
+            return PasswordChange::Keep;
+        }
+        // typing after the stand-in, or deleting some of it
+        let typed: String = text.chars().filter(|&c| c != SAVED_CHAR).collect();
+        PasswordChange::Set(Some(typed).filter(|t| !t.is_empty()))
     }
 
     fn password_change(&self, cx: &App) -> PasswordChange {
-        match self.password(cx) {
-            None if self.keeps_secrets => PasswordChange::Keep,
-            p => PasswordChange::Set(p),
+        Self::secret_change(&self.fields.password, cx)
+    }
+
+    fn ssh_secret_change(&self, cx: &App) -> PasswordChange {
+        Self::secret_change(&self.fields.ssh_secret, cx)
+    }
+
+    /// What was typed; None for nothing or for the saved one.
+    fn password(&self, cx: &App) -> Option<String> {
+        match self.password_change(cx) {
+            PasswordChange::Set(p) => p,
+            PasswordChange::Keep => None,
         }
     }
 
     fn ssh_secret(&self, cx: &App) -> Option<String> {
-        Some(self.fields.ssh_secret.read(cx).text()).filter(|p| !p.is_empty())
-    }
-
-    fn ssh_secret_change(&self, cx: &App) -> PasswordChange {
-        match self.ssh_secret(cx) {
-            None if self.keeps_secrets => PasswordChange::Keep,
-            p => PasswordChange::Set(p),
+        match self.ssh_secret_change(cx) {
+            PasswordChange::Set(p) => p,
+            PasswordChange::Keep => None,
         }
     }
 
@@ -643,15 +656,16 @@ impl ConnectionDialog {
         let mut config = self.connect_config(&saved, cx);
         let state = cx.global::<Connections>();
         let (runtime, secrets) = (state.runtime.clone(), state.secrets.clone());
-        let keeps = self.keeps_secrets;
+        let keep_pw = matches!(self.password_change(cx), PasswordChange::Keep);
+        let keep_ssh = matches!(self.ssh_secret_change(cx), PasswordChange::Keep);
         let owner = saved.clone();
         // off the UI thread, since the keyring can sit on a prompt
         let connecting = cx.background_spawn(async move {
             let read = |e: honcho_config::SecretError| DbError::Other(e.to_string());
-            if keeps && config.password.is_none() {
+            if keep_pw {
                 config.password = owner.password(secrets.as_ref()).map_err(read)?;
             }
-            if let Some(ssh) = config.ssh.as_mut().filter(|s| keeps && s.secret.is_none()) {
+            if let Some(ssh) = config.ssh.as_mut().filter(|_| keep_ssh) {
                 ssh.secret = owner.ssh_secret(secrets.as_ref()).map_err(read)?;
             }
             runtime
