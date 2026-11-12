@@ -231,6 +231,9 @@ pub struct QueryTab {
     panel_drag: Option<(Pixels, Pixels)>,
     /// Width of the plan's details column, kept from one explain to the next.
     plan_width: Rc<Cell<Pixels>>,
+    /// A short note over the results, such as what was copied, and the
+    /// timer that clears it.
+    toast: Option<(SharedString, Task<()>)>,
     /// Revision, cursor and length when the editor last changed, to tell
     /// typing from other edits and moves.
     last_edit: (u64, usize, usize),
@@ -279,6 +282,7 @@ impl QueryTab {
             panel_collapsed: false,
             panel_drag: None,
             plan_width: Rc::new(Cell::new(crate::plan_view::DETAILS_MIN)),
+            toast: None,
             last_edit: (0, 0, 0),
             completing: false,
             catalog: None,
@@ -1726,9 +1730,34 @@ impl QueryTab {
 
     fn copy_as(&mut self, format: Format, cx: &mut Context<Self>) {
         if let Some(grid) = self.shown_grid() {
-            let text = grid.read(cx).export(format);
+            let grid = grid.read(cx);
+            let text = grid.export(format);
+            let n = grid.picked_rows();
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            let rows = if n == 1 { "row" } else { "rows" };
+            self.show_toast(format!("Copied {n} {rows} as {}", format.label()), cx);
         }
+    }
+
+    fn show_toast(&mut self, text: String, cx: &mut Context<Self>) {
+        let clear = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1800))
+                .await;
+            this.update(cx, |this, cx| {
+                this.toast = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        // replacing the task drops the previous timer
+        self.toast = Some((text.into(), clear));
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn toast(&self) -> Option<&str> {
+        self.toast.as_ref().map(|(t, _)| t.as_ref())
     }
 
     fn shown_plan(&self) -> Option<Entity<PlanView>> {
@@ -1740,6 +1769,7 @@ impl QueryTab {
         if let Some(plan) = self.shown_plan() {
             let text = plan.read(cx).plan.raw.clone();
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            self.show_toast("Copied the plan".into(), cx);
         }
     }
 
@@ -1868,6 +1898,7 @@ impl QueryTab {
         let small = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .px_1p5()
                 .rounded_sm()
                 .cursor_pointer()
@@ -1962,6 +1993,20 @@ impl QueryTab {
                 .when(!self.panel_collapsed, |d| {
                     d.child(div().flex_1().min_h_0().child(body))
                 })
+                .children(self.toast.as_ref().map(|(text, _)| {
+                    div()
+                        .absolute()
+                        .top(PANEL_BAR + px(6.))
+                        .right(px(10.))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(Theme::accent())
+                        .bg(Theme::bg())
+                        .shadow_md()
+                        .child(format!("✓ {text}"))
+                }))
                 // drag the top edge to resize
                 .child(
                     div()

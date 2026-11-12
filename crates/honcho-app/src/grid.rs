@@ -243,6 +243,14 @@ impl ResultGrid {
         self.order = Some(order);
     }
 
+    /// How many rows a copy takes.
+    pub fn picked_rows(&self) -> usize {
+        match self.selection {
+            Some(s) => s.rows().filter(|&r| r < self.rows.len()).count(),
+            None => self.rows.len(),
+        }
+    }
+
     /// Selected cells, or everything when nothing is selected.
     fn picked(&self) -> (Vec<&Column>, Vec<Vec<&Value>>) {
         let (rows, cols) = match self.selection {

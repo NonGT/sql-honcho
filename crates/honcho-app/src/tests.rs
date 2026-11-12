@@ -912,6 +912,38 @@ fn double_click_on_a_header_edge_fits_the_column(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn copying_results_says_so_for_a_moment(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    cx.simulate_input("select 5");
+    run(&ws, cx, "P-enter");
+    let q = query_tab(&ws, cx);
+    let toast = |cx: &mut VisualTestContext| q.read_with(cx, |q, _| q.toast().map(String::from));
+    assert_eq!(toast(cx), None);
+
+    let at = cx.debug_bounds("CSV").expect("the copy button").center();
+    cx.simulate_click(at, gpui::Modifiers::none());
+    assert_eq!(toast(cx).as_deref(), Some("Copied 5 rows as CSV"));
+    assert!(clipboard(cx).is_some_and(|c| c.starts_with("id,")));
+
+    // a selection copies only its rows
+    first_grid(&ws, cx).update(cx, |g, _| {
+        g.selection = Some(CellRange {
+            anchor: (2, 0),
+            head: (2, 1),
+        })
+    });
+    let at = cx.debug_bounds("TSV").unwrap().center();
+    cx.simulate_click(at, gpui::Modifiers::none());
+    assert_eq!(toast(cx).as_deref(), Some("Copied 1 row as TSV"));
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(2000));
+    cx.run_until_parked();
+    assert_eq!(toast(cx), None);
+}
+
+#[gpui::test]
 fn copy_buttons_and_the_viewer(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     connect_fake(&ws, cx, None);
