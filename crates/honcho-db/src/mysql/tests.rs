@@ -168,7 +168,101 @@ both_servers!(
     tls_verify_checks_the_ca_and_the_name,
     tls_client_certificate,
     project_round_trip,
+    explains_a_join,
+    analyze_rolls_back_what_it_ran,
+    analyze_refuses_tables_that_cant_roll_back,
 );
+
+async fn explain(s: &Session, sql: &str, analyze: bool) -> crate::Result<crate::Plan> {
+    let mut handle = s.run(sql, crate::RunMode::Explain { analyze });
+    let mut plan = None;
+    while let Some(e) = handle.next().await {
+        match e {
+            QueryEvent::Plan(p) => plan = Some(*p),
+            QueryEvent::Finished(Err(e)) => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(plan.expect("a plan"))
+}
+
+fn tables_in(plan: &crate::Plan) -> Vec<String> {
+    let mut out = Vec::new();
+    explain::tables(&plan.root, &mut out);
+    out.sort();
+    out
+}
+
+async fn explains_a_join(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt, server).await;
+    let sql = "SELECT u.email, o.amount FROM orders o JOIN users u ON u.id = o.user_id";
+    let plan = explain(&s, sql, false).await.unwrap();
+    assert!(!plan.analyzed);
+    let expected = match server {
+        Server::MySql => ["orders", "users"],
+        // MariaDB names tables by alias
+        Server::MariaDb => ["o", "u"],
+    };
+    assert_eq!(tables_in(&plan), expected);
+
+    let plan = explain(&s, sql, true).await.unwrap();
+    assert!(plan.analyzed);
+    assert!(plan.root.actual_ms.is_some(), "{plan:#?}");
+
+    // the user's own setting survives
+    if server == Server::MySql {
+        let events = run(&s, "SELECT @@explain_json_format_version").await;
+        assert_eq!(rows_of(&events), vec![vec![Value::UInt(1)]]);
+    }
+}
+
+async fn analyze_rolls_back_what_it_ran(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt, server).await;
+    let count = "SELECT count(*) FROM orders";
+    let before = rows_of(&run(&s, count).await);
+    let plan = explain(&s, "DELETE FROM orders", true).await.unwrap();
+    assert_eq!(tables_in(&plan), ["orders"]);
+    assert_eq!(rows_of(&run(&s, count).await), before);
+    assert!(!s.in_transaction().await.unwrap());
+
+    // inside the user's transaction, which stays open
+    run(&s, "START TRANSACTION").await;
+    explain(&s, "UPDATE orders SET amount = amount + 1", true)
+        .await
+        .unwrap();
+    assert!(s.in_transaction().await.unwrap());
+    run(&s, "ROLLBACK").await;
+}
+
+async fn analyze_refuses_tables_that_cant_roll_back(server: Server) {
+    let rt = DbRuntime::new().unwrap();
+    let s = session(&rt, server).await;
+    let table = match server {
+        Server::MySql => "explain_myisam_my",
+        Server::MariaDb => "explain_myisam_maria",
+    };
+    finished_ok(&run(&s, &format!("DROP TABLE IF EXISTS {table}")).await);
+    let create =
+        format!("CREATE TABLE {table} (x INT) ENGINE=MyISAM; INSERT INTO {table} VALUES (1), (2)");
+    finished_ok(&run(&s, &create).await);
+    let count = format!("SELECT count(*) FROM {table}");
+
+    let err = explain(&s, &format!("DELETE FROM {table}"), true).await;
+    match err {
+        Err(DbError::Other(m)) => assert!(m.contains("MyISAM"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(rows_of(&run(&s, &count).await), vec![vec![Value::Int(2)]]);
+    // reading it can't change it, and the plain plan never runs anything
+    explain(&s, &count, true).await.unwrap();
+    explain(&s, &format!("DELETE FROM {table}"), false)
+        .await
+        .unwrap();
+
+    run(&s, &format!("DROP TABLE {table}")).await;
+}
 
 fn cert(name: &str) -> Option<std::path::PathBuf> {
     Some(

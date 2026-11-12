@@ -1,6 +1,7 @@
 //! MySQL and MariaDB, over `mysql_async`.
 
 mod convert;
+mod explain;
 mod split;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +12,7 @@ use mysql_async::prelude::*;
 use mysql_async::{ClientIdentity, Conn, DriverError, Opts, OptsBuilder, Row, SslOpts};
 
 use crate::types::*;
-use crate::{Canceller, Connection, DbError, Driver, Result, ResultSink};
+use crate::{Canceller, Connection, DbError, Driver, Plan, Result, ResultSink};
 
 pub use split::split;
 
@@ -74,6 +75,7 @@ impl Driver for MySqlDriver {
             conn: Some(conn),
             opts,
             cancelled: Mutex::new(Arc::default()),
+            server: None,
         }))
     }
 }
@@ -83,6 +85,33 @@ pub struct MySqlConnection {
     opts: Opts,
     /// Set by the canceller handed out for the current run.
     cancelled: Mutex<Arc<AtomicBool>>,
+    /// Asked for the first time it matters.
+    server: Option<Server>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Server {
+    MariaDb,
+    /// `tree`: 8.3 or later, which explains as a tree of operators.
+    MySql {
+        tree: bool,
+    },
+}
+
+impl Server {
+    fn from_version(version: &str) -> Self {
+        if version.contains("MariaDB") {
+            return Server::MariaDb;
+        }
+        let mut parts = version
+            .split(|c: char| !c.is_ascii_digit())
+            .map(|p| p.parse::<u32>().unwrap_or(0));
+        let major = parts.next().unwrap_or(0);
+        let minor = parts.next().unwrap_or(0);
+        Server::MySql {
+            tree: (major, minor) >= (8, 3),
+        }
+    }
 }
 
 impl MySqlConnection {
@@ -90,6 +119,20 @@ impl MySqlConnection {
         self.conn
             .as_mut()
             .ok_or_else(|| DbError::ConnectionLost("connection closed".into()))
+    }
+
+    async fn server(&mut self) -> Result<Server> {
+        if let Some(s) = self.server {
+            return Ok(s);
+        }
+        let version: Option<String> = self
+            .conn()?
+            .query_first("SELECT VERSION()")
+            .await
+            .map_err(query_error)?;
+        let s = Server::from_version(&version.unwrap_or_default());
+        self.server = Some(s);
+        Ok(s)
     }
 
     async fn database_or_current(&mut self, database: &Option<String>) -> Result<String> {
@@ -127,6 +170,62 @@ impl Connection for MySqlConnection {
             }
         }
         Ok(())
+    }
+
+    async fn explain(&mut self, sql: &str, analyze: bool) -> Result<Plan> {
+        let cancelled = self.cancelled.lock().unwrap().clone();
+        let statements = split(sql);
+        let statement = statements
+            .iter()
+            .find(|s| !s.text.trim().is_empty())
+            .ok_or_else(|| DbError::Other("Nothing to explain.".into()))?;
+        let text = statement.text.trim_end().trim_end_matches(';');
+        let server = self.server().await?;
+        if analyze && server == (Server::MySql { tree: false }) {
+            return Err(DbError::Other(
+                "Explain Analyze needs MySQL 8.3 or later.".into(),
+            ));
+        }
+        // ANALYZE runs the statement; undo it, keeping the user's own
+        // transaction if there is one
+        let (open, close): (&[&str], &[&str]) = match analyze {
+            false => (&[], &[]),
+            true if self.in_transaction().await? => (
+                &["SAVEPOINT honcho_explain"],
+                &[
+                    "ROLLBACK TO SAVEPOINT honcho_explain",
+                    "RELEASE SAVEPOINT honcho_explain",
+                ],
+            ),
+            true => (&["START TRANSACTION"], &["ROLLBACK"]),
+        };
+        let conn = self.conn()?;
+        if analyze && crate::script::write_reason(text).is_some() {
+            let stuck = non_transactional(conn, server, text).await?;
+            if !stuck.is_empty() {
+                return Err(DbError::Other(format!(
+                    "Explain Analyze won't run this: {} can't roll back, so the \
+                     changes would stay. Use Explain instead.",
+                    stuck.join(", ")
+                )));
+            }
+        }
+        for sql in open {
+            conn.query_drop(*sql).await.map_err(query_error)?;
+        }
+        let result = explain_on(conn, server, text, analyze)
+            .await
+            .map_err(|e| at_line(e, statement.line));
+        for sql in close {
+            let undone = conn.query_drop(*sql).await.map_err(query_error);
+            if result.is_ok() {
+                undone?;
+            }
+        }
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(DbError::Cancelled);
+        }
+        result
     }
 
     fn statements<'a>(&self, sql: &'a str) -> Vec<crate::script::Statement<'a>> {
@@ -445,6 +544,101 @@ impl Connection for MySqlConnection {
             None => Ok(()),
         }
     }
+}
+
+async fn explain_on(conn: &mut Conn, server: Server, text: &str, analyze: bool) -> Result<Plan> {
+    let verb = if analyze {
+        "EXPLAIN ANALYZE"
+    } else {
+        "EXPLAIN"
+    };
+    match server {
+        Server::MariaDb => {
+            let verb = if analyze { "ANALYZE" } else { "EXPLAIN" };
+            let raw = plan_json(conn, &format!("{verb} FORMAT=JSON {text}")).await?;
+            explain::parse_classic(&raw, analyze)
+        }
+        Server::MySql { tree: false } => {
+            let raw = plan_json(conn, &format!("EXPLAIN FORMAT=JSON {text}")).await?;
+            explain::parse_classic(&raw, false)
+        }
+        Server::MySql { tree: true } => {
+            // the format is a session setting: put the user's back after
+            let before: Option<String> = conn
+                .query_first("SELECT @@explain_json_format_version")
+                .await
+                .map_err(query_error)?;
+            let result = async {
+                conn.query_drop("SET explain_json_format_version = 2")
+                    .await
+                    .map_err(query_error)?;
+                let raw = plan_json(conn, &format!("{verb} FORMAT=JSON {text}")).await?;
+                if !raw.contains(explain::NO_TREE) {
+                    return explain::parse_tree(&raw, analyze);
+                }
+                // single-table UPDATE and DELETE only have the old format,
+                // which has no actual figures
+                conn.query_drop("SET explain_json_format_version = 1")
+                    .await
+                    .map_err(query_error)?;
+                let raw = plan_json(conn, &format!("EXPLAIN FORMAT=JSON {text}")).await?;
+                let mut plan = explain::parse_classic(&raw, false)?;
+                if analyze {
+                    plan.totals.push((
+                        "Note".into(),
+                        "MySQL can't analyze this statement; the plan is estimated.".into(),
+                    ));
+                }
+                Ok(plan)
+            }
+            .await;
+            if let Some(v) = before {
+                let restored = conn
+                    .query_drop(format!("SET explain_json_format_version = {}", v.trim()))
+                    .await
+                    .map_err(query_error);
+                if result.is_ok() {
+                    restored?;
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Tables the statement may touch whose engine can't roll back (MyISAM,
+/// Aria, ...), as `schema.table (ENGINE)`. Goes by the names in the
+/// statement and the tables in its plan, which covers views.
+async fn non_transactional(conn: &mut Conn, server: Server, text: &str) -> Result<Vec<String>> {
+    let candidates: Vec<(String, String, String)> = conn
+        .query(
+            "SELECT t.TABLE_SCHEMA, t.TABLE_NAME, t.ENGINE \
+             FROM information_schema.TABLES t \
+             JOIN information_schema.ENGINES e ON e.ENGINE = t.ENGINE \
+             WHERE e.TRANSACTIONS <> 'YES' AND t.TABLE_SCHEMA NOT IN \
+             ('mysql', 'information_schema', 'performance_schema', 'sys')",
+        )
+        .await
+        .map_err(query_error)?;
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut named = explain::names(text);
+    if let Ok(plan) = explain_on(conn, server, text, false).await {
+        let mut found = Vec::new();
+        explain::tables(&plan.root, &mut found);
+        named.extend(found);
+    }
+    Ok(candidates
+        .into_iter()
+        .filter(|(_, table, _)| named.contains(&table.to_lowercase()))
+        .map(|(schema, table, engine)| format!("{schema}.{table} ({engine})"))
+        .collect())
+}
+
+async fn plan_json(conn: &mut Conn, sql: &str) -> Result<String> {
+    let raw: Option<String> = conn.query_first(sql).await.map_err(query_error)?;
+    raw.ok_or_else(|| DbError::Other("the server sent no plan".into()))
 }
 
 /// Runs one statement, which can still return several result sets (CALL),

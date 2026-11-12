@@ -1,0 +1,157 @@
+{
+  "query": "/* select#1 */ select `u`.`email` AS `email`,(/* select#2 */ select count(0) from `app`.`orders` `x` where (`x`.`user_id` = `u`.`id`)) AS `n` from `app`.`users` `u` where <in_optimizer>(`u`.`id`,`u`.`id` in ( <materialize> (/* select#3 */ select `app`.`orders`.`user_id` from `app`.`orders` group by `app`.`orders`.`user_id` having (sum(`app`.`orders`.`amount`) > 1) ), <primary_index_lookup>(`u`.`id` in <temporary table> on <auto_distinct_key> where ((`u`.`id` = `<materialized_subquery>`.`user_id`))))) order by `n` desc",
+  "inputs": [
+    {
+      "inputs": [
+        {
+          "inputs": [
+            {
+              "alias": "u",
+              "operation": "Table scan on u",
+              "table_name": "users",
+              "access_type": "table",
+              "schema_name": "app",
+              "used_columns": [
+                "id",
+                "email"
+              ],
+              "estimated_rows": 2.0,
+              "estimated_total_cost": 0.45
+            },
+            {
+              "inputs": [
+                {
+                  "limit": 1,
+                  "inputs": [
+                    {
+                      "inputs": [
+                        {
+                          "inputs": [
+                            {
+                              "inputs": [
+                                {
+                                  "inputs": [
+                                    {
+                                      "covering": false,
+                                      "operation": "Index scan on orders using user_id",
+                                      "index_name": "user_id",
+                                      "table_name": "orders",
+                                      "access_type": "index",
+                                      "schema_name": "app",
+                                      "used_columns": [
+                                        "id",
+                                        "user_id",
+                                        "amount"
+                                      ],
+                                      "estimated_rows": 3.0,
+                                      "index_access_type": "index_scan",
+                                      "estimated_total_cost": 0.55
+                                    }
+                                  ],
+                                  "group_by": true,
+                                  "functions": [
+                                    "sum(orders.amount)"
+                                  ],
+                                  "operation": "Group aggregate: sum(orders.amount)",
+                                  "access_type": "aggregate",
+                                  "estimated_rows": 1.7320508075688772,
+                                  "estimated_total_cost": 0.8500000000000001
+                                }
+                              ],
+                              "condition": "(sum(orders.amount) > 1)",
+                              "operation": "Filter: (sum(orders.amount) > 1)",
+                              "access_type": "filter",
+                              "estimated_rows": 1.7320508075688772,
+                              "estimated_total_cost": 0.8500000000000001
+                            }
+                          ],
+                          "operation": "Materialize with deduplication",
+                          "access_type": "materialize",
+                          "deduplication": true,
+                          "estimated_rows": 1.7320508075688772,
+                          "estimated_total_cost": 1.0232050807568878,
+                          "estimated_first_row_cost": 1.0232050807568878
+                        }
+                      ],
+                      "covering": false,
+                      "operation": "Index lookup on <materialized_subquery> using <auto_distinct_key> (user_id=u.id)",
+                      "index_name": "<auto_distinct_key>",
+                      "table_name": "<materialized_subquery>",
+                      "access_type": "index",
+                      "lookup_condition": "user_id=u.id",
+                      "index_access_type": "index_lookup"
+                    }
+                  ],
+                  "operation": "Limit: 1 row(s)",
+                  "access_type": "limit",
+                  "limit_offset": 0,
+                  "estimated_rows": 1.0,
+                  "estimated_total_cost": 1.0232050807568878,
+                  "estimated_first_row_cost": 1.0232050807568878
+                }
+              ],
+              "heading": "Select #3 (subquery in condition; run only once)",
+              "subquery": true,
+              "cacheable": true,
+              "condition": "((u.id = `<materialized_subquery>`.user_id))",
+              "operation": "Filter: ((u.id = `<materialized_subquery>`.user_id))",
+              "access_type": "filter",
+              "estimated_rows": 1.0,
+              "subquery_location": "condition",
+              "estimated_total_cost": 1.1232050807568879,
+              "estimated_first_row_cost": 1.1232050807568879
+            }
+          ],
+          "condition": "<in_optimizer>(u.id,u.id in (select #3))",
+          "operation": "Filter: <in_optimizer>(u.id,u.id in (select #3))",
+          "access_type": "filter",
+          "estimated_rows": 2.0,
+          "estimated_total_cost": 0.45
+        }
+      ],
+      "operation": "Stream results",
+      "access_type": "stream",
+      "estimated_rows": 2.0,
+      "estimated_total_cost": 0.45
+    }
+  ],
+  "operation": "Sort: n DESC",
+  "query_type": "select",
+  "access_type": "sort",
+  "sort_fields": [
+    "n DESC"
+  ],
+  "inputs_from_select_list": [
+    {
+      "inputs": [
+        {
+          "alias": "x",
+          "covering": true,
+          "operation": "Covering index lookup on x using user_id (user_id=u.id)",
+          "index_name": "user_id",
+          "table_name": "orders",
+          "access_type": "index",
+          "schema_name": "app",
+          "used_columns": [
+            "user_id"
+          ],
+          "estimated_rows": 1.5,
+          "lookup_condition": "user_id=u.id",
+          "index_access_type": "index_lookup",
+          "estimated_total_cost": 0.4001219512195122
+        }
+      ],
+      "heading": "Select #2 (subquery in projection; dependent)",
+      "subquery": true,
+      "dependent": true,
+      "functions": [
+        "count(0)"
+      ],
+      "operation": "Aggregate: count(0)",
+      "access_type": "aggregate",
+      "estimated_rows": 1.0,
+      "subquery_location": "projection",
+      "estimated_total_cost": 0.5501219512195122
+    }
+  ]
+}
