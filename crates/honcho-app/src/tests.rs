@@ -533,6 +533,18 @@ fn query_tab(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<Query
     ws.read_with(cx, |ws, _| ws.active_query_tab().clone())
 }
 
+/// Runs something that changes rows, agreeing when asked.
+fn run_confirmed(ws: &Entity<Workspace>, cx: &mut VisualTestContext, keys: &str) -> Vec<String> {
+    press(cx, keys);
+    assert!(cx.has_pending_prompt(), "asks before changing rows");
+    cx.simulate_prompt_answer("Run");
+    let q = query_tab(ws, cx);
+    wait_until(cx, |cx| {
+        q.read_with(cx, |q, _| !q.is_running() && !q.output_text().is_empty())
+    });
+    q.read_with(cx, |q, _| q.output_text())
+}
+
 /// Runs with `keys` and waits for the query to finish.
 fn run(ws: &Entity<Workspace>, cx: &mut VisualTestContext, keys: &str) -> Vec<String> {
     press(cx, keys);
@@ -940,7 +952,7 @@ fn run_all_then_the_statement_at_the_cursor(cx: &mut TestAppContext) {
     let target = ws.read_with(cx, |ws, cx| ws.active_editor().read(cx).run_target.clone());
     assert_eq!(target, Some(10..18));
 
-    let messages = run(&ws, cx, "P-shift-enter");
+    let messages = run_confirmed(&ws, cx, "P-shift-enter");
     assert_eq!(result_rows(&ws, cx), [3]);
     assert!(
         messages.iter().any(|m| m == "2 rows affected"),
@@ -965,9 +977,9 @@ fn running_without_a_connection_opens_the_dialog(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn red_connections_confirm_writes_without_where(cx: &mut TestAppContext) {
+fn updates_and_deletes_ask_first(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
-    connect_fake(&ws, cx, Some(ColorTag::Red));
+    connect_fake(&ws, cx, None);
     cx.simulate_input("update 5");
     press(cx, "P-enter");
     assert!(cx.has_pending_prompt());
@@ -977,14 +989,18 @@ fn red_connections_confirm_writes_without_where(cx: &mut TestAppContext) {
         Vec::<String>::new()
     );
 
-    press(cx, "P-enter");
-    cx.simulate_prompt_answer("Run");
-    let q = query_tab(&ws, cx);
-    wait_until(cx, |cx| {
-        q.read_with(cx, |q, _| {
-            q.output_text().iter().any(|m| m == "5 rows affected")
-        })
-    });
+    let messages = run_confirmed(&ws, cx, "P-enter");
+    assert!(
+        messages.iter().any(|m| m == "5 rows affected"),
+        "{messages:?}"
+    );
+
+    // reads just run
+    press(cx, "P-a");
+    cx.simulate_input("select 2");
+    run(&ws, cx, "P-enter");
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(result_rows(&ws, cx), [2]);
 }
 
 #[gpui::test]
@@ -2300,7 +2316,7 @@ fn explain_shows_the_plan_and_asks_before_analyzing_a_write(cx: &mut TestAppCont
         shown_plan(&ws, cx).is_some_and(|p| p.read_with(cx, |p, _| p.plan.analyzed))
     });
     // a plain run afterwards has no plan tab
-    run(&ws, cx, "P-enter");
+    run_confirmed(&ws, cx, "P-enter");
     assert!(shown_plan(&ws, cx).is_none());
 }
 
@@ -2333,11 +2349,8 @@ fn the_explain_button_and_its_menu(cx: &mut TestAppContext) {
     click(cx, "explain-analyze");
     wait_until(cx, |cx| cx.has_pending_prompt());
     cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("explain-analyze").is_none(),
-        "the menu closes"
-    );
+    // the bounds are from the last frame, which can lag under load
+    wait_until(cx, |cx| cx.debug_bounds("explain-analyze").is_none());
 }
 
 #[gpui::test]

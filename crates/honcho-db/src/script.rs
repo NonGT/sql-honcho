@@ -43,6 +43,28 @@ pub fn unfiltered_write(statement: &str) -> Option<&'static str> {
     (!words.iter().any(|(w, _)| w.eq_ignore_ascii_case("WHERE"))).then_some(kind)
 }
 
+/// Names the statement kind when it changes rows: UPDATE or DELETE, also
+/// as part of a WITH. SELECT ... FOR UPDATE only locks them.
+pub fn row_change(statement: &str) -> Option<&'static str> {
+    let kind = |w: &str| match w.to_ascii_uppercase().as_str() {
+        "UPDATE" => Some("UPDATE"),
+        "DELETE" => Some("DELETE"),
+        _ => None,
+    };
+    let words = words(statement);
+    let (first, _) = words.first()?;
+    if let Some(k) = kind(first) {
+        return Some(k);
+    }
+    if !first.eq_ignore_ascii_case("WITH") {
+        return None;
+    }
+    words.windows(2).find_map(|w| {
+        let after_for = w[0].0.eq_ignore_ascii_case("FOR");
+        (!w[1].1 && !after_for).then(|| kind(w[1].0)).flatten()
+    })
+}
+
 const READS: &[&str] = &[
     "DESC", "DESCRIBE", "EXPLAIN", "HELP", "SELECT", "SHOW", "TABLE", "USE", "VALUES", "WITH",
 ];
@@ -131,6 +153,24 @@ mod tests {
 
     fn read(s: &str) -> bool {
         write_reason(s).is_none()
+    }
+
+    #[test]
+    fn row_changes() {
+        assert_eq!(row_change("update users set a = 1"), Some("UPDATE"));
+        assert_eq!(row_change("  DELETE FROM t WHERE id = 1"), Some("DELETE"));
+        assert_eq!(
+            row_change("with old as (select id from t) delete from t using old"),
+            Some("DELETE")
+        );
+        assert_eq!(row_change("select * from t for update"), None);
+        assert_eq!(
+            row_change("with x as (select 1) select * from x for update"),
+            None
+        );
+        assert_eq!(row_change("select 'delete' from t"), None);
+        assert_eq!(row_change("insert into t values (1)"), None);
+        assert_eq!(row_change("-- update\nselect 1"), None);
     }
 
     #[test]

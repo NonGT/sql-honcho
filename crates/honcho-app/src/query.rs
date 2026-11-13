@@ -739,22 +739,18 @@ impl QueryTab {
                 return;
             }
         }
-        let unfiltered = (conn.saved.color == Some(ColorTag::Red) && mode == RunMode::Execute)
-            .then(|| {
-                script::split(conn.saved.driver, &target.text)
-                    .iter()
-                    .find_map(|s| script::unfiltered_write(s.text))
-            })
+        // a read-only session refuses these itself
+        let warning = (mode == RunMode::Execute && !conn.saved.read_only)
+            .then(|| change_warning(conn.saved.driver, &target, &conn.saved.name))
             .flatten();
-        let Some(kind) = unfiltered else {
+        let Some((title, detail)) = warning else {
             self.run(target, cx);
             return;
         };
-        let msg = format!("{kind} without WHERE on {}?", conn.saved.name);
         let answer = window.prompt(
             PromptLevel::Warning,
-            &msg,
-            Some("It changes every row in the table."),
+            &title,
+            Some(&detail),
             // Cancel first so Enter doesn't confirm by reflex
             &["Cancel", "Run"],
             cx,
@@ -2131,6 +2127,43 @@ impl QueryTab {
     }
 }
 
+/// The UPDATEs and DELETEs a run would make, to agree to first: a title,
+/// and each statement on a line of its own with where it is.
+fn change_warning(
+    driver: DriverKind,
+    target: &Target,
+    connection: &str,
+) -> Option<(String, String)> {
+    const SHOWN: usize = 8;
+    let found: Vec<_> = script::split(driver, &target.text)
+        .into_iter()
+        .filter_map(|s| Some((s.line, script::row_change(s.text)?, s.text)))
+        .collect();
+    let title = match found.as_slice() {
+        [] => return None,
+        [(_, kind, _)] => format!("Run this {kind} on {connection}?"),
+        _ => format!(
+            "Run {} statements that change rows on {connection}?",
+            found.len()
+        ),
+    };
+    let mut detail = Vec::new();
+    for (line, _, text) in found.iter().take(SHOWN) {
+        let mut one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one.chars().count() > 100 {
+            one = one.chars().take(99).collect::<String>() + "…";
+        }
+        detail.push(format!("Line {}: {one}", target.first_line + line));
+        if script::unfiltered_write(text).is_some() {
+            detail.push("    No WHERE: this changes every row in the table.".into());
+        }
+    }
+    if found.len() > SHOWN {
+        detail.push(format!("…and {} more.", found.len() - SHOWN));
+    }
+    Some((title, detail.join("\n")))
+}
+
 /// What Explain Analyze would do that the user should agree to first: the
 /// title, the detail and the label of the button that runs it.
 fn analyze_warning(
@@ -2355,6 +2388,31 @@ mod tests {
         let (title, _, run) = analyze_warning("select 1", "prod", true).unwrap();
         assert_eq!(title, "Explain Analyze runs this query on prod.");
         assert_eq!(run, "Run");
+    }
+
+    #[test]
+    fn change_warning_lists_each_update_and_delete() {
+        let target = |text: &str| Target {
+            text: text.into(),
+            range: 0..0,
+            first_line: 9,
+            mode: RunMode::Execute,
+        };
+        let w = |text: &str| change_warning(DriverKind::MySql, &target(text), "prod");
+        assert_eq!(w("select 1;\ninsert into t values (1)"), None);
+
+        let (title, detail) = w("select 1;\nupdate t\n  set a = 1\n  where id = 2").unwrap();
+        assert_eq!(title, "Run this UPDATE on prod?");
+        assert_eq!(detail, "Line 11: update t set a = 1 where id = 2");
+
+        let (title, detail) =
+            w("delete from logs;\nselect 1;\nupdate t set a = 1 where id = 2").unwrap();
+        assert_eq!(title, "Run 2 statements that change rows on prod?");
+        assert_eq!(
+            detail,
+            "Line 10: delete from logs\n    No WHERE: this changes every row in the table.\n\
+             Line 12: update t set a = 1 where id = 2"
+        );
     }
 
     #[test]
