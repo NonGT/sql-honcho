@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::browser::{self, BrowserEvent, ObjectBrowser};
 use crate::commands::{self, Entry, MenuSpec};
-use crate::connection_dialog::{ConnectionDialog, DialogEvent};
+use crate::connection_dialog::{color_dot, ConnectionDialog, DialogEvent};
 use crate::connections;
 use crate::diff_view::{DiffEvent, DiffView};
 use crate::editor_view::EditorView;
@@ -21,7 +21,8 @@ use crate::project_pane::{ProjectEvent, ProjectPane};
 use crate::query::{Origin, QueryTab, TabEvent};
 use crate::routine_form::{FormEvent, RoutineForm};
 use crate::theme::{self, EditorFont, Theme, FONT_SIZE};
-use honcho_config::SavedConnection;
+use crate::workspace_form::{WorkspaceForm, WorkspaceFormEvent};
+use honcho_config::{SavedConnection, SavedWorkspace};
 use honcho_db::project::{Manifest, Project};
 use honcho_db::{DriverKind, ObjectRef, RoutineParam};
 
@@ -62,6 +63,9 @@ pub struct Workspace {
     discard_confirmed: bool,
     connection_dialog: Option<Entity<ConnectionDialog>>,
     routine_form: Option<Entity<RoutineForm>>,
+    workspace_form: Option<Entity<WorkspaceForm>>,
+    /// The workspace switcher's menu is open.
+    switcher_open: bool,
     browser: Entity<ObjectBrowser>,
     project: Option<Entity<ProjectPane>>,
     diff: Option<Entity<DiffView>>,
@@ -95,6 +99,8 @@ impl Workspace {
             discard_confirmed: false,
             connection_dialog: None,
             routine_form: None,
+            workspace_form: None,
+            switcher_open: false,
             show_browser: true,
             project: None,
             diff: None,
@@ -758,9 +764,14 @@ impl Workspace {
             .into_iter()
             .map(|s| (s, None))
             .collect();
+        let state = cx.global::<connections::Connections>();
         for q in self.query_tabs.values() {
             let q = q.read(cx);
-            if let Some(c) = &q.connection {
+            if let Some(c) = q
+                .connection
+                .as_ref()
+                .filter(|c| state.workspaces.shows(&c.saved.id))
+            {
                 open.push((c.saved.clone(), q.database.clone()));
             }
         }
@@ -1181,7 +1192,19 @@ impl Render for Workspace {
             let e = self.active_editor().read(cx);
             (e.title(), e.is_dirty())
         };
-        let full_title = format!("{title}{} — sql-honcho", if dirty { " ●" } else { "" });
+        let space = cx
+            .global::<connections::Connections>()
+            .workspaces
+            .active()
+            .cloned();
+        let full_title = format!(
+            "{title}{}{} — sql-honcho",
+            if dirty { " ●" } else { "" },
+            space
+                .as_ref()
+                .map(|w| format!(" — {}", w.name))
+                .unwrap_or_default()
+        );
         window.set_window_title(&full_title);
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
 
@@ -1209,6 +1232,11 @@ impl Render for Workspace {
                         .border_color(Theme::border())
                         .child(self.render_menu_bar(cx)),
                 )
+            })
+            // the workspace's colour along the top, so it's clear whose
+            // databases these are
+            .when_some(space.and_then(|w| w.color), |d, color| {
+                d.child(div().flex_none().h(px(3.)).bg(connections::color(color)))
             })
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
@@ -1292,6 +1320,7 @@ impl Render for Workspace {
                                 .border_color(Theme::border())
                                 .flex()
                                 .flex_col()
+                                .child(self.render_switcher(cx))
                                 .child(self.render_sidebar_tabs(cx))
                                 .child(div().flex_1().min_h_0().child(
                                     match (self.sidebar, &self.project) {
@@ -1359,6 +1388,7 @@ impl Render for Workspace {
             .child(self.render_status(cx))
             .children(self.connection_dialog.clone())
             .children(self.routine_form.clone())
+            .children(self.workspace_form.clone())
             .children(self.diff.clone())
             .children(self.palette.as_ref().map(|(p, _)| p.clone()))
     }
@@ -1578,6 +1608,208 @@ impl Workspace {
                     })),
             )
             .child("To start one, right-click a database in the Database tab and pick Save to project folder….")
+    }
+}
+
+impl Workspace {
+    /// Shows only `id`'s connections, or all of them. Sessions stay open,
+    /// so switching back is instant.
+    pub(crate) fn switch_workspace(&mut self, id: Option<&str>, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        let state = cx.global_mut::<connections::Connections>();
+        state.workspaces.set_active(id);
+        let _ = state.save_workspaces();
+        self.browser.update(cx, |b, cx| b.connections_changed(cx));
+        cx.notify();
+    }
+
+    pub(crate) fn edit_workspace(
+        &mut self,
+        workspace: Option<SavedWorkspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.switcher_open = false;
+        let form = cx.new(|cx| WorkspaceForm::new(workspace, window, cx));
+        self.subscriptions.push(cx.subscribe_in(
+            &form,
+            window,
+            |this, _, event: &WorkspaceFormEvent, window, cx| {
+                if let WorkspaceFormEvent::Saved = event {
+                    this.browser.update(cx, |b, cx| b.connections_changed(cx));
+                }
+                this.workspace_form = None;
+                let editor = this.active_editor().clone();
+                window.focus(&editor.focus_handle(cx));
+                cx.notify();
+            },
+        ));
+        self.workspace_form = Some(form);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_form(&self) -> Option<&Entity<WorkspaceForm>> {
+        self.workspace_form.as_ref()
+    }
+
+    fn delete_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        let Some(space) = cx
+            .global::<connections::Connections>()
+            .workspaces
+            .active()
+            .cloned()
+        else {
+            return;
+        };
+        let msg = format!("Delete the workspace \"{}\"?", space.name);
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &msg,
+            Some("Its connections stay saved."),
+            &["Delete", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                let state = cx.global_mut::<connections::Connections>();
+                state.workspaces.remove(&space.id);
+                let _ = state.save_workspaces();
+                this.switch_workspace(None, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let spaces = &cx.global::<connections::Connections>().workspaces;
+        let active = spaces.active().cloned();
+        let all: Vec<SavedWorkspace> = spaces.workspaces().to_vec();
+        let item = |id: SharedString| {
+            div()
+                .id(id)
+                .px_3()
+                .py_0p5()
+                .flex()
+                .items_center()
+                .gap_2()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .cursor_pointer()
+                .hover(|d| d.bg(Theme::accent_dim()))
+        };
+        let mark = |on: bool| {
+            div()
+                .w(px(10.))
+                .flex_none()
+                .text_color(Theme::accent())
+                .child(if on { "✓" } else { "" })
+        };
+        let menu = self.switcher_open.then(|| {
+            let current = active.as_ref().map(|w| w.id.clone());
+            deferred(
+                div()
+                    .id("switcher-menu")
+                    .occlude()
+                    .absolute()
+                    .top(px(28.))
+                    .left_1()
+                    .right_1()
+                    .py_1()
+                    .bg(Theme::panel())
+                    .border_1()
+                    .border_color(Theme::border())
+                    .rounded_md()
+                    .shadow_lg()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.switcher_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        item("ws-all".into())
+                            .child(mark(current.is_none()))
+                            .child("All connections")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.switch_workspace(None, cx)),
+                            ),
+                    )
+                    .children(all.into_iter().map(|w| {
+                        let id = w.id.clone();
+                        item(format!("ws-{}", w.id).into())
+                            .child(mark(current.as_deref() == Some(w.id.as_str())))
+                            .child(color_dot(w.color))
+                            .child(w.name.clone())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.switch_workspace(Some(&id), cx)
+                            }))
+                    }))
+                    .child(div().my_1().h(px(1.)).bg(Theme::border()))
+                    .child(item("ws-new".into()).child("New workspace…").on_click(
+                        cx.listener(|this, _, window, cx| this.edit_workspace(None, window, cx)),
+                    ))
+                    .when_some(active.clone(), |d, w| {
+                        d.child(
+                            item("ws-edit".into())
+                                .child(format!("Edit \u{201c}{}\u{201d}…", w.name))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.edit_workspace(Some(w.clone()), window, cx)
+                                })),
+                        )
+                        .child(
+                            item("ws-delete".into())
+                                .child("Delete workspace…")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.delete_workspace(window, cx)
+                                })),
+                        )
+                    }),
+            )
+            .with_priority(1)
+        });
+        div()
+            .relative()
+            .flex_none()
+            .p_1()
+            .bg(Theme::panel())
+            .border_b_1()
+            .border_color(Theme::border())
+            .text_size(px(12.))
+            .child(
+                div()
+                    .id("switcher")
+                    .h(px(22.))
+                    .px_1p5()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(Theme::border()))
+                    .child(match &active {
+                        Some(w) => color_dot(w.color).into_any_element(),
+                        None => div()
+                            .text_color(Theme::muted())
+                            .child("◇")
+                            .into_any_element(),
+                    })
+                    .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(
+                        match &active {
+                            Some(w) => w.name.clone(),
+                            None => "All connections".into(),
+                        },
+                    ))
+                    .child(div().text_color(Theme::muted()).child("▾"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.switcher_open = !this.switcher_open;
+                        cx.notify();
+                    })),
+            )
+            .children(menu)
     }
 }
 

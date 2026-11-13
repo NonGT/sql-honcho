@@ -327,7 +327,7 @@ impl ObjectBrowser {
             .as_ref()
             .map(|s| s.term.to_lowercase())
             .unwrap_or_default();
-        for saved in cx.global::<Connections>().store.connections() {
+        for saved in cx.global::<Connections>().visible() {
             let item = Item::Connection(Box::new(saved.clone()));
             let path = vec![item.segment()];
             // while filtering, connections that can't be searched show only
@@ -1050,14 +1050,13 @@ impl ObjectBrowser {
         self.session(id).is_some()
     }
 
-    /// Connections with a session open, in the order they're listed.
+    /// Connections in the workspace with a session open, in the order
+    /// they're listed.
     pub fn open_connections(&self, cx: &App) -> Vec<SavedConnection> {
         cx.global::<Connections>()
-            .store
-            .connections()
-            .iter()
+            .visible()
+            .into_iter()
             .filter(|c| self.session(&c.id).is_some())
-            .cloned()
             .collect()
     }
 
@@ -1194,7 +1193,8 @@ impl ObjectBrowser {
             return;
         }
         let now = std::time::Instant::now();
-        for saved in cx.global::<Connections>().store.connections().to_vec() {
+        // only what's on screen; the rest get checked when they show again
+        for saved in cx.global::<Connections>().visible() {
             // tests don't dial out; the fake answers right away
             if cfg!(test) && saved.driver != DriverKind::Fake {
                 continue;
@@ -1910,6 +1910,8 @@ impl Render for ObjectBrowser {
                         .text_color(Theme::muted())
                         .child(if self.search.is_some() {
                             "Nothing matches."
+                        } else if cx.global::<Connections>().workspaces.active().is_some() {
+                            "No connections in this workspace. Edit it from the menu above, or add one with Cmd/Ctrl+Shift+C."
                         } else {
                             "No saved connections. Add one with Cmd/Ctrl+Shift+C."
                         }),
@@ -1937,6 +1939,10 @@ impl ObjectBrowser {
             .cloned()
             .collect();
         connections::forget_caches(&ids, cx);
+        let state = cx.global_mut::<Connections>();
+        if state.workspaces.retain_connections(&ids) {
+            let _ = state.save_workspaces();
+        }
         for id in gone {
             if let Some(Conn::Open(s)) = self.conns.remove(&id) {
                 cx.background_spawn(async move { s.close().await }).detach();

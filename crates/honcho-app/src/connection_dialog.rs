@@ -192,11 +192,12 @@ impl ConnectionDialog {
             section: Section::General,
             busy: false,
         };
-        let store = &cx.global::<Connections>().store;
+        let state = cx.global::<Connections>();
         let shown = current
-            .and_then(|id| store.get(id))
-            .or_else(|| store.connections().first())
-            .cloned();
+            .and_then(|id| state.store.get(id))
+            .filter(|c| state.workspaces.shows(&c.id))
+            .cloned()
+            .or_else(|| state.visible().into_iter().next());
         match shown {
             Some(first) => this.load(first, false, window, cx),
             None => this.new_connection(window, cx),
@@ -482,7 +483,8 @@ impl ConnectionDialog {
                 let result = written.map_err(|e| e.to_string()).and_then(|()| {
                     let state = cx.global_mut::<Connections>();
                     state.store.upsert(saved.clone());
-                    state.store.save().map_err(|e| e.to_string())
+                    state.store.save().map_err(|e| e.to_string())?;
+                    join_workspace(&saved.id, cx)
                 });
                 match result {
                     Ok(()) => {
@@ -537,13 +539,14 @@ impl ConnectionDialog {
         let state = cx.global_mut::<Connections>();
         let original = state.store.get(&id).cloned();
         let copy = state.store.duplicate(&id).cloned();
-        let saved = state.store.save();
+        let saved = state.store.save().map_err(|e| e.to_string());
         let (Some(original), Some(copy)) = (original, copy) else {
             return;
         };
+        let saved = saved.and_then(|()| join_workspace(&copy.id, cx));
         self.load(copy.clone(), false, window, cx);
         if let Err(e) = saved {
-            self.set_status(e.to_string(), true);
+            self.set_status(e, true);
         }
         self.keyring_job(
             "The password wasn't copied",
@@ -585,7 +588,7 @@ impl ConnectionDialog {
             return;
         };
         let saved = state.store.save();
-        let next = state.store.connections().first().cloned();
+        let next = state.visible().into_iter().next();
         match next {
             Some(next) => self.load(next, false, window, cx),
             None => self.new_connection(window, cx),
@@ -879,7 +882,7 @@ impl Render for ConnectionDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = cx.global::<Connections>();
         let selected = self.selected_id().map(str::to_string);
-        let saved: Vec<SavedConnection> = state.store.connections().to_vec();
+        let saved = state.visible();
 
         let list = div()
             .w(px(230.))
@@ -1438,6 +1441,16 @@ impl Render for ConnectionDialog {
             .occlude()
             .child(dialog)
     }
+}
+
+/// A connection made inside a workspace belongs to it.
+fn join_workspace(id: &str, cx: &mut App) -> Result<(), String> {
+    let state = cx.global_mut::<Connections>();
+    if state.workspaces.shows(id) {
+        return Ok(());
+    }
+    state.workspaces.add_to_active(id);
+    state.save_workspaces()
 }
 
 pub fn color_dot(tag: Option<ColorTag>) -> gpui::Div {
