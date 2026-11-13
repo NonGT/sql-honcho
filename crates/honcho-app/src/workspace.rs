@@ -67,7 +67,11 @@ pub struct Workspace {
     /// The workspace switcher's menu is open.
     switcher_open: bool,
     browser: Entity<ObjectBrowser>,
+    /// The project shown in the Project tab.
     project: Option<Entity<ProjectPane>>,
+    /// Every project opened so far, so switching back keeps its session
+    /// and comparison.
+    project_panes: HashMap<PathBuf, Entity<ProjectPane>>,
     diff: Option<Entity<DiffView>>,
     sidebar: Sidebar,
     show_browser: bool,
@@ -103,6 +107,7 @@ impl Workspace {
             switcher_open: false,
             show_browser: true,
             project: None,
+            project_panes: HashMap::new(),
             diff: None,
             sidebar: Sidebar::Database,
             browser_drag: None,
@@ -124,11 +129,7 @@ impl Workspace {
         })
         .detach();
         this.new_tab(String::new(), None, window, cx);
-        if let Some(root) = last_project(cx) {
-            if let Ok(project) = Project::open(&root) {
-                this.show_project(project, false, window, cx);
-            }
-        }
+        this.show_scope_project(window, cx);
         this.open_paths(paths, window, cx);
         this.reconnect_tabs(cx);
 
@@ -419,6 +420,8 @@ impl Workspace {
         .detach();
     }
 
+    /// Shows a project opened or saved just now, with a fresh comparison,
+    /// and adds it to the workspace's projects.
     fn show_project(
         &mut self,
         project: Project,
@@ -426,9 +429,89 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let root = project.root.clone();
         if remember {
-            remember_project(&project.root, cx);
+            update_projects(cx, |list| {
+                if !list.roots.contains(&root) {
+                    list.roots.push(root.clone());
+                }
+                list.current = Some(root.clone());
+            });
         }
+        let pane = self.new_project_pane(project, window, cx);
+        self.set_project(Some(pane), cx);
+        self.sidebar = Sidebar::Project;
+        self.show_browser = true;
+        cx.notify();
+    }
+
+    /// Shows the workspace's current project, or its first one that still
+    /// opens. Panes opened before are kept as they were.
+    fn show_scope_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list = scope_projects(cx);
+        let order = list.current.iter().chain(&list.roots);
+        let mut pane = None;
+        for root in order {
+            if let Some(p) = self.project_panes.get(root) {
+                pane = Some(p.clone());
+                break;
+            }
+            if let Ok(project) = Project::open(root) {
+                pane = Some(self.new_project_pane(project, window, cx));
+                break;
+            }
+        }
+        self.set_project(pane, cx);
+    }
+
+    fn pick_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        update_projects(cx, |list| list.current = Some(root.clone()));
+        if let Some(pane) = self.project_panes.get(&root).cloned() {
+            self.set_project(Some(pane), cx);
+            return;
+        }
+        match Project::open(&root) {
+            Ok(project) => {
+                let pane = self.new_project_pane(project, window, cx);
+                self.set_project(Some(pane), cx);
+            }
+            Err(e) => {
+                // gone or moved: drop it rather than keep offering it
+                update_projects(cx, |list| {
+                    list.roots.retain(|r| r != &root);
+                    list.current = None;
+                });
+                self.show_scope_project(window, cx);
+                let detail = format!("{e}\n\nIt's been taken off this workspace's projects.");
+                let answer = window.prompt(
+                    PromptLevel::Warning,
+                    "This project folder couldn't be opened.",
+                    Some(&detail),
+                    &["OK"],
+                    cx,
+                );
+                cx.background_spawn(async move { answer.await.ok() })
+                    .detach();
+            }
+        }
+    }
+
+    fn set_project(&mut self, pane: Option<Entity<ProjectPane>>, cx: &mut Context<Self>) {
+        let roots = scope_projects(cx).roots;
+        if let Some(p) = &pane {
+            p.update(cx, |p, cx| p.set_choices(roots, cx));
+        }
+        self.project = pane;
+        cx.notify();
+    }
+
+    fn new_project_pane(
+        &mut self,
+        project: Project,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ProjectPane> {
+        let root = project.root.clone();
         let pane = cx.new(|cx| ProjectPane::new(project, cx));
         self.subscriptions
             .push(cx.observe(&pane, |_, _, cx| cx.notify()));
@@ -472,18 +555,25 @@ impl Workspace {
                     this.diff = Some(diff);
                     cx.notify();
                 }
+                ProjectEvent::Pick(root) => this.pick_project(root.clone(), window, cx),
+                ProjectEvent::OpenAnother => this.open_project(&OpenProject, window, cx),
                 ProjectEvent::Close => {
-                    this.project = None;
-                    this.sidebar = Sidebar::Database;
-                    forget_project(cx);
+                    let root = pane.read(cx).project.root.clone();
+                    update_projects(cx, |list| {
+                        list.roots.retain(|r| r != &root);
+                        list.current = None;
+                    });
+                    this.project_panes.remove(&root);
+                    this.show_scope_project(window, cx);
+                    if this.project.is_none() {
+                        this.sidebar = Sidebar::Database;
+                    }
                     cx.notify();
                 }
             },
         ));
-        self.project = Some(pane);
-        self.sidebar = Sidebar::Project;
-        self.show_browser = true;
-        cx.notify();
+        self.project_panes.insert(root, pane.clone());
+        pane
     }
 
     #[cfg(test)]
@@ -503,7 +593,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_project(project, false, window, cx);
+        self.show_project(project, true, window, cx);
     }
 
     fn ask_routine(
@@ -1623,12 +1713,18 @@ impl Workspace {
 impl Workspace {
     /// Shows only `id`'s connections, or all of them. Sessions stay open,
     /// so switching back is instant.
-    pub(crate) fn switch_workspace(&mut self, id: Option<&str>, cx: &mut Context<Self>) {
+    pub(crate) fn switch_workspace(
+        &mut self,
+        id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.switcher_open = false;
         let state = cx.global_mut::<connections::Connections>();
         state.workspaces.set_active(id);
         let _ = state.save_workspaces();
         self.browser.update(cx, |b, cx| b.connections_changed(cx));
+        self.show_scope_project(window, cx);
         cx.notify();
     }
 
@@ -1684,11 +1780,12 @@ impl Workspace {
             if answer.await != Ok(0) {
                 return;
             }
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 let state = cx.global_mut::<connections::Connections>();
                 state.workspaces.remove(&space.id);
                 let _ = state.save_workspaces();
-                this.switch_workspace(None, cx);
+                forget_scope(&space.id, cx);
+                this.switch_workspace(None, window, cx);
             })
             .ok();
         })
@@ -1743,9 +1840,9 @@ impl Workspace {
                         item("ws-all".into())
                             .child(mark(current.is_none()))
                             .child("All connections")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.switch_workspace(None, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.switch_workspace(None, window, cx)
+                            })),
                     )
                     .children(all.into_iter().map(|w| {
                         let id = w.id.clone();
@@ -1753,8 +1850,8 @@ impl Workspace {
                             .child(mark(current.as_deref() == Some(w.id.as_str())))
                             .child(color_dot(w.color))
                             .child(w.name.clone())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.switch_workspace(Some(&id), cx)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.switch_workspace(Some(&id), window, cx)
                             }))
                     }))
                     .child(div().my_1().h(px(1.)).bg(Theme::border()))
@@ -1892,27 +1989,60 @@ fn project_state_path(cx: &App) -> PathBuf {
         .with_file_name("project.json")
 }
 
-fn last_project(cx: &App) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(project_state_path(cx)).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("root")?.as_str().map(PathBuf::from)
+/// The project folders of one workspace, or of "All connections".
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+struct ProjectList {
+    #[serde(default)]
+    roots: Vec<PathBuf>,
+    #[serde(default)]
+    current: Option<PathBuf>,
 }
 
-fn remember_project(root: &Path, cx: &App) {
-    let path = project_state_path(cx);
-    let text = serde_json::json!({ "root": root }).to_string();
-    cx.background_spawn(async move {
-        let _ = std::fs::write(path, text);
-    })
-    .detach();
+/// project.json: each workspace's projects by its id, "" for All.
+fn project_lists(cx: &App) -> HashMap<String, ProjectList> {
+    let Ok(text) = std::fs::read_to_string(project_state_path(cx)) else {
+        return HashMap::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return HashMap::new();
+    };
+    // it used to hold the one project; keep it where the user is now too
+    if let Some(root) = v.get("root").and_then(|r| r.as_str()) {
+        let root = PathBuf::from(root);
+        let list = ProjectList {
+            roots: vec![root.clone()],
+            current: Some(root),
+        };
+        return HashMap::from([(String::new(), list.clone()), (scope_key(cx), list)]);
+    }
+    serde_json::from_value(v["workspaces"].clone()).unwrap_or_default()
 }
 
-fn forget_project(cx: &App) {
-    let path = project_state_path(cx);
-    cx.background_spawn(async move {
-        let _ = std::fs::remove_file(path);
-    })
-    .detach();
+fn save_project_lists(lists: &HashMap<String, ProjectList>, cx: &App) {
+    let text = serde_json::json!({ "workspaces": lists }).to_string();
+    let _ = std::fs::write(project_state_path(cx), text);
+}
+
+fn scope_key(cx: &App) -> String {
+    let spaces = &cx.global::<connections::Connections>().workspaces;
+    spaces.active().map(|w| w.id.clone()).unwrap_or_default()
+}
+
+fn scope_projects(cx: &App) -> ProjectList {
+    project_lists(cx).remove(&scope_key(cx)).unwrap_or_default()
+}
+
+fn update_projects(cx: &App, f: impl FnOnce(&mut ProjectList)) {
+    let mut lists = project_lists(cx);
+    f(lists.entry(scope_key(cx)).or_default());
+    save_project_lists(&lists, cx);
+}
+
+fn forget_scope(id: &str, cx: &App) {
+    let mut lists = project_lists(cx);
+    if lists.remove(id).is_some() {
+        save_project_lists(&lists, cx);
+    }
 }
 
 const RESIZE_BORDER: Pixels = px(5.);

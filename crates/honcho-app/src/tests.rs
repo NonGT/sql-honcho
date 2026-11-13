@@ -2429,7 +2429,7 @@ fn a_workspace_shows_only_its_connections(cx: &mut TestAppContext) {
     assert_eq!(in_acme, 2);
 
     // its session stays open while the others show
-    ws.update(cx, |ws, cx| ws.switch_workspace(None, cx));
+    ws.update_in(cx, |ws, window, cx| ws.switch_workspace(None, window, cx));
     let labels = browser_labels(&ws, cx);
     for name in ["acme prod", "globex prod", "fake db"] {
         assert!(labels.contains(&name.to_string()), "{labels:?}");
@@ -2441,4 +2441,63 @@ fn a_workspace_shows_only_its_connections(cx: &mut TestAppContext) {
     )
     .unwrap();
     assert!(saved.contains("\"Acme\""), "{saved}");
+}
+
+#[gpui::test]
+fn each_workspace_keeps_its_own_projects(cx: &mut TestAppContext) {
+    use crate::project_pane::ProjectEvent;
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let shown = |cx: &mut VisualTestContext| {
+        ws.read_with(cx, |ws, cx| {
+            ws.project().map(|p| p.read(cx).project.root.clone())
+        })
+    };
+    let (a, pane_a) = open_project(&ws, cx, "fake db");
+    let (b, pane_b) = open_project(&ws, cx, "fake db");
+    assert_eq!(shown(cx).as_deref(), Some(b.path()));
+    assert_eq!(
+        pane_b.read_with(cx, |p, _| p.choices().to_vec()),
+        [a.path(), b.path()]
+    );
+
+    // picking one keeps the pane it had
+    pane_b.update(cx, |_, cx| cx.emit(ProjectEvent::Pick(a.path().into())));
+    cx.run_until_parked();
+    let now = ws.read_with(cx, |ws, _| ws.project().unwrap().clone());
+    assert_eq!(now.entity_id(), pane_a.entity_id());
+
+    // a workspace starts with none of them
+    let acme = cx.update(|_, cx| {
+        let state = cx.global_mut::<Connections>();
+        let w = honcho_config::SavedWorkspace::new("Acme");
+        state.workspaces.upsert(w.clone());
+        w.id
+    });
+    ws.update_in(cx, |ws, window, cx| {
+        ws.switch_workspace(Some(&acme), window, cx)
+    });
+    assert_eq!(shown(cx), None);
+    let (c, pane_c) = open_project(&ws, cx, "fake db");
+    assert_eq!(
+        pane_c.read_with(cx, |p, _| p.choices().to_vec()),
+        [c.path()]
+    );
+
+    ws.update_in(cx, |ws, window, cx| ws.switch_workspace(None, window, cx));
+    assert_eq!(shown(cx).as_deref(), Some(a.path()));
+    ws.update_in(cx, |ws, window, cx| {
+        ws.switch_workspace(Some(&acme), window, cx)
+    });
+    assert_eq!(shown(cx).as_deref(), Some(c.path()));
+
+    // closing takes it out of the workspace only
+    pane_c.update(cx, |_, cx| cx.emit(ProjectEvent::Close));
+    cx.run_until_parked();
+    assert_eq!(shown(cx), None);
+    ws.update_in(cx, |ws, window, cx| ws.switch_workspace(None, window, cx));
+    let left = ws.read_with(cx, |ws, cx| {
+        ws.project().unwrap().read(cx).choices().to_vec()
+    });
+    assert_eq!(left, [a.path(), b.path()]);
 }
