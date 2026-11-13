@@ -11,6 +11,7 @@ mod palette;
 mod plan_view;
 mod prompt;
 mod query;
+mod reach;
 
 mod diff_view;
 mod project_pane;

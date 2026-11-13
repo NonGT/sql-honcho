@@ -18,6 +18,8 @@ use honcho_db::{
 use crate::connection_dialog::color_dot;
 use crate::connections::{self, Connections};
 use crate::editor_view::{self, EditorView};
+use crate::query::Tip;
+use crate::reach::{self, Probe, Reach};
 use crate::theme::{self, Theme};
 use honcho_db::routine::{self, ident, qualified};
 
@@ -244,6 +246,11 @@ pub struct ObjectBrowser {
     /// Connections whose cache has been read.
     warmed: HashSet<String>,
     cache_saves: HashMap<String, Task<()>>,
+    /// Whether each connection's server answers.
+    probes: HashMap<String, Probe>,
+    /// The window is in front; checks pause otherwise.
+    active: bool,
+    _checks: Task<()>,
 }
 
 impl EventEmitter<BrowserEvent> for ObjectBrowser {}
@@ -271,7 +278,16 @@ impl ObjectBrowser {
             refreshing: HashSet::new(),
             warmed: HashSet::new(),
             cache_saves: HashMap::new(),
+            probes: HashMap::new(),
+            active: true,
+            _checks: Task::ready(()),
         };
+        this._checks = cx.spawn(async move |this, cx| loop {
+            if this.update(cx, |this, cx| this.check_due(cx)).is_err() {
+                return;
+            }
+            cx.background_executor().timer(CHECK_TICK).await;
+        });
         this.rebuild(cx);
         this
     }
@@ -548,6 +564,7 @@ impl ObjectBrowser {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(session) => {
+                        this.login_result(&id, None);
                         this.conns.insert(id.clone(), Conn::Open(session));
                         for (path, action) in this.pending.remove(&id).unwrap_or_default() {
                             this.perform(path, action, true, cx);
@@ -582,6 +599,9 @@ impl ObjectBrowser {
                         );
                     }
                     Err(e) => {
+                        if let DbError::Auth(why) = &e {
+                            this.login_result(&id, Some(why.clone()));
+                        }
                         let message = if this.reconnected.contains(&id) {
                             format!("Connection lost and reconnecting failed: {e}")
                         } else {
@@ -1154,6 +1174,122 @@ impl ObjectBrowser {
             .any(|r| r.item.label() == label && self.stale.contains(&r.path[..r.path.len() - 1]))
     }
 
+    /// The window came to the front or went to the back. Coming back
+    /// checks everything at once.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if active && !self.active {
+            let now = std::time::Instant::now();
+            for p in self.probes.values_mut() {
+                p.next = now;
+            }
+        }
+        self.active = active;
+        if active {
+            self.check_due(cx);
+        }
+    }
+
+    fn check_due(&mut self, cx: &mut Context<Self>) {
+        if !self.active {
+            return;
+        }
+        let now = std::time::Instant::now();
+        for saved in cx.global::<Connections>().store.connections().to_vec() {
+            // tests don't dial out; the fake answers right away
+            if cfg!(test) && saved.driver != DriverKind::Fake {
+                continue;
+            }
+            let probe = self
+                .probes
+                .entry(saved.id.clone())
+                .or_insert_with(|| Probe::new(now));
+            if probe.running || probe.next > now {
+                continue;
+            }
+            probe.running = true;
+            let id = saved.id.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move { reach::check(&saved) })
+                    .await;
+                this.update(cx, |this, cx| {
+                    let Some(p) = this.probes.get_mut(&id) else {
+                        return;
+                    };
+                    match result {
+                        Some(r) => p.checked(r, std::time::Instant::now()),
+                        // nothing to dial: leave it unknown, don't ask again
+                        None => {
+                            this.probes.remove(&id);
+                            this.probes.insert(
+                                id,
+                                Probe {
+                                    next: std::time::Instant::now() + Duration::from_secs(86400),
+                                    ..Probe::new(std::time::Instant::now())
+                                },
+                            );
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// What a connection's indicator shows: symbol, colour and tooltip.
+    fn indicator(&self, id: &str) -> Option<(&'static str, gpui::Hsla, String)> {
+        let now = std::time::Instant::now();
+        if matches!(self.conns.get(id), Some(Conn::Open(_))) {
+            return Some(("●", Theme::success(), "Connected".into()));
+        }
+        let p = self.probes.get(id)?;
+        let when = p
+            .checked
+            .map(|at| format!(" · checked {}", reach::ago(at, now)))
+            .unwrap_or_default();
+        Some(match &p.reach {
+            Reach::Checking if p.checked.is_none() && !p.running => return None,
+            Reach::Checking => ("○", Theme::border(), "Checking…".into()),
+            Reach::Reachable => ("○", Theme::muted(), format!("Reachable{when}")),
+            Reach::Unreachable(e) => ("✕", Theme::error(), format!("{e}{when}")),
+            Reach::LoginFailed(e) => ("!", Theme::warning(), format!("Login failed: {e}")),
+        })
+    }
+
+    fn login_result(&mut self, id: &str, failed: Option<String>) {
+        let now = std::time::Instant::now();
+        let p = self
+            .probes
+            .entry(id.to_string())
+            .or_insert_with(|| Probe::new(now));
+        match failed {
+            Some(e) => p.reach = Reach::LoginFailed(e),
+            None => {
+                p.reach = Reach::Reachable;
+                p.checked = Some(now);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn close_all_for_test(&mut self, cx: &mut Context<Self>) {
+        self.conns.clear();
+        self.check_due(cx);
+    }
+
+    #[cfg(test)]
+    pub fn indicator_of(&self, name: &str, cx: &App) -> Option<String> {
+        let saved = cx
+            .global::<Connections>()
+            .store
+            .connections()
+            .iter()
+            .find(|c| c.name == name)?;
+        self.indicator(&saved.id).map(|(s, _, _)| s.to_string())
+    }
+
     fn save_expanded(&self, cx: &App) {
         let path = cx
             .global::<Connections>()
@@ -1350,6 +1486,8 @@ fn groups_found(found: &[ObjectRef], at: &Scope) -> Vec<Item> {
         .collect()
 }
 
+/// How often due checks are looked for; each connection has its own pace.
+const CHECK_TICK: Duration = Duration::from_secs(10);
 const CACHE_DELAY: Duration = Duration::from_millis(500);
 
 /// What a connection's tree held, kept between launches. Names and
@@ -1648,6 +1786,26 @@ impl Render for ObjectBrowser {
                                     .overflow_hidden()
                                     .child(n)
                             }))
+                            .when_some(
+                                match &row.item {
+                                    Item::Connection(c) => this.indicator(&c.id),
+                                    _ => None,
+                                },
+                                |d, (symbol, color, tip)| {
+                                    let tip = gpui::SharedString::from(tip);
+                                    d.child(div().flex_1()).child(
+                                        div()
+                                            .id(("reach", ix))
+                                            .flex_none()
+                                            .text_size(px(11.))
+                                            .text_color(color)
+                                            .child(symbol)
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| Tip(tip.clone())).into()
+                                            }),
+                                    )
+                                },
+                            )
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, e, window, cx| {

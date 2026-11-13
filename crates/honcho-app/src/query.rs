@@ -2175,7 +2175,7 @@ fn analyze_warning(
     ))
 }
 
-struct Tip(SharedString);
+pub(crate) struct Tip(pub SharedString);
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
