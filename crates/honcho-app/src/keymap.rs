@@ -146,11 +146,42 @@ fn bind(cx: &mut App) {
     // to whatever that layout puts on the US key.
     let p = Platform::current();
     let mapper = cx.keyboard_mapper().clone();
-    let bindings = bindings(p).into_iter().map(|b| {
+    let mut all = native_menu_keys(p);
+    all.extend(bindings(p));
+    let bindings = all.into_iter().map(|b| {
         to_key_binding(&b, p == Platform::Windows, mapper.as_ref())
             .expect("default keymap is valid")
     });
     cx.bind_keys(bindings);
+}
+
+/// gpui hands a key's name to the macOS menu as its key equivalent, and
+/// AppKit takes the first letter: cmd-enter showed as ⌘E, and pressing ⌘E
+/// ran the statement instead of explaining it. These come first, so the
+/// menu picks them, with the characters AppKit wants. Nothing in the app
+/// has the "Pane" context, so they're never matched from the keyboard.
+pub(crate) fn native_menu_keys(p: Platform) -> Vec<Binding> {
+    if p != Platform::Mac {
+        return Vec::new();
+    }
+    bindings(p)
+        .into_iter()
+        .filter(|b| matches!(b.context, None | EDITOR) && !b.keys.contains(' '))
+        .filter_map(|b| {
+            // a bare enter or tab in the menu would take every press of it
+            let (mods, key) = b.keys.rsplit_once('-')?;
+            let native = match key {
+                "enter" => "\r",
+                "tab" => "\t",
+                _ => return None,
+            };
+            Some(Binding {
+                keys: format!("{mods}-{native}"),
+                action: b.action,
+                context: Some("Pane"),
+            })
+        })
+        .collect()
 }
 
 fn to_key_binding(
