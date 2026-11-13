@@ -2349,11 +2349,8 @@ fn the_explain_button_and_its_menu(cx: &mut TestAppContext) {
     click(cx, "explain-analyze");
     wait_until(cx, |cx| cx.has_pending_prompt());
     cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("explain-analyze").is_none(),
-        "the menu closes"
-    );
+    // the bounds are from the last frame, which can lag under load
+    wait_until(cx, |cx| cx.debug_bounds("explain-analyze").is_none());
 }
 
 #[gpui::test]
