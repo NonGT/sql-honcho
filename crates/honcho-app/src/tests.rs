@@ -1452,6 +1452,20 @@ fn the_tree_shows_what_it_had_last_time_while_it_loads(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn connections_say_whether_their_server_answers(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    connect_fake(&ws, cx, None);
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    let shown = |cx: &mut VisualTestContext| b.read_with(cx, |b, cx| b.indicator_of("fake db", cx));
+    assert_eq!(shown(cx).as_deref(), Some("●"));
+
+    // closed again, it's only known to answer
+    b.update(cx, |b, cx| b.close_all_for_test(cx));
+    cx.run_until_parked();
+    assert_eq!(shown(cx).as_deref(), Some("○"));
+}
+
+#[gpui::test]
 fn double_click_opens_a_connected_tab(cx: &mut TestAppContext) {
     let (ws, cx) = open(cx, vec![]);
     connect_fake(&ws, cx, None);

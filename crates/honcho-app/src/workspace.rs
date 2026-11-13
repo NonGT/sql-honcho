@@ -111,6 +111,12 @@ impl Workspace {
             palette: None,
         };
         this.subscribe_browser(window, cx);
+        // connection checks pause while the window is in the background
+        cx.observe_window_activation(window, |this, window, cx| {
+            let active = window.is_window_active();
+            this.browser.update(cx, |b, cx| b.set_active(active, cx));
+        })
+        .detach();
         this.new_tab(String::new(), None, window, cx);
         if let Some(root) = last_project(cx) {
             if let Ok(project) = Project::open(&root) {

@@ -122,6 +122,9 @@ impl Theme {
     pub fn warning() -> Hsla {
         c(0xd7ba7d)
     }
+    pub fn success() -> Hsla {
+        c(0x73c991)
+    }
     pub fn added() -> Hsla {
         ca(0x2ea04330)
     }
