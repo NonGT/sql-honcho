@@ -379,6 +379,43 @@ mod tests {
         );
     }
 
+    /// What gpui's macOS menu would show: the first binding usable from
+    /// the editor, key name passed through unless AppKit knows it.
+    #[test]
+    fn mac_menu_keys_are_ones_appkit_understands() {
+        let p = Platform::Mac;
+        let mut all = keymap::native_menu_keys(p);
+        all.extend(keymap::bindings(p));
+        let named = [
+            "up", "down", "left", "right", "pageup", "pagedown", "home", "end",
+        ];
+        let mut seen = std::collections::HashMap::new();
+        for m in menus(p) {
+            for e in m.entries {
+                let Entry::Command(label, action) = e else {
+                    continue;
+                };
+                let Some(b) = all.iter().find(|b| {
+                    matches!(b.context, None | Some("Editor") | Some("Pane"))
+                        && (b.action)().partial_eq(&*action())
+                }) else {
+                    continue;
+                };
+                let key = b.keys.rsplit('-').next().unwrap();
+                let key = if key.is_empty() { "-" } else { key };
+                assert!(
+                    key.chars().count() == 1 || named.contains(&key) || key.starts_with('f'),
+                    "{label}: {}",
+                    b.keys
+                );
+                if let Some(other) = seen.insert(b.keys.clone(), label) {
+                    panic!("{label} and {other} both show {}", b.keys);
+                }
+            }
+        }
+        assert!(seen.contains_key("cmd-\r"), "{seen:?}");
+    }
+
     #[test]
     fn fuzzy_prefers_word_starts_and_runs() {
         assert!(fuzzy("xyz", "File: Save").is_none());
