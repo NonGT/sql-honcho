@@ -401,8 +401,11 @@ mod tests {
                 }) else {
                     continue;
                 };
-                let key = b.keys.rsplit('-').next().unwrap();
-                let key = if key.is_empty() { "-" } else { key };
+                // parsed the way gpui does it
+                let parts: Vec<&str> = b.keys.split_whitespace().collect();
+                assert_eq!(parts.len(), 1, "{label}: {:?}", b.keys);
+                let key = Keystroke::parse(parts[0]).unwrap().key;
+                let key = key.as_str();
                 assert!(
                     key.chars().count() == 1 || named.contains(&key) || key.starts_with('f'),
                     "{label}: {}",
@@ -413,7 +416,7 @@ mod tests {
                 }
             }
         }
-        assert!(seen.contains_key("cmd-\r"), "{seen:?}");
+        assert!(seen.contains_key("cmd-↩"), "{seen:?}");
     }
 
     #[test]

@@ -158,8 +158,10 @@ fn bind(cx: &mut App) {
 /// gpui hands a key's name to the macOS menu as its key equivalent, and
 /// AppKit takes the first letter: cmd-enter showed as ⌘E, and pressing ⌘E
 /// ran the statement instead of explaining it. These come first, so the
-/// menu picks them, with the characters AppKit wants. Nothing in the app
-/// has the "Pane" context, so they're never matched from the keyboard.
+/// menu picks them. Their keys are the symbols AppKit then shows; the real
+/// return and tab characters can't be used, since gpui splits a binding on
+/// whitespace. No key types these, and nothing in the app has the "Pane"
+/// context, so they never fire; the usual bindings still do.
 pub(crate) fn native_menu_keys(p: Platform) -> Vec<Binding> {
     if p != Platform::Mac {
         return Vec::new();
@@ -171,8 +173,8 @@ pub(crate) fn native_menu_keys(p: Platform) -> Vec<Binding> {
             // a bare enter or tab in the menu would take every press of it
             let (mods, key) = b.keys.rsplit_once('-')?;
             let native = match key {
-                "enter" => "\r",
-                "tab" => "\t",
+                "enter" => "↩",
+                "tab" => "⇥",
                 _ => return None,
             };
             Some(Binding {
