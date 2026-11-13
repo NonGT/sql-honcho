@@ -902,7 +902,7 @@ fn switching_away_from_an_open_transaction_asks_first(cx: &mut TestAppContext) {
     wait_for_target(&ws, cx, "app");
     assert!(!cx.has_pending_prompt());
 
-    // "use in this tab" replaces the connection whatever the driver
+    // "connect current tab to this" replaces the connection whatever the driver
     run(&ws, cx, "P-enter");
     let b = ws.read_with(cx, |ws, _| ws.browser().clone());
     b.update(cx, |b, cx| b.act("analytics", "use", cx));

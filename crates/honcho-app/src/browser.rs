@@ -1485,13 +1485,13 @@ fn menu_for(item: &Item) -> Vec<(&'static str, MenuAction)> {
     match item {
         Item::Connection(_) => vec![
             ("New query tab", NewQuery),
-            ("Use in this tab", UseHere),
+            ("Connect current tab to this", UseHere),
             ("Save to project folder…", SaveProject),
             ("Refresh", Refresh),
         ],
         Item::Database(_) => vec![
             ("New query tab", NewQuery),
-            ("Use in this tab", UseHere),
+            ("Connect current tab to this", UseHere),
             ("Save to project folder…", SaveProject),
             ("Refresh", Refresh),
         ],
