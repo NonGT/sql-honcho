@@ -2127,8 +2127,9 @@ impl QueryTab {
     }
 }
 
-/// The UPDATEs and DELETEs a run would make, to agree to first: a title,
-/// and each statement on a line of its own with where it is.
+/// The statements in a run that change data, schema or access, to agree
+/// to first: a title, and each statement on a line of its own with where
+/// it is.
 fn change_warning(
     driver: DriverKind,
     target: &Target,
@@ -2137,25 +2138,34 @@ fn change_warning(
     const SHOWN: usize = 8;
     let found: Vec<_> = script::split(driver, &target.text)
         .into_iter()
-        .filter_map(|s| Some((s.line, script::row_change(s.text)?, s.text)))
+        .filter_map(|s| Some((s.line, script::change_kind(s.text)?, s.text)))
         .collect();
     let title = match found.as_slice() {
         [] => return None,
         [(_, kind, _)] => format!("Run this {kind} on {connection}?"),
         _ => format!(
-            "Run {} statements that change rows on {connection}?",
+            "Run {} statements that change data on {connection}?",
             found.len()
         ),
     };
     let mut detail = Vec::new();
-    for (line, _, text) in found.iter().take(SHOWN) {
+    for (line, kind, text) in found.iter().take(SHOWN) {
         let mut one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if one.chars().count() > 100 {
             one = one.chars().take(99).collect::<String>() + "…";
         }
         detail.push(format!("Line {}: {one}", target.first_line + line));
-        if script::unfiltered_write(text).is_some() {
-            detail.push("    No WHERE: this changes every row in the table.".into());
+        let note = match *kind {
+            _ if script::unfiltered_write(text).is_some() => {
+                "No WHERE: this changes every row in the table."
+            }
+            "TRUNCATE" => "Removes every row in the table.",
+            "DROP" => "Drops it with everything in it.",
+            "CALL" | "EXEC" | "EXECUTE" => "Runs code that may change anything.",
+            _ => "",
+        };
+        if !note.is_empty() {
+            detail.push(format!("    {note}"));
         }
     }
     if found.len() > SHOWN {
@@ -2391,7 +2401,7 @@ mod tests {
     }
 
     #[test]
-    fn change_warning_lists_each_update_and_delete() {
+    fn change_warning_lists_each_change() {
         let target = |text: &str| Target {
             text: text.into(),
             range: 0..0,
@@ -2399,7 +2409,7 @@ mod tests {
             mode: RunMode::Execute,
         };
         let w = |text: &str| change_warning(DriverKind::MySql, &target(text), "prod");
-        assert_eq!(w("select 1;\ninsert into t values (1)"), None);
+        assert_eq!(w("select 1;\ncreate table t (x int)"), None);
 
         let (title, detail) = w("select 1;\nupdate t\n  set a = 1\n  where id = 2").unwrap();
         assert_eq!(title, "Run this UPDATE on prod?");
@@ -2407,11 +2417,20 @@ mod tests {
 
         let (title, detail) =
             w("delete from logs;\nselect 1;\nupdate t set a = 1 where id = 2").unwrap();
-        assert_eq!(title, "Run 2 statements that change rows on prod?");
+        assert_eq!(title, "Run 2 statements that change data on prod?");
         assert_eq!(
             detail,
             "Line 10: delete from logs\n    No WHERE: this changes every row in the table.\n\
              Line 12: update t set a = 1 where id = 2"
+        );
+
+        let (title, detail) = w("insert into t values (1);\ntruncate logs;\ndrop table t").unwrap();
+        assert_eq!(title, "Run 3 statements that change data on prod?");
+        assert_eq!(
+            detail,
+            "Line 10: insert into t values (1)\n\
+             Line 11: truncate logs\n    Removes every row in the table.\n\
+             Line 12: drop table t\n    Drops it with everything in it."
         );
     }
 
