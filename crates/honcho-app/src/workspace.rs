@@ -1236,7 +1236,16 @@ impl Render for Workspace {
             // the workspace's colour along the top, so it's clear whose
             // databases these are
             .when_some(space.and_then(|w| w.color), |d, color| {
-                d.child(div().flex_none().h(px(3.)).bg(connections::color(color)))
+                // with a gap, so it doesn't run into the active tab's line
+                d.child(
+                    div()
+                        .flex_none()
+                        .pb(px(2.))
+                        .bg(Theme::panel())
+                        .border_b_1()
+                        .border_color(Theme::border())
+                        .child(div().h(px(3.)).bg(connections::color(color))),
+                )
             })
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
