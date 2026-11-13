@@ -43,14 +43,18 @@ pub fn unfiltered_write(statement: &str) -> Option<&'static str> {
     (!words.iter().any(|(w, _)| w.eq_ignore_ascii_case("WHERE"))).then_some(kind)
 }
 
-/// Names the statement kind when it changes rows: UPDATE or DELETE, also
-/// as part of a WITH. SELECT ... FOR UPDATE only locks them.
-pub fn row_change(statement: &str) -> Option<&'static str> {
-    let kind = |w: &str| match w.to_ascii_uppercase().as_str() {
-        "UPDATE" => Some("UPDATE"),
-        "DELETE" => Some("DELETE"),
-        _ => None,
-    };
+// Statements that change or remove data, schema or access, or run code
+// that might. CREATE, SET and transaction control are left out: they lose
+// nothing and come up all the time.
+const CHANGES: &[&str] = &[
+    "ALTER", "CALL", "DELETE", "DROP", "EXEC", "EXECUTE", "GRANT", "INSERT", "KILL", "LOAD",
+    "MERGE", "RENAME", "REPLACE", "RESTORE", "REVOKE", "SHUTDOWN", "TRUNCATE", "UPDATE", "UPSERT",
+];
+
+/// Names the statement kind when it changes data, schema or access, also
+/// as part of a WITH. SELECT ... FOR UPDATE only locks rows.
+pub fn change_kind(statement: &str) -> Option<&'static str> {
+    let kind = |w: &str| CHANGES.iter().copied().find(|k| w.eq_ignore_ascii_case(k));
     let words = words(statement);
     let (first, _) = words.first()?;
     if let Some(k) = kind(first) {
@@ -61,7 +65,10 @@ pub fn row_change(statement: &str) -> Option<&'static str> {
     }
     words.windows(2).find_map(|w| {
         let after_for = w[0].0.eq_ignore_ascii_case("FOR");
-        (!w[1].1 && !after_for).then(|| kind(w[1].0)).flatten()
+        let dml = ["INSERT", "UPDATE", "DELETE", "MERGE"];
+        (!w[1].1 && !after_for && dml.iter().any(|k| w[1].0.eq_ignore_ascii_case(k)))
+            .then(|| kind(w[1].0))
+            .flatten()
     })
 }
 
@@ -156,21 +163,32 @@ mod tests {
     }
 
     #[test]
-    fn row_changes() {
-        assert_eq!(row_change("update users set a = 1"), Some("UPDATE"));
-        assert_eq!(row_change("  DELETE FROM t WHERE id = 1"), Some("DELETE"));
+    fn changes() {
+        assert_eq!(change_kind("update users set a = 1"), Some("UPDATE"));
+        assert_eq!(change_kind("  DELETE FROM t WHERE id = 1"), Some("DELETE"));
         assert_eq!(
-            row_change("with old as (select id from t) delete from t using old"),
+            change_kind("with old as (select id from t) delete from t using old"),
             Some("DELETE")
         );
-        assert_eq!(row_change("select * from t for update"), None);
+        assert_eq!(change_kind("insert into t values (1)"), Some("INSERT"));
+        assert_eq!(change_kind("drop table t"), Some("DROP"));
+        assert_eq!(change_kind("TRUNCATE TABLE logs"), Some("TRUNCATE"));
+        assert_eq!(change_kind("alter table t add x int"), Some("ALTER"));
+        assert_eq!(change_kind("merge into t using s on 1=1"), Some("MERGE"));
+        assert_eq!(change_kind("exec dbo.purge"), Some("EXEC"));
+        assert_eq!(change_kind("call refresh()"), Some("CALL"));
+        assert_eq!(change_kind("select * from t for update"), None);
         assert_eq!(
-            row_change("with x as (select 1) select * from x for update"),
+            change_kind("with x as (select 1) select * from x for update"),
             None
         );
-        assert_eq!(row_change("select 'delete' from t"), None);
-        assert_eq!(row_change("insert into t values (1)"), None);
-        assert_eq!(row_change("-- update\nselect 1"), None);
+        assert_eq!(
+            change_kind("with x as (select 1) select replace(a, 'b', 'c') from x"),
+            None
+        );
+        assert_eq!(change_kind("select 'delete' from t"), None);
+        assert_eq!(change_kind("create table t (x int)"), None);
+        assert_eq!(change_kind("-- drop\nselect 1"), None);
     }
 
     #[test]
