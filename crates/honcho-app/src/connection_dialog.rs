@@ -1209,13 +1209,8 @@ impl Render for ConnectionDialog {
 
         let ssh_on = self.draft.ssh.is_some();
         let auth = self.draft.ssh.as_ref().map(|s| s.auth).unwrap_or_default();
-        let ssh_toggle = checkbox(
-            "ssh-on",
-            "Connect through SSH",
-            "Host on General is as the SSH server sees it",
-            ssh_on,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| this.set_ssh(!ssh_on, cx)));
+        let ssh_toggle = checkbox("ssh-on", "Connect through SSH", "", ssh_on)
+            .on_click(cx.listener(move |this, _, _, cx| this.set_ssh(!ssh_on, cx)));
         let auths =
             div()
                 .flex()
@@ -1308,7 +1303,16 @@ impl Render for ConnectionDialog {
                     .child(path_row("Client cert", &self.fields.cert, "browse-cert"))
                     .child(path_row("Client key", &self.fields.key, "browse-key")),
                 Section::Ssh => d
-                    .child(row().child(label("")).child(ssh_toggle))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(ssh_toggle)
+                            .child(div().pl(px(22.)).text_color(Theme::muted()).child(
+                                "The Host on General is then the database's address as the SSH server sees it.",
+                            )),
+                    )
                     .when(ssh_on, |d| {
                         d.child(
                             row()
