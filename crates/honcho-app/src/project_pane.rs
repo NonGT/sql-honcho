@@ -24,6 +24,9 @@ pub enum ProjectEvent {
         origin: Option<Box<(ObjectRef, String)>>,
     },
     Compare(usize),
+    /// Show another of the workspace's projects instead.
+    Pick(PathBuf),
+    OpenAnother,
     Close,
 }
 
@@ -54,6 +57,9 @@ pub struct ProjectPane {
     /// The entries are from this session's comparison, not the last one
     /// saved; only then can they be pulled or applied.
     fresh: bool,
+    /// The workspace's project folders, for the picker.
+    choices: Vec<PathBuf>,
+    picker_open: bool,
 }
 
 impl EventEmitter<ProjectEvent> for ProjectPane {}
@@ -91,6 +97,8 @@ impl ProjectPane {
             selected: None,
             menu: None,
             fresh: false,
+            choices: Vec::new(),
+            picker_open: false,
         };
         // what it was last time, while it's compared again
         if let Some(entries) = this.project.last_status() {
@@ -128,6 +136,17 @@ impl ProjectPane {
             ))));
         };
         connections::open_session(saved, Some(self.project.manifest.database.clone()), cx)
+    }
+
+    pub fn set_choices(&mut self, choices: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.choices = choices;
+        self.picker_open = false;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn choices(&self) -> &[PathBuf] {
+        &self.choices
     }
 
     pub fn is_busy(&self) -> bool {
@@ -629,6 +648,82 @@ impl Render for ProjectPane {
             )
         });
 
+        let picker = self.picker_open.then(|| {
+            let item = |id: gpui::ElementId| {
+                div()
+                    .id(id)
+                    .px_3()
+                    .py_0p5()
+                    .flex()
+                    .gap_2()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(Theme::accent_dim()))
+            };
+            let current = self.project.root.clone();
+            deferred(
+                div()
+                    .id("project-picker-menu")
+                    .occlude()
+                    .absolute()
+                    .top(px(26.))
+                    .left_1()
+                    .right_1()
+                    .py_1()
+                    .bg(Theme::panel())
+                    .border_1()
+                    .border_color(Theme::border())
+                    .rounded_md()
+                    .shadow_lg()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.picker_open = false;
+                        cx.notify();
+                    }))
+                    .children(self.choices.iter().enumerate().map(|(i, root)| {
+                        let name = root
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let parent = root
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let root = root.clone();
+                        item(("project-pick", i).into())
+                            .child(
+                                div()
+                                    .w(px(10.))
+                                    .flex_none()
+                                    .text_color(Theme::accent())
+                                    .child(if root == current { "✓" } else { "" }),
+                            )
+                            .child(div().flex_none().child(name))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_color(Theme::muted())
+                                    .text_size(px(11.))
+                                    .child(parent),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.picker_open = false;
+                                cx.emit(ProjectEvent::Pick(root.clone()));
+                            }))
+                    }))
+                    .child(div().my_1().h(px(1.)).bg(Theme::border()))
+                    .child(
+                        item("project-open-another".into())
+                            .child("Open project folder…")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.picker_open = false;
+                                cx.emit(ProjectEvent::OpenAnother);
+                            })),
+                    ),
+            )
+            .with_priority(1)
+        });
+
         let state = match &self.state {
             State::Idle if self.entries.is_empty() => Some((
                 "Nothing here yet: no routines, triggers or views on the server or in the folder."
@@ -656,12 +751,13 @@ impl Render for ProjectPane {
                 }
             }))
             .on_action(cx.listener(|this, _: &editor_view::Cancel, _, cx| {
-                if this.menu.take().is_some() {
+                if this.menu.take().is_some() || std::mem::take(&mut this.picker_open) {
                     cx.notify();
                 }
             }))
             .child(
                 div()
+                    .relative()
                     .flex_none()
                     .px_2()
                     .py_1p5()
@@ -670,11 +766,27 @@ impl Render for ProjectPane {
                     .gap_1()
                     .border_b_1()
                     .border_color(Theme::border())
+                    .children(picker)
                     .child(
                         div()
                             .flex()
                             .justify_between()
-                            .child(div().overflow_hidden().child(folder))
+                            .child(
+                                div()
+                                    .id("project-picker")
+                                    .flex()
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .rounded_sm()
+                                    .hover(|d| d.bg(Theme::border()))
+                                    .child(div().overflow_hidden().child(folder))
+                                    .child(div().text_color(Theme::muted()).child("▾"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.picker_open = !this.picker_open;
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 div()
                                     .id("project-close")
