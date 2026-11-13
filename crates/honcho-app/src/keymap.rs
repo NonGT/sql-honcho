@@ -16,6 +16,7 @@ use crate::palette::*;
 use crate::query::*;
 use crate::routine_form::*;
 use crate::workspace::*;
+use crate::workspace_form::SaveWorkspace;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
@@ -89,6 +90,7 @@ pub fn bindings(p: Platform) -> Vec<Binding> {
             ("tab", AcceptCompletion, COMPLETING),
             ("escape", DismissCompletion, COMPLETING),
             ("enter", RunRoutineNow, Some("RoutineParam")),
+            ("enter", SaveWorkspace, Some("WorkspaceName")),
             ("tab", NextParam, Some("RoutineParam")),
             ("shift-tab", PrevParam, Some("RoutineParam")),
             ("tab", NextField, CONNECTION_FIELD),

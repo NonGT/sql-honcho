@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{App, Global, Hsla, Task};
 use honcho_config::{
-    Bundled, Cached, ColorTag, ConnectionStore, Keyring, SavedConnection, Secrets,
+    Bundled, Cached, ColorTag, ConnectionStore, Keyring, SavedConnection, Secrets, WorkspaceStore,
 };
 use honcho_db::{ConnectConfig, DbError, DbRuntime, Driver, DriverKind, Session, SessionOptions};
 
@@ -16,6 +16,9 @@ pub struct Connections {
     /// Why the saved file couldn't be read. Saving is refused while set,
     /// so the file isn't replaced by an empty list.
     pub load_error: Option<String>,
+    pub workspaces: WorkspaceStore,
+    /// Why workspaces.json couldn't be read; it isn't saved over while set.
+    pub workspaces_error: Option<String>,
 }
 
 impl Global for Connections {}
@@ -28,13 +31,40 @@ impl Connections {
             Ok(store) => (store, None),
             Err(e) => (ConnectionStore::empty(&path), Some(e.to_string())),
         };
+        let path = path.with_file_name("workspaces.json");
+        let (workspaces, workspaces_error) = match WorkspaceStore::load(&path) {
+            Ok(w) => (w, None),
+            Err(e) => (WorkspaceStore::empty(&path), Some(e.to_string())),
+        };
         let runtime = DbRuntime::new().expect("couldn't start the database runtime");
         cx.set_global(Connections {
             store,
             secrets: platform_secrets(),
             runtime: Arc::new(runtime),
             load_error,
+            workspaces,
+            workspaces_error,
         });
+    }
+
+    /// The saved connections in the active workspace, in saved order.
+    pub fn visible(&self) -> Vec<SavedConnection> {
+        self.store
+            .connections()
+            .iter()
+            .filter(|c| self.workspaces.shows(&c.id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn save_workspaces(&self) -> Result<(), String> {
+        if let Some(e) = &self.workspaces_error {
+            return Err(format!(
+                "Not saving over {}, which couldn't be read: {e}",
+                self.workspaces.path().display()
+            ));
+        }
+        self.workspaces.save().map_err(|e| e.to_string())
     }
 }
 

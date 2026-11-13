@@ -20,6 +20,7 @@ mod routine_form;
 mod tests;
 mod theme;
 mod workspace;
+mod workspace_form;
 
 use std::path::PathBuf;
 

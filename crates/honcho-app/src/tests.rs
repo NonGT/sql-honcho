@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, ClipboardItem, Entity, Focusable, TestAppContext, VisualTestContext};
-use honcho_config::{ColorTag, ConnectionStore, MemorySecrets};
+use honcho_config::{ColorTag, ConnectionStore, MemorySecrets, WorkspaceStore};
 use honcho_db::{DbRuntime, DriverKind};
 
 use crate::connection_dialog::ConnectionDialog;
@@ -35,6 +35,8 @@ fn test_connections(cx: &mut App) {
         secrets: Arc::new(MemorySecrets::default()),
         runtime: Arc::new(DbRuntime::new().unwrap()),
         load_error: None,
+        workspaces: WorkspaceStore::empty(dir.join("workspaces.json")),
+        workspaces_error: None,
     });
 }
 
@@ -2364,4 +2366,66 @@ fn sqlite_explains_but_has_no_analyze(cx: &mut TestAppContext) {
             .any(|m| m == "SQLite has no Explain Analyze. Explain shows the plan."),
         "{messages:?}"
     );
+}
+
+#[gpui::test]
+fn a_workspace_shows_only_its_connections(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    let acme = cx.update(|_, cx| {
+        let state = cx.global_mut::<Connections>();
+        let acme = honcho_config::SavedConnection::new("acme prod", DriverKind::Sqlite);
+        let globex = honcho_config::SavedConnection::new("globex prod", DriverKind::Sqlite);
+        state.store.upsert(acme.clone());
+        state.store.upsert(globex);
+        acme.id
+    });
+    ws.update(cx, |ws, cx| {
+        ws.browser().update(cx, |b, cx| b.connections_changed(cx))
+    });
+    assert_eq!(browser_labels(&ws, cx), ["acme prod", "globex prod"]);
+
+    ws.update_in(cx, |ws, window, cx| ws.edit_workspace(None, window, cx));
+    let form = ws.read_with(cx, |ws, _| ws.workspace_form().unwrap().clone());
+    form.update(cx, |f, cx| f.fill("Acme", &[&acme], cx));
+    press(cx, "enter");
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |ws, _| ws.workspace_form().is_none()));
+    assert_eq!(browser_labels(&ws, cx), ["acme prod"]);
+
+    // made while in Acme, so it's Acme's
+    press(cx, "P-shift-c");
+    let d = dialog(&ws, cx).unwrap();
+    d.update_in(cx, |d, window, cx| {
+        d.new_connection(window, cx);
+        d.set_driver(DriverKind::Fake);
+    });
+    fill(cx, ["fake db", "", "", "dev", "", "app"]);
+    press(cx, "enter");
+    wait_until(cx, |cx| dialog(&ws, cx).is_none());
+    let b = ws.read_with(cx, |ws, _| ws.browser().clone());
+    wait_until(cx, |cx| {
+        b.read_with(cx, |b, _| b.is_idle() && b.labels().len() > 2)
+    });
+    let labels = browser_labels(&ws, cx);
+    assert!(labels.contains(&"fake db".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"globex prod".to_string()), "{labels:?}");
+    let in_acme = cx.update(|_, cx| {
+        let state = cx.global::<Connections>();
+        state.workspaces.active().unwrap().connections.len()
+    });
+    assert_eq!(in_acme, 2);
+
+    // its session stays open while the others show
+    ws.update(cx, |ws, cx| ws.switch_workspace(None, cx));
+    let labels = browser_labels(&ws, cx);
+    for name in ["acme prod", "globex prod", "fake db"] {
+        assert!(labels.contains(&name.to_string()), "{labels:?}");
+    }
+    assert_eq!(b.read_with(cx, |b, cx| b.open_connections(cx).len()), 1);
+
+    let saved = std::fs::read_to_string(
+        cx.update(|_, cx| cx.global::<Connections>().workspaces.path().to_path_buf()),
+    )
+    .unwrap();
+    assert!(saved.contains("\"Acme\""), "{saved}");
 }

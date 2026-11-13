@@ -2,6 +2,7 @@
 //! go to the OS credential store.
 
 mod secrets;
+mod workspaces;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -12,6 +13,7 @@ use honcho_db::{ConnectConfig, DriverKind, TlsConfig};
 use serde::{Deserialize, Serialize};
 
 pub use secrets::{Bundled, Cached, Keyring, MemorySecrets, SecretError, Secrets};
+pub use workspaces::{SavedWorkspace, WorkspaceStore};
 
 const FILE_VERSION: u32 = 1;
 
@@ -291,35 +293,38 @@ impl ConnectionStore {
         Some(self.connections.remove(ix))
     }
 
-    /// Writes to a temp file and renames it over the old one, so a crash
-    /// mid-save can't leave half a file.
     pub fn save(&self) -> Result<(), ConfigError> {
-        let io = |source| ConfigError::Io {
-            path: self.path.clone(),
-            source,
-        };
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir).map_err(io)?;
         let file = File {
             version: FILE_VERSION,
             connections: self.connections.clone(),
         };
         let json = serde_json::to_string_pretty(&file).expect("connections serialize");
-        let mut tmp = tempfile_in(dir).map_err(io)?;
-        tmp.1.write_all(json.as_bytes()).map_err(io)?;
-        tmp.1.sync_all().map_err(io)?;
-        drop(tmp.1);
-        std::fs::rename(&tmp.0, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp.0);
-            io(e)
-        })
+        write_atomically(&self.path, &json)
     }
 }
 
-fn tempfile_in(dir: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
-    let path = dir.join(format!(".connections-{}.tmp", uuid::Uuid::new_v4()));
-    let file = std::fs::File::create(&path)?;
-    Ok((path, file))
+/// Writes to a temp file and renames it over the old one, so a crash
+/// mid-save can't leave half a file.
+fn write_atomically(path: &Path, text: &str) -> Result<(), ConfigError> {
+    let io = |source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    let tmp = dir.join(format!(".sql-honcho-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = std::fs::File::create(&tmp).map_err(io)?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&tmp, path)
+        });
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        io(e)
+    })
 }
 
 #[cfg(test)]
