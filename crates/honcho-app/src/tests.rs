@@ -2501,3 +2501,40 @@ fn each_workspace_keeps_its_own_projects(cx: &mut TestAppContext) {
     });
     assert_eq!(left, [a.path(), b.path()]);
 }
+
+#[gpui::test]
+fn each_workspace_keeps_its_own_tabs(cx: &mut TestAppContext) {
+    let (ws, cx) = open(cx, vec![]);
+    cx.simulate_input("select 'all'");
+    press(cx, "P-n");
+    cx.simulate_input("select 'all 2'");
+    let acme = cx.update(|_, cx| {
+        let state = cx.global_mut::<Connections>();
+        let w = honcho_config::SavedWorkspace::new("Acme");
+        state.workspaces.upsert(w.clone());
+        w.id
+    });
+    let switch = |id: Option<&str>, cx: &mut VisualTestContext| {
+        ws.update_in(cx, |ws, window, cx| ws.switch_workspace(id, window, cx))
+    };
+
+    // a workspace starts with one empty tab
+    switch(Some(&acme), cx);
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), 1);
+    assert_eq!(text(&ws, cx), "");
+    cx.simulate_input("select 'acme'");
+
+    // and each comes back as it was left, the same tab active
+    switch(None, cx);
+    assert_eq!(ws.read_with(cx, |ws, _| ws.tab_count()), 2);
+    assert_eq!(text(&ws, cx), "select 'all 2'");
+    switch(Some(&acme), cx);
+    assert_eq!(text(&ws, cx), "select 'acme'");
+
+    // closing the window counts unsaved tabs in every workspace
+    assert_eq!(ws.read_with(cx, |ws, cx| ws.unsaved(cx)), 3);
+    let can_close = ws.update_in(cx, |ws, window, cx| ws.should_close(window, cx));
+    assert!(!can_close);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+}

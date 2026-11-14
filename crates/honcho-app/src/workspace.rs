@@ -56,6 +56,9 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     tabs: Vec<Entity<EditorView>>,
     active: usize,
+    /// The tabs of the workspaces not shown, by workspace id ("" for All),
+    /// with which one was active.
+    stashed: HashMap<String, (Vec<Entity<EditorView>>, usize)>,
     next_untitled: usize,
     find: Entity<FindBar>,
     subscriptions: Vec<Subscription>,
@@ -98,6 +101,7 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active: 0,
+            stashed: HashMap::new(),
             next_untitled: 1,
             subscriptions: vec![cx.observe(&find, |_, _, cx| cx.notify())],
             discard_confirmed: false,
@@ -152,8 +156,19 @@ impl Workspace {
         &self.find
     }
 
+    #[cfg(test)]
+    pub(crate) fn unsaved(&self, cx: &App) -> usize {
+        self.dirty_count(cx)
+    }
+
+    /// Unsaved tabs in every workspace.
     fn dirty_count(&self, cx: &App) -> usize {
-        self.tabs.iter().filter(|t| t.read(cx).is_dirty()).count()
+        let hidden = self.stashed.values().flat_map(|(tabs, _)| tabs);
+        self.tabs
+            .iter()
+            .chain(hidden)
+            .filter(|t| t.read(cx).is_dirty())
+            .count()
     }
 
     /// Run `then` right away if nothing is unsaved, otherwise after the
@@ -745,12 +760,25 @@ impl Workspace {
                 self.open_database_file(path, window, cx);
                 continue;
             }
-            if let Some(ix) = self
-                .tabs
-                .iter()
-                .position(|t| t.read(cx).path.as_deref() == Some(path.as_path()))
-            {
+            let open_here = |t: &Entity<EditorView>| t.read(cx).path.as_deref() == Some(&path);
+            if let Some(ix) = self.tabs.iter().position(open_here) {
                 self.activate(ix, window, cx);
+                continue;
+            }
+            // open in another workspace: move it here rather than have two
+            // editors saving the same file
+            let elsewhere = self.stashed.values_mut().find_map(|(tabs, active)| {
+                let ix = tabs.iter().position(open_here)?;
+                let tab = tabs.remove(ix);
+                if *active > ix || *active >= tabs.len() {
+                    *active = active.saturating_sub(1);
+                }
+                Some(tab)
+            });
+            if let Some(tab) = elsewhere {
+                self.stashed.retain(|_, (tabs, _)| !tabs.is_empty());
+                self.tabs.push(tab);
+                self.activate(self.tabs.len() - 1, window, cx);
                 continue;
             }
             let text = match std::fs::read(&path) {
@@ -1720,9 +1748,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.switcher_open = false;
+        let before = scope_key(cx);
         let state = cx.global_mut::<connections::Connections>();
         state.workspaces.set_active(id);
         let _ = state.save_workspaces();
+        let after = scope_key(cx);
+        if after != before {
+            let tabs = std::mem::take(&mut self.tabs);
+            self.stashed.insert(before, (tabs, self.active));
+            match self.stashed.remove(&after) {
+                Some((tabs, active)) => {
+                    self.tabs = tabs;
+                    self.activate(active, window, cx);
+                }
+                None => self.new_tab(String::new(), None, window, cx),
+            }
+        }
         self.browser.update(cx, |b, cx| b.connections_changed(cx));
         self.show_scope_project(window, cx);
         cx.notify();
@@ -1781,11 +1822,22 @@ impl Workspace {
                 return;
             }
             this.update_in(cx, |this, window, cx| {
+                this.switch_workspace(None, window, cx);
                 let state = cx.global_mut::<connections::Connections>();
                 state.workspaces.remove(&space.id);
                 let _ = state.save_workspaces();
                 forget_scope(&space.id, cx);
-                this.switch_workspace(None, window, cx);
+                // its tabs join All's rather than vanish
+                if let Some((tabs, _)) = this.stashed.remove(&space.id) {
+                    for tab in tabs {
+                        if !tab.read(cx).is_pristine() {
+                            this.tabs.push(tab);
+                        } else if let Some(q) = this.query_tabs.remove(&tab.entity_id()) {
+                            q.update(cx, |q, cx| q.disconnect(cx));
+                        }
+                    }
+                    cx.notify();
+                }
             })
             .ok();
         })
