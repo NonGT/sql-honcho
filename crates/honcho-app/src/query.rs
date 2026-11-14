@@ -2162,6 +2162,7 @@ fn change_warning(
             "TRUNCATE" => "Removes every row in the table.",
             "DROP" => "Drops it with everything in it.",
             "CALL" | "EXEC" | "EXECUTE" => "Runs code that may change anything.",
+            "CREATE OR REPLACE" | "CREATE OR ALTER" => "Overwrites whatever already has this name.",
             _ => "",
         };
         if !note.is_empty() {
@@ -2422,6 +2423,14 @@ mod tests {
             detail,
             "Line 10: delete from logs\n    No WHERE: this changes every row in the table.\n\
              Line 12: update t set a = 1 where id = 2"
+        );
+
+        let (title, detail) = w("create or replace view v as select 1").unwrap();
+        assert_eq!(title, "Run this CREATE OR REPLACE on prod?");
+        assert_eq!(
+            detail,
+            "Line 10: create or replace view v as select 1\n    \
+             Overwrites whatever already has this name."
         );
 
         let (title, detail) = w("insert into t values (1);\ntruncate logs;\ndrop table t").unwrap();

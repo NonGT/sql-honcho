@@ -44,8 +44,8 @@ pub fn unfiltered_write(statement: &str) -> Option<&'static str> {
 }
 
 // Statements that change or remove data, schema or access, or run code
-// that might. CREATE, SET and transaction control are left out: they lose
-// nothing and come up all the time.
+// that might. A plain CREATE, SET and transaction control are left out:
+// they lose nothing and come up all the time.
 const CHANGES: &[&str] = &[
     "ALTER", "CALL", "DELETE", "DROP", "EXEC", "EXECUTE", "GRANT", "INSERT", "KILL", "LOAD",
     "MERGE", "RENAME", "REPLACE", "RESTORE", "REVOKE", "SHUTDOWN", "TRUNCATE", "UPDATE", "UPSERT",
@@ -59,6 +59,18 @@ pub fn change_kind(statement: &str) -> Option<&'static str> {
     let (first, _) = words.first()?;
     if let Some(k) = kind(first) {
         return Some(k);
+    }
+    // these overwrite whatever has the name, or drop and remake a table
+    if first.eq_ignore_ascii_case("CREATE") {
+        let or = words
+            .get(1)
+            .is_some_and(|(w, _)| w.eq_ignore_ascii_case("OR"));
+        let next = words.get(2).map(|(w, _)| w.to_ascii_uppercase());
+        return match next.as_deref() {
+            Some("REPLACE") if or => Some("CREATE OR REPLACE"),
+            Some("ALTER") if or => Some("CREATE OR ALTER"),
+            _ => None,
+        };
     }
     if !first.eq_ignore_ascii_case("WITH") {
         return None;
@@ -188,6 +200,15 @@ mod tests {
         );
         assert_eq!(change_kind("select 'delete' from t"), None);
         assert_eq!(change_kind("create table t (x int)"), None);
+        assert_eq!(
+            change_kind("CREATE OR REPLACE VIEW v AS SELECT 1"),
+            Some("CREATE OR REPLACE")
+        );
+        assert_eq!(
+            change_kind("create or alter procedure p as select 1"),
+            Some("CREATE OR ALTER")
+        );
+        assert_eq!(change_kind("create orders_view as select 1"), None);
         assert_eq!(change_kind("-- drop\nselect 1"), None);
     }
 
