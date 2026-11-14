@@ -29,6 +29,7 @@ use honcho_db::{DriverKind, ObjectRef, RoutineParam};
 actions!(
     workspace,
     [
+        About,
         NewFile,
         OpenFile,
         Save,
@@ -1112,6 +1113,19 @@ impl Workspace {
         cx.notify();
     }
 
+    fn about(&mut self, _: &About, window: &mut Window, cx: &mut Context<Self>) {
+        let title = format!("sql-honcho {}", env!("CARGO_PKG_VERSION"));
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &title,
+            Some("A native SQL editor and database client.\nhttps://github.com/NonGT/sql-honcho"),
+            &["OK"],
+            cx,
+        );
+        cx.background_spawn(async move { answer.await.ok() })
+            .detach();
+    }
+
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_discard("Quit", window, cx, |_, _, cx| cx.quit());
     }
@@ -1380,6 +1394,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::quit))
+            .on_action(cx.listener(Self::about))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|this, _: &find::Find, window, cx| {

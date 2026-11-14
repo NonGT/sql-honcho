@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=sql-honcho
+Comment=SQL editor and database client
+Exec=sql-honcho %F
+Icon=sql-honcho
+Terminal=false
+Categories=Development;Database;
+MimeType=application/sql;text/x-sql;application/vnd.sqlite3;
+StartupWMClass=sql-honcho

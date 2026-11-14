@@ -59,7 +59,14 @@ pub fn menus(p: Platform) -> Vec<MenuSpec> {
     }
     let mut out = Vec::new();
     if p == Platform::Mac {
-        out.push(menu!("sql-honcho", [("Quit sql-honcho", workspace::Quit)]));
+        out.push(menu!(
+            "sql-honcho",
+            [
+                ("About sql-honcho", workspace::About),
+                -,
+                ("Quit sql-honcho", workspace::Quit)
+            ]
+        ));
     }
     out.push(file);
     out.extend([
@@ -131,6 +138,10 @@ pub fn menus(p: Platform) -> Vec<MenuSpec> {
             ]
         ),
     ]);
+    // macOS has it in the app menu
+    if p != Platform::Mac {
+        out.push(menu!("Help", [("About sql-honcho", workspace::About)]));
+    }
     out
 }
 

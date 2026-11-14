@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+description = "A native SQL editor and database client"
+homepage = "https://github.com/NonGT/sql-honcho"
+build = "build.rs"
+
 [[bin]]
 name = "sql-honcho"
 path = "src/main.rs"
@@ -28,6 +32,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 gpui = "0.2.2"
+
+[build-dependencies]
+winresource = "0.1"
 
 [dev-dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["test-support"] }
