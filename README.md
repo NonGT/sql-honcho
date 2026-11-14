@@ -9,6 +9,25 @@ SQL Server and SQLite. So far it has the editor, saved connections, a
 schema browser, and running queries against all four with results in a
 grid.
 
+## Install
+
+Builds for macOS, Windows and Linux are on the
+[releases page](https://github.com/NonGT/sql-honcho/releases).
+
+- macOS: open the .dmg and drag sql-honcho to Applications. It isn't
+  signed with a Developer ID yet, so the first time right-click it and pick
+  Open. The Keychain asks again for saved passwords after each update.
+- Windows: run the setup .exe, or unzip the .zip anywhere. SmartScreen
+  warns about an unknown publisher; pick More info, then Run anyway.
+- Linux: install the .deb (`sudo apt install ./sql-honcho_*.deb`), or make
+  the AppImage executable and run it, or unpack the tarball, which has the
+  usual `bin` and `share` layout.
+
+To make a release, bump `version` in the root Cargo.toml and push a matching
+tag (`v0.1.0`). The Release workflow builds everything and attaches it to a
+GitHub release. The scripts it runs are in `packaging/` and work locally
+too.
+
 ## Build
 
     cargo run --release -- path/to/file.sql

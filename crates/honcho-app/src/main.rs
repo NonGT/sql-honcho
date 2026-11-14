@@ -1,3 +1,6 @@
+// no console window behind the app in release builds
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod browser;
 mod catalog;
 mod commands;
@@ -80,6 +83,8 @@ fn main() {
                 // weston don't draw any, which leaves the window without a title
                 // bar. Only Linux looks at this.
                 window_decorations: Some(WindowDecorations::Client),
+                // matches the .desktop file, so docks show its icon
+                app_id: Some("sql-honcho".into()),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| Workspace::new(paths, window, cx)),
